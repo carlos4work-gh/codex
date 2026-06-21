@@ -2,6 +2,7 @@ use anyhow::Context;
 use clap::Parser;
 use serde_json::Value;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::SystemTime;
@@ -40,6 +41,9 @@ struct SniffStats {
     file_change_count: usize,
     reasoning_count: usize,
     error_count: usize,
+    failed_command_count: usize,
+    large_output_command_count: usize,
+    command_profile: BTreeMap<String, usize>,
     final_message: Option<String>,
     thread_id: Option<String>,
 }
@@ -54,6 +58,7 @@ pub(crate) async fn run_memythos_sniff(cmd: MemythosSniffCommand) -> anyhow::Res
     let stderr_path = output_dir.join("codex-stderr.log");
     let memo_path = output_dir.join("agent-observation-trace.md");
     let summary_path = output_dir.join("run-summary.json");
+    let observation_summary_path = output_dir.join("agent-observation-summary.json");
 
     let mut raw_file = fs::File::create(&raw_path)
         .await
@@ -134,6 +139,14 @@ pub(crate) async fn run_memythos_sniff(cmd: MemythosSniffCommand) -> anyhow::Res
             .with_context(|| format!("failed to write {}", memo_path.display()))?;
     }
 
+    let observation_summary = render_observation_summary(&stats, &observations);
+    fs::write(
+        &observation_summary_path,
+        serde_json::to_vec_pretty(&observation_summary)?,
+    )
+    .await
+    .with_context(|| format!("failed to write {}", observation_summary_path.display()))?;
+
     let summary = json!({
         "status": status.code(),
         "success": status.success(),
@@ -141,6 +154,7 @@ pub(crate) async fn run_memythos_sniff(cmd: MemythosSniffCommand) -> anyhow::Res
         "raw_events": raw_path,
         "stderr_log": stderr_path,
         "observation_memo": if cmd.no_memo { Value::Null } else { json!(memo_path) },
+        "observation_summary": observation_summary_path,
         "thread_id": stats.thread_id,
         "event_count": stats.event_count,
         "command_count": stats.command_count,
@@ -149,6 +163,9 @@ pub(crate) async fn run_memythos_sniff(cmd: MemythosSniffCommand) -> anyhow::Res
         "file_change_count": stats.file_change_count,
         "reasoning_count": stats.reasoning_count,
         "error_count": stats.error_count,
+        "failed_command_count": stats.failed_command_count,
+        "large_output_command_count": stats.large_output_command_count,
+        "command_profile": stats.command_profile,
         "final_message": stats.final_message,
     });
     fs::write(&summary_path, serde_json::to_vec_pretty(&summary)?)
@@ -241,6 +258,23 @@ fn observe_item_event(event_type: &str, event: &Value, stats: &mut SniffStats) -
         "command_execution" => {
             if event_type == "item.completed" {
                 stats.command_count += 1;
+                let command_kind =
+                    classify_command(item.get("command").and_then(Value::as_str).unwrap_or(""));
+                *stats
+                    .command_profile
+                    .entry(command_kind.to_string())
+                    .or_default() += 1;
+                if item.get("exit_code").and_then(Value::as_i64).unwrap_or(0) != 0 {
+                    stats.failed_command_count += 1;
+                }
+                if item
+                    .get("aggregated_output")
+                    .and_then(Value::as_str)
+                    .map(|output| output.len() > 12_000)
+                    .unwrap_or(false)
+                {
+                    stats.large_output_command_count += 1;
+                }
             }
             let command = item.get("command").and_then(Value::as_str).unwrap_or("");
             let status = item.get("status").and_then(Value::as_str).unwrap_or("");
@@ -337,6 +371,25 @@ fn render_memo(stats: &SniffStats, observations: &[String]) -> String {
         stats.reasoning_count
     ));
     memo.push_str(&format!("- Errors: {}\n", stats.error_count));
+    memo.push_str(&format!(
+        "- Failed commands: {}\n",
+        stats.failed_command_count
+    ));
+    memo.push_str(&format!(
+        "- Large-output commands: {}\n",
+        stats.large_output_command_count
+    ));
+    if !stats.command_profile.is_empty() {
+        memo.push_str("- Command profile:");
+        for (kind, count) in &stats.command_profile {
+            memo.push_str(&format!(" {kind}={count}"));
+        }
+        memo.push('\n');
+    }
+    memo.push_str("\n## Behavior Review\n\n");
+    for note in behavior_review_notes(stats) {
+        memo.push_str(&format!("- {note}\n"));
+    }
     memo.push_str("\n## Observation Timeline\n\n");
     for (index, observation) in observations.iter().enumerate() {
         memo.push_str(&format!("{}. {}\n", index + 1, observation));
@@ -347,6 +400,97 @@ fn render_memo(stats: &SniffStats, observations: &[String]) -> String {
         memo.push('\n');
     }
     memo
+}
+
+fn render_observation_summary(stats: &SniffStats, observations: &[String]) -> Value {
+    json!({
+        "thread_id": stats.thread_id,
+        "event_count": stats.event_count,
+        "counts": {
+            "commands": stats.command_count,
+            "failed_commands": stats.failed_command_count,
+            "large_output_commands": stats.large_output_command_count,
+            "mcp_tools": stats.mcp_tool_count,
+            "web_searches": stats.web_search_count,
+            "file_changes": stats.file_change_count,
+            "reasoning_summaries": stats.reasoning_count,
+            "errors": stats.error_count,
+        },
+        "command_profile": stats.command_profile,
+        "behavior_review": behavior_review_notes(stats),
+        "timeline_preview": observations.iter().take(80).collect::<Vec<_>>(),
+        "timeline_truncated": observations.len() > 80,
+        "final_message_preview": stats.final_message.as_deref().map(preview),
+    })
+}
+
+fn behavior_review_notes(stats: &SniffStats) -> Vec<String> {
+    let mut notes = Vec::new();
+    if stats.command_count == 0 {
+        notes.push("No shell/tool activity was observed; this run cannot validate implementation behavior.".to_string());
+    }
+    if stats.failed_command_count > 0 {
+        notes.push(format!(
+            "{} command(s) failed; review whether the agent recovered intentionally or drifted.",
+            stats.failed_command_count
+        ));
+    }
+    if stats.large_output_command_count > 0 {
+        notes.push(format!(
+            "{} command(s) produced very large output; raw evidence is preserved, but the agent likely needs tighter exploration scope.",
+            stats.large_output_command_count
+        ));
+    }
+    if stats.command_count > 20 {
+        notes.push(format!(
+            "{} commands were executed; for scouting tasks this is high and should be constrained by a probe budget.",
+            stats.command_count
+        ));
+    }
+    if stats.web_search_count == 0 && stats.mcp_tool_count == 0 {
+        notes.push(
+            "No external/domain tools were used; conclusions are based only on local repository inspection."
+                .to_string(),
+        );
+    }
+    if stats.file_change_count == 0 {
+        notes.push("No file changes were made.".to_string());
+    }
+    if notes.is_empty() {
+        notes.push(
+            "No obvious execution hygiene issue was detected from the event stream.".to_string(),
+        );
+    }
+    notes
+}
+
+fn classify_command(command: &str) -> &'static str {
+    let normalized = command.to_ascii_lowercase();
+    if normalized.contains("git status") || normalized.contains("git diff") {
+        "repo_state"
+    } else if normalized.contains("rg ")
+        || normalized.contains("grep ")
+        || normalized.contains("find ")
+        || normalized.contains("ls ")
+    {
+        "discovery"
+    } else if normalized.contains("sed ")
+        || normalized.contains("nl ")
+        || normalized.contains("cat ")
+        || normalized.contains("tail ")
+        || normalized.contains("head ")
+    {
+        "read"
+    } else if normalized.contains("npm run")
+        || normalized.contains("cargo ")
+        || normalized.contains("node --test")
+    {
+        "verification"
+    } else if normalized.contains("apply_patch") || normalized.contains("python") {
+        "mutation_or_scripting"
+    } else {
+        "other"
+    }
 }
 
 fn compact_json(value: &Value) -> String {
