@@ -32,6 +32,7 @@ use crate::request_processors::GitRequestProcessor;
 use crate::request_processors::InitializeRequestProcessor;
 use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
+use crate::request_processors::MemythosRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
@@ -201,6 +202,7 @@ pub(crate) struct MessageProcessor {
     initialize_processor: InitializeRequestProcessor,
     marketplace_processor: MarketplaceRequestProcessor,
     mcp_processor: McpRequestProcessor,
+    memythos_processor: MemythosRequestProcessor,
     plugin_processor: PluginRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
@@ -461,6 +463,7 @@ impl MessageProcessor {
             outgoing.clone(),
             config_manager.clone(),
         );
+        let memythos_processor = MemythosRequestProcessor::new();
         let plugin_processor = PluginRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -570,6 +573,7 @@ impl MessageProcessor {
             initialize_processor,
             marketplace_processor,
             mcp_processor,
+            memythos_processor,
             plugin_processor,
             remote_control_processor,
             search_processor,
@@ -1165,6 +1169,18 @@ impl MessageProcessor {
                 self.thread_goal_processor
                     .thread_goal_clear(request_id.clone(), params)
                     .await
+            }
+            ClientRequest::MemythosLayerCreate { params, .. } => {
+                self.memythos_processor.layer_create(params).await.map(Some)
+            }
+            ClientRequest::MemythosLayerList { params, .. } => {
+                self.memythos_processor.layer_list(params).await.map(Some)
+            }
+            ClientRequest::MemythosArenaCreate { params, .. } => {
+                self.memythos_processor.arena_create(params).await.map(Some)
+            }
+            ClientRequest::MemythosArenaList { params, .. } => {
+                self.memythos_processor.arena_list(params).await.map(Some)
             }
             ClientRequest::ThreadMetadataUpdate { params, .. } => {
                 self.thread_processor.thread_metadata_update(params).await

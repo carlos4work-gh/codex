@@ -545,6 +545,30 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadGoalClearResponse,
     },
+    #[experimental("memythos/layer/create")]
+    MemythosLayerCreate => "memythos/layer/create" {
+        params: v2::MemythosLayerCreateParams,
+        serialization: global("memythos"),
+        response: v2::MemythosLayerCreateResponse,
+    },
+    #[experimental("memythos/layer/list")]
+    MemythosLayerList => "memythos/layer/list" {
+        params: v2::MemythosLayerListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosLayerListResponse,
+    },
+    #[experimental("memythos/arena/create")]
+    MemythosArenaCreate => "memythos/arena/create" {
+        params: v2::MemythosArenaCreateParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaCreateResponse,
+    },
+    #[experimental("memythos/arena/list")]
+    MemythosArenaList => "memythos/arena/list" {
+        params: v2::MemythosArenaListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosArenaListResponse,
+    },
     ThreadMetadataUpdate => "thread/metadata/update" {
         params: v2::ThreadMetadataUpdateParams,
         serialization: thread_id(params.thread_id),
