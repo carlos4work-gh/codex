@@ -1170,6 +1170,16 @@ impl MessageProcessor {
                     .thread_goal_clear(request_id.clone(), params)
                     .await
             }
+            ClientRequest::MemythosRuntimeHealth { params, .. } => self
+                .memythos_processor
+                .runtime_health(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRuntimeClose { params, .. } => self
+                .memythos_processor
+                .runtime_close(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosLayerCreate { params, .. } => {
                 self.memythos_processor.layer_create(params).await.map(Some)
             }
@@ -1182,6 +1192,19 @@ impl MessageProcessor {
             ClientRequest::MemythosArenaList { params, .. } => {
                 self.memythos_processor.arena_list(params).await.map(Some)
             }
+            ClientRequest::MemythosThreadAttach { params, .. } => self
+                .memythos_processor
+                .thread_attach(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosThreadList { params, .. } => {
+                self.memythos_processor.thread_list(params).await.map(Some)
+            }
+            ClientRequest::MemythosTelemetryList { params, .. } => self
+                .memythos_processor
+                .telemetry_list(params)
+                .await
+                .map(Some),
             ClientRequest::ThreadMetadataUpdate { params, .. } => {
                 self.thread_processor.thread_metadata_update(params).await
             }

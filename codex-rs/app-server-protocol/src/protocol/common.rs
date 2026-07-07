@@ -545,6 +545,18 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadGoalClearResponse,
     },
+    #[experimental("memythos/runtime/health")]
+    MemythosRuntimeHealth => "memythos/runtime/health" {
+        params: v2::MemythosRuntimeHealthParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosRuntimeHealthResponse,
+    },
+    #[experimental("memythos/runtime/close")]
+    MemythosRuntimeClose => "memythos/runtime/close" {
+        params: v2::MemythosRuntimeCloseParams,
+        serialization: global("memythos"),
+        response: v2::MemythosRuntimeCloseResponse,
+    },
     #[experimental("memythos/layer/create")]
     MemythosLayerCreate => "memythos/layer/create" {
         params: v2::MemythosLayerCreateParams,
@@ -568,6 +580,24 @@ client_request_definitions! {
         params: v2::MemythosArenaListParams,
         serialization: global_shared_read("memythos"),
         response: v2::MemythosArenaListResponse,
+    },
+    #[experimental("memythos/thread/attach")]
+    MemythosThreadAttach => "memythos/thread/attach" {
+        params: v2::MemythosThreadAttachParams,
+        serialization: global("memythos"),
+        response: v2::MemythosThreadAttachResponse,
+    },
+    #[experimental("memythos/thread/list")]
+    MemythosThreadList => "memythos/thread/list" {
+        params: v2::MemythosThreadListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosThreadListResponse,
+    },
+    #[experimental("memythos/telemetry/list")]
+    MemythosTelemetryList => "memythos/telemetry/list" {
+        params: v2::MemythosTelemetryListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosTelemetryListResponse,
     },
     ThreadMetadataUpdate => "thread/metadata/update" {
         params: v2::ThreadMetadataUpdateParams,
