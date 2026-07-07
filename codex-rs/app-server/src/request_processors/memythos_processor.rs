@@ -25,6 +25,7 @@ use codex_app_server_protocol::MemythosTelemetryListParams;
 use codex_app_server_protocol::MemythosTelemetryListResponse;
 use codex_app_server_protocol::MemythosTelemetryRef;
 use codex_app_server_protocol::MemythosTelemetryRefKind;
+use codex_app_server_protocol::MemythosTelemetrySource;
 use codex_app_server_protocol::MemythosThreadAttachParams;
 use codex_app_server_protocol::MemythosThreadAttachResponse;
 use codex_app_server_protocol::MemythosThreadAttachment;
@@ -125,6 +126,9 @@ impl MemythosRequestProcessor {
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::RuntimeState,
+            MemythosTelemetrySource::MemythosRuntimeState,
+            None,
+            None,
             None,
             None,
             None,
@@ -166,7 +170,10 @@ impl MemythosRequestProcessor {
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::LayerState,
+            MemythosTelemetrySource::MemythosRuntimeState,
             Some(layer.layer_id.clone()),
+            None,
+            None,
             None,
             None,
             MemythosEventChannel::StateTransition,
@@ -213,8 +220,11 @@ impl MemythosRequestProcessor {
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::ArenaState,
+            MemythosTelemetrySource::MemythosRuntimeState,
             Some(arena.layer_id.clone()),
             Some(arena.arena_id.clone()),
+            None,
+            None,
             None,
             MemythosEventChannel::StateTransition,
             format!("Arena {} created.", arena.arena_id),
@@ -281,9 +291,12 @@ impl MemythosRequestProcessor {
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::ThreadAttachment,
+            MemythosTelemetrySource::MemythosRuntimeState,
             Some(layer_id),
             Some(attachment.arena_id.clone()),
             Some(attachment.thread_id.clone()),
+            None,
+            None,
             MemythosEventChannel::StateTransition,
             format!(
                 "Thread {} attached to arena {}.",
@@ -347,13 +360,41 @@ impl MemythosRequestProcessor {
         Ok(MemythosTelemetryListResponse { telemetry_refs }.into())
     }
 
-    fn push_telemetry_ref(
+    pub(crate) async fn record_native_telemetry_ref(
         &self,
-        state: &mut MemythosRuntimeState,
         kind: MemythosTelemetryRefKind,
         layer_id: Option<String>,
         arena_id: Option<String>,
         thread_id: Option<String>,
+        native_event_ref: String,
+        detail_ref: Option<String>,
+        channel: MemythosEventChannel,
+        summary: String,
+    ) {
+        let mut state = self.state.lock().await;
+        self.push_native_telemetry_ref(
+            &mut state,
+            kind,
+            layer_id,
+            arena_id,
+            thread_id,
+            native_event_ref,
+            detail_ref,
+            channel,
+            summary,
+        );
+    }
+
+    fn push_telemetry_ref(
+        &self,
+        state: &mut MemythosRuntimeState,
+        kind: MemythosTelemetryRefKind,
+        source: MemythosTelemetrySource,
+        layer_id: Option<String>,
+        arena_id: Option<String>,
+        thread_id: Option<String>,
+        native_event_ref: Option<String>,
+        detail_ref: Option<String>,
         channel: MemythosEventChannel,
         summary: String,
     ) {
@@ -361,18 +402,63 @@ impl MemythosRequestProcessor {
         state.telemetry_refs.push(MemythosTelemetryRef {
             telemetry_ref_id,
             kind,
+            source,
             layer_id,
             arena_id,
             thread_id,
+            native_event_ref,
+            detail_ref,
+            channel,
+            summary: compact_summary(summary),
+        });
+    }
+
+    fn push_native_telemetry_ref(
+        &self,
+        state: &mut MemythosRuntimeState,
+        kind: MemythosTelemetryRefKind,
+        layer_id: Option<String>,
+        arena_id: Option<String>,
+        thread_id: Option<String>,
+        native_event_ref: String,
+        detail_ref: Option<String>,
+        channel: MemythosEventChannel,
+        summary: String,
+    ) {
+        self.push_telemetry_ref(
+            state,
+            kind,
+            MemythosTelemetrySource::AppServerNative,
+            layer_id,
+            arena_id,
+            thread_id,
+            Some(native_event_ref),
+            detail_ref,
             channel,
             summary,
-        });
+        );
     }
 
     fn next_id(&self, prefix: &str, counter: &AtomicU64) -> String {
         let next = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         format!("{prefix}_{next}")
     }
+}
+
+const MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS: usize = 240;
+
+fn compact_summary(summary: String) -> String {
+    let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS {
+        return normalized;
+    }
+
+    let mut compacted: String = normalized
+        .chars()
+        .take(MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS.saturating_sub(1))
+        .collect();
+    compacted.push('…');
+    compacted
 }
 
 #[cfg(test)]
@@ -548,5 +634,46 @@ mod tests {
             telemetry_response.telemetry_refs[0].kind,
             MemythosTelemetryRefKind::ThreadAttachment
         );
+        assert_eq!(
+            telemetry_response.telemetry_refs[0].source,
+            MemythosTelemetrySource::MemythosRuntimeState
+        );
+        assert_eq!(telemetry_response.telemetry_refs[0].native_event_ref, None);
+        assert_eq!(telemetry_response.telemetry_refs[0].detail_ref, None);
+    }
+
+    #[tokio::test]
+    async fn native_telemetry_refs_are_source_tagged_and_compact() {
+        let processor = MemythosRequestProcessor::new();
+        let mut state = processor.state.lock().await;
+        let long_summary = "tool payload ".repeat(80);
+
+        processor.push_native_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::RuntimeState,
+            Some("mem_layer_1".to_string()),
+            Some("mem_arena_1".to_string()),
+            Some("thread_a".to_string()),
+            "event:turn:42".to_string(),
+            Some("app-server://events/turn/42".to_string()),
+            MemythosEventChannel::TechnicalDetail,
+            long_summary,
+        );
+
+        let telemetry_ref = state.telemetry_refs.last().expect("telemetry ref exists");
+        assert_eq!(
+            telemetry_ref.source,
+            MemythosTelemetrySource::AppServerNative
+        );
+        assert_eq!(
+            telemetry_ref.native_event_ref.as_deref(),
+            Some("event:turn:42")
+        );
+        assert_eq!(
+            telemetry_ref.detail_ref.as_deref(),
+            Some("app-server://events/turn/42")
+        );
+        assert!(telemetry_ref.summary.chars().count() <= MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS);
+        assert!(telemetry_ref.summary.ends_with('…'));
     }
 }

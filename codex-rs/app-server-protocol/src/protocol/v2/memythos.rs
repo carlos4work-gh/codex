@@ -70,6 +70,15 @@ pub enum MemythosTelemetryRefKind {
     ThreadAttachment,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum MemythosTelemetrySource {
+    AppServerNative,
+    MemythosRuntimeState,
+    SyntheticFixture,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -120,12 +129,17 @@ pub struct MemythosThreadAttachment {
 pub struct MemythosTelemetryRef {
     pub telemetry_ref_id: String,
     pub kind: MemythosTelemetryRefKind,
+    pub source: MemythosTelemetrySource,
     #[ts(optional = nullable)]
     pub layer_id: Option<String>,
     #[ts(optional = nullable)]
     pub arena_id: Option<String>,
     #[ts(optional = nullable)]
     pub thread_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub native_event_ref: Option<String>,
+    #[ts(optional = nullable)]
+    pub detail_ref: Option<String>,
     pub channel: MemythosEventChannel,
     pub summary: String,
 }
