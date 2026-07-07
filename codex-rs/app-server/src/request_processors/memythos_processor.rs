@@ -360,31 +360,6 @@ impl MemythosRequestProcessor {
         Ok(MemythosTelemetryListResponse { telemetry_refs }.into())
     }
 
-    pub(crate) async fn record_native_telemetry_ref(
-        &self,
-        kind: MemythosTelemetryRefKind,
-        layer_id: Option<String>,
-        arena_id: Option<String>,
-        thread_id: Option<String>,
-        native_event_ref: String,
-        detail_ref: Option<String>,
-        channel: MemythosEventChannel,
-        summary: String,
-    ) {
-        let mut state = self.state.lock().await;
-        self.push_native_telemetry_ref(
-            &mut state,
-            kind,
-            layer_id,
-            arena_id,
-            thread_id,
-            native_event_ref,
-            detail_ref,
-            channel,
-            summary,
-        );
-    }
-
     fn push_telemetry_ref(
         &self,
         state: &mut MemythosRuntimeState,
@@ -413,7 +388,8 @@ impl MemythosRequestProcessor {
         });
     }
 
-    fn push_native_telemetry_ref(
+    #[cfg(test)]
+    fn push_native_telemetry_ref_for_test(
         &self,
         state: &mut MemythosRuntimeState,
         kind: MemythosTelemetryRefKind,
@@ -648,7 +624,7 @@ mod tests {
         let mut state = processor.state.lock().await;
         let long_summary = "tool payload ".repeat(80);
 
-        processor.push_native_telemetry_ref(
+        processor.push_native_telemetry_ref_for_test(
             &mut state,
             MemythosTelemetryRefKind::RuntimeState,
             Some("mem_layer_1".to_string()),
