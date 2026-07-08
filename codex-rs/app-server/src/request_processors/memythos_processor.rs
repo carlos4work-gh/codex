@@ -360,6 +360,35 @@ impl MemythosRequestProcessor {
         Ok(MemythosTelemetryListResponse { telemetry_refs }.into())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn record_native_thread_event(
+        &self,
+        thread_id: &str,
+        native_event_ref: String,
+        detail_ref: Option<String>,
+        channel: MemythosEventChannel,
+        summary: String,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        let Some((layer_id, arena_id)) = find_attachment_context(&state, thread_id) else {
+            return false;
+        };
+
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::RuntimeState,
+            MemythosTelemetrySource::AppServerNative,
+            Some(layer_id),
+            Some(arena_id),
+            Some(thread_id.to_string()),
+            Some(native_event_ref),
+            detail_ref,
+            channel,
+            summary,
+        );
+        true
+    }
+
     fn push_telemetry_ref(
         &self,
         state: &mut MemythosRuntimeState,
@@ -422,6 +451,18 @@ impl MemythosRequestProcessor {
 }
 
 const MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS: usize = 240;
+
+fn find_attachment_context(
+    state: &MemythosRuntimeState,
+    thread_id: &str,
+) -> Option<(String, String)> {
+    let attachment = state
+        .thread_attachments
+        .values()
+        .find(|attachment| attachment.thread_id == thread_id)?;
+    let arena = state.arenas.get(&attachment.arena_id)?;
+    Some((arena.layer_id.clone(), attachment.arena_id.clone()))
+}
 
 fn compact_summary(summary: String) -> String {
     let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -651,5 +692,99 @@ mod tests {
         );
         assert!(telemetry_ref.summary.chars().count() <= MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS);
         assert!(telemetry_ref.summary.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn records_native_thread_events_for_attached_threads_only() {
+        let processor = MemythosRequestProcessor::new();
+        let layer_response = processor
+            .layer_create(MemythosLayerCreateParams {
+                name: "BPM E2E".to_string(),
+                kind: MemythosLayerKind::BpmEndToEnd,
+                parent_layer_id: None,
+                objective: "Resolve an end-to-end process segment.".to_string(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosLayerCreate(layer_response) = layer_response else {
+            panic!("expected MemythosLayerCreate response");
+        };
+        let arena_response = processor
+            .arena_create(MemythosArenaCreateParams {
+                layer_id: layer_response.layer.layer_id.clone(),
+                name: "Node contract debate".to_string(),
+                kind: MemythosArenaKind::Debate,
+                objective: "Close the node contract.".to_string(),
+                participant_ids: vec![],
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaCreate(arena_response) = arena_response else {
+            panic!("expected MemythosArenaCreate response");
+        };
+        processor
+            .thread_attach(MemythosThreadAttachParams {
+                arena_id: arena_response.arena.arena_id.clone(),
+                thread_id: "thread_a".to_string(),
+                role_id: Some("peer".to_string()),
+                stance_id: Some("skeptic".to_string()),
+                objective: Some("Challenge the implementation PID.".to_string()),
+                contract_ref: Some("implementation-pid.md".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let unattached_recorded = processor
+            .record_native_thread_event(
+                "thread_missing",
+                "thread:missing/turn:1/event:1".to_string(),
+                None,
+                MemythosEventChannel::TechnicalDetail,
+                "Ignored unattached thread event.".to_string(),
+            )
+            .await;
+        assert!(!unattached_recorded);
+
+        let attached_recorded = processor
+            .record_native_thread_event(
+                "thread_a",
+                "thread:thread_a/turn:1/event:2".to_string(),
+                Some("app-server://threads/thread_a/turns/1/events/2".to_string()),
+                MemythosEventChannel::HumanHighlight,
+                "Thread reported a useful debate highlight.".to_string(),
+            )
+            .await;
+        assert!(attached_recorded);
+
+        let telemetry_response = processor
+            .telemetry_list(MemythosTelemetryListParams {
+                layer_id: Some(layer_response.layer.layer_id),
+                arena_id: Some(arena_response.arena.arena_id),
+                thread_id: Some("thread_a".to_string()),
+                limit: Some(10),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosTelemetryList(telemetry_response) = telemetry_response
+        else {
+            panic!("expected MemythosTelemetryList response");
+        };
+        let native_refs: Vec<_> = telemetry_response
+            .telemetry_refs
+            .iter()
+            .filter(|telemetry_ref| {
+                telemetry_ref.source == MemythosTelemetrySource::AppServerNative
+            })
+            .collect();
+        assert_eq!(native_refs.len(), 1);
+        assert_eq!(
+            native_refs[0].native_event_ref.as_deref(),
+            Some("thread:thread_a/turn:1/event:2")
+        );
+        assert_eq!(
+            native_refs[0].detail_ref.as_deref(),
+            Some("app-server://threads/thread_a/turns/1/events/2")
+        );
+        assert_eq!(native_refs[0].channel, MemythosEventChannel::HumanHighlight);
     }
 }
