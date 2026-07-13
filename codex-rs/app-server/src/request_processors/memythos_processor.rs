@@ -61,6 +61,7 @@ pub(crate) struct MemythosRequestProcessor {
 }
 
 impl MemythosRequestProcessor {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::new_for_transport(AppServerRpcTransport::Stdio)
     }
