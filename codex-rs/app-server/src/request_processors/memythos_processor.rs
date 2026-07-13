@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use codex_analytics::AppServerRpcTransport;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::MemythosArena;
@@ -38,6 +39,11 @@ use crate::error_code::invalid_params;
 struct MemythosRuntimeState {
     runtime_id: String,
     lifecycle_state: MemythosRuntimeLifecycleState,
+    runtime_family: String,
+    connection_mode: String,
+    transport_owner: String,
+    transport_id: Option<String>,
+    daemon_runtime_verified: bool,
     degraded_reasons: Vec<String>,
     layers: HashMap<String, MemythosLayer>,
     arenas: HashMap<String, MemythosArena>,
@@ -56,10 +62,36 @@ pub(crate) struct MemythosRequestProcessor {
 
 impl MemythosRequestProcessor {
     pub(crate) fn new() -> Self {
+        Self::new_for_transport(AppServerRpcTransport::Stdio)
+    }
+
+    pub(crate) fn new_for_transport(rpc_transport: AppServerRpcTransport) -> Self {
+        let (connection_mode, transport_owner, transport_id, daemon_runtime_verified) =
+            match rpc_transport {
+                AppServerRpcTransport::Stdio => ("stdio", "app_server", Some("stdio"), false),
+                AppServerRpcTransport::Websocket => (
+                    "daemon_websocket",
+                    "app_server_daemon",
+                    Some("websocket"),
+                    true,
+                ),
+                AppServerRpcTransport::InProcess => (
+                    "in_process",
+                    "app_server_embedded",
+                    Some("in_process"),
+                    false,
+                ),
+            };
+
         Self {
             state: Arc::new(Mutex::new(MemythosRuntimeState {
                 runtime_id: "memythos_app_server_runtime".to_string(),
                 lifecycle_state: MemythosRuntimeLifecycleState::Ready,
+                runtime_family: "app_server".to_string(),
+                connection_mode: connection_mode.to_string(),
+                transport_owner: transport_owner.to_string(),
+                transport_id: transport_id.map(str::to_string),
+                daemon_runtime_verified,
                 degraded_reasons: Vec::new(),
                 layers: HashMap::new(),
                 arenas: HashMap::new(),
@@ -83,7 +115,11 @@ impl MemythosRequestProcessor {
             runtime_id: state.runtime_id.clone(),
             protocol_version: "memythos.experimental.v1".to_string(),
             lifecycle_state: state.lifecycle_state,
-            connection_mode: "app_server_native".to_string(),
+            runtime_family: state.runtime_family.clone(),
+            connection_mode: state.connection_mode.clone(),
+            transport_owner: state.transport_owner.clone(),
+            transport_id: state.transport_id.clone(),
+            daemon_runtime_verified: state.daemon_runtime_verified,
             capabilities: vec![
                 "memythos/runtime/health".to_string(),
                 "memythos/runtime/close".to_string(),
@@ -554,6 +590,11 @@ mod tests {
             health_response.lifecycle_state,
             MemythosRuntimeLifecycleState::Ready
         );
+        assert_eq!(health_response.runtime_family, "app_server");
+        assert_eq!(health_response.connection_mode, "stdio");
+        assert_eq!(health_response.transport_owner, "app_server");
+        assert_eq!(health_response.transport_id.as_deref(), Some("stdio"));
+        assert!(!health_response.daemon_runtime_verified);
         assert!(
             health_response
                 .capabilities
@@ -575,6 +616,25 @@ mod tests {
             close_response.lifecycle_state,
             MemythosRuntimeLifecycleState::ClosedCleanly
         );
+    }
+
+    #[tokio::test]
+    async fn reports_daemon_transport_when_runtime_is_websocket() {
+        let processor =
+            MemythosRequestProcessor::new_for_transport(AppServerRpcTransport::Websocket);
+        let health_response = processor
+            .runtime_health(MemythosRuntimeHealthParams::default())
+            .await
+            .unwrap();
+
+        let ClientResponsePayload::MemythosRuntimeHealth(health_response) = health_response else {
+            panic!("expected MemythosRuntimeHealth response");
+        };
+
+        assert_eq!(health_response.connection_mode, "daemon_websocket");
+        assert_eq!(health_response.transport_owner, "app_server_daemon");
+        assert_eq!(health_response.transport_id.as_deref(), Some("websocket"));
+        assert!(health_response.daemon_runtime_verified);
     }
 
     #[tokio::test]

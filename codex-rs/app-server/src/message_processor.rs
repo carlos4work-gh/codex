@@ -463,7 +463,7 @@ impl MessageProcessor {
             outgoing.clone(),
             config_manager.clone(),
         );
-        let memythos_processor = MemythosRequestProcessor::new();
+        let memythos_processor = MemythosRequestProcessor::new_for_transport(rpc_transport);
         let plugin_processor = PluginRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),

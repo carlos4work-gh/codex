@@ -151,7 +151,12 @@ pub struct MemythosRuntimeHealthResponse {
     pub runtime_id: String,
     pub protocol_version: String,
     pub lifecycle_state: MemythosRuntimeLifecycleState,
+    pub runtime_family: String,
     pub connection_mode: String,
+    pub transport_owner: String,
+    #[ts(optional = nullable)]
+    pub transport_id: Option<String>,
+    pub daemon_runtime_verified: bool,
     pub capabilities: Vec<String>,
     pub active_layers: usize,
     pub active_arenas: usize,
