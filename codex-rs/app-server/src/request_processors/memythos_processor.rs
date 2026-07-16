@@ -11,6 +11,14 @@ use codex_app_server_protocol::MemythosArenaCreateResponse;
 use codex_app_server_protocol::MemythosArenaLifecycleState;
 use codex_app_server_protocol::MemythosArenaListParams;
 use codex_app_server_protocol::MemythosArenaListResponse;
+use codex_app_server_protocol::MemythosArenaMessageDelivery;
+use codex_app_server_protocol::MemythosArenaMessageListParams;
+use codex_app_server_protocol::MemythosArenaMessageListResponse;
+use codex_app_server_protocol::MemythosArenaMessageSendParams;
+use codex_app_server_protocol::MemythosArenaMessageSendResponse;
+use codex_app_server_protocol::MemythosArenaParent;
+use codex_app_server_protocol::MemythosArenaParentRegisterParams;
+use codex_app_server_protocol::MemythosArenaParentRegisterResponse;
 use codex_app_server_protocol::MemythosEventChannel;
 use codex_app_server_protocol::MemythosLayer;
 use codex_app_server_protocol::MemythosLayerCreateParams;
@@ -48,6 +56,8 @@ struct MemythosRuntimeState {
     layers: HashMap<String, MemythosLayer>,
     arenas: HashMap<String, MemythosArena>,
     thread_attachments: HashMap<String, MemythosThreadAttachment>,
+    arena_parents: HashMap<String, MemythosArenaParent>,
+    arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
     telemetry_refs: Vec<MemythosTelemetryRef>,
 }
 
@@ -57,6 +67,7 @@ pub(crate) struct MemythosRequestProcessor {
     next_layer_id: Arc<AtomicU64>,
     next_arena_id: Arc<AtomicU64>,
     next_attachment_id: Arc<AtomicU64>,
+    next_delivery_id: Arc<AtomicU64>,
     next_telemetry_ref_id: Arc<AtomicU64>,
 }
 
@@ -97,11 +108,14 @@ impl MemythosRequestProcessor {
                 layers: HashMap::new(),
                 arenas: HashMap::new(),
                 thread_attachments: HashMap::new(),
+                arena_parents: HashMap::new(),
+                arena_message_deliveries: Vec::new(),
                 telemetry_refs: Vec::new(),
             })),
             next_layer_id: Arc::new(AtomicU64::default()),
             next_arena_id: Arc::new(AtomicU64::default()),
             next_attachment_id: Arc::new(AtomicU64::default()),
+            next_delivery_id: Arc::new(AtomicU64::default()),
             next_telemetry_ref_id: Arc::new(AtomicU64::default()),
         }
     }
@@ -130,6 +144,9 @@ impl MemythosRequestProcessor {
                 "memythos/arena/list".to_string(),
                 "memythos/thread/attach".to_string(),
                 "memythos/thread/list".to_string(),
+                "memythos/arena/parent/register".to_string(),
+                "memythos/arena/message".to_string(),
+                "memythos/arena/message/list".to_string(),
                 "memythos/telemetry/list".to_string(),
             ],
             active_layers: state.layers.len(),
@@ -366,6 +383,151 @@ impl MemythosRequestProcessor {
         Ok(MemythosThreadListResponse { attachments }.into())
     }
 
+    pub(crate) async fn arena_parent_register(
+        &self,
+        params: MemythosArenaParentRegisterParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let mut state = self.state.lock().await;
+        let Some(arena) = state.arenas.get(&params.arena_id) else {
+            return Err(invalid_params(format!(
+                "unknown arena id: {}",
+                params.arena_id
+            )));
+        };
+        let layer_id = arena.layer_id.clone();
+        let has_attachment = state.thread_attachments.values().any(|attachment| {
+            attachment.arena_id == params.arena_id && attachment.thread_id == params.thread_id
+        });
+        if !has_attachment {
+            return Err(invalid_params(format!(
+                "thread {} is not attached to arena {}",
+                params.thread_id, params.arena_id
+            )));
+        }
+
+        let key = arena_parent_key(&params.arena_id, &params.thread_id);
+        let parent = MemythosArenaParent {
+            arena_id: params.arena_id.clone(),
+            thread_id: params.thread_id,
+            parent_role: params.parent_role,
+            stance_profile: params.stance_profile,
+            authority_scope: params.authority_scope,
+            lifecycle_state: MemythosArenaLifecycleState::Running,
+        };
+        state.arena_parents.insert(key, parent.clone());
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::ArenaParent,
+            MemythosTelemetrySource::MemythosRuntimeState,
+            Some(layer_id),
+            Some(parent.arena_id.clone()),
+            Some(parent.thread_id.clone()),
+            None,
+            None,
+            MemythosEventChannel::StateTransition,
+            format!(
+                "Arena parent {} registered as {} in arena {}.",
+                parent.thread_id, parent.parent_role, parent.arena_id
+            ),
+        );
+
+        Ok(MemythosArenaParentRegisterResponse { parent }.into())
+    }
+
+    pub(crate) async fn arena_message_send(
+        &self,
+        params: MemythosArenaMessageSendParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let mut state = self.state.lock().await;
+        let Some(arena) = state.arenas.get(&params.message.arena_id) else {
+            return Err(invalid_params(format!(
+                "unknown arena id: {}",
+                params.message.arena_id
+            )));
+        };
+        let layer_id = arena.layer_id.clone();
+        let sender_key = arena_parent_key(
+            &params.message.arena_id,
+            &params.message.from_parent_thread_id,
+        );
+        let receiver_key =
+            arena_parent_key(&params.message.arena_id, &params.message.to_parent_thread_id);
+        if !state.arena_parents.contains_key(&sender_key) {
+            return Err(invalid_params(format!(
+                "sender parent {} is not registered in arena {}",
+                params.message.from_parent_thread_id, params.message.arena_id
+            )));
+        }
+        if !state.arena_parents.contains_key(&receiver_key) {
+            return Err(invalid_params(format!(
+                "receiver parent {} is not registered in arena {}",
+                params.message.to_parent_thread_id, params.message.arena_id
+            )));
+        }
+
+        let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
+        let event_refs = vec![format!(
+            "memythos://arenas/{}/rounds/{}/messages/{}",
+            params.message.arena_id, params.message.round_id, params.message.message_id
+        )];
+        let delivery = MemythosArenaMessageDelivery {
+            delivery_id,
+            message_id: params.message.message_id,
+            status: "delivered".to_string(),
+            sender_thread_id: params.message.from_parent_thread_id,
+            receiver_thread_id: params.message.to_parent_thread_id,
+            arena_id: params.message.arena_id,
+            round_id: params.message.round_id,
+            memory_replay_required: false,
+            event_refs,
+        };
+        state.arena_message_deliveries.push(delivery.clone());
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::ArenaMessage,
+            MemythosTelemetrySource::MemythosRuntimeState,
+            Some(layer_id),
+            Some(delivery.arena_id.clone()),
+            Some(delivery.receiver_thread_id.clone()),
+            delivery.event_refs.first().cloned(),
+            None,
+            MemythosEventChannel::HumanHighlight,
+            format!(
+                "Arena message {} delivered from {} to {}.",
+                delivery.message_id, delivery.sender_thread_id, delivery.receiver_thread_id
+            ),
+        );
+
+        Ok(MemythosArenaMessageSendResponse { delivery }.into())
+    }
+
+    pub(crate) async fn arena_message_list(
+        &self,
+        params: MemythosArenaMessageListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state = self.state.lock().await;
+        if !state.arenas.contains_key(&params.arena_id) {
+            return Err(invalid_params(format!(
+                "unknown arena id: {}",
+                params.arena_id
+            )));
+        }
+        let deliveries = state
+            .arena_message_deliveries
+            .iter()
+            .filter(|delivery| delivery.arena_id == params.arena_id)
+            .filter(|delivery| {
+                params
+                    .round_id
+                    .as_ref()
+                    .map_or(true, |round_id| &delivery.round_id == round_id)
+            })
+            .cloned()
+            .collect();
+
+        Ok(MemythosArenaMessageListResponse { deliveries }.into())
+    }
+
     pub(crate) async fn telemetry_list(
         &self,
         params: MemythosTelemetryListParams,
@@ -501,6 +663,10 @@ fn find_attachment_context(
     Some((arena.layer_id.clone(), attachment.arena_id.clone()))
 }
 
+fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
+    format!("{arena_id}::{thread_id}")
+}
+
 fn compact_summary(summary: String) -> String {
     let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.chars().count() <= MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS {
@@ -518,6 +684,7 @@ fn compact_summary(summary: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_app_server_protocol::MemythosArenaMessage;
     use codex_app_server_protocol::MemythosArenaKind;
     use codex_app_server_protocol::MemythosLayerKind;
 
@@ -847,5 +1014,126 @@ mod tests {
             Some("app-server://threads/thread_a/turns/1/events/2")
         );
         assert_eq!(native_refs[0].channel, MemythosEventChannel::HumanHighlight);
+    }
+
+    #[tokio::test]
+    async fn registers_arena_parents_and_delivers_parent_messages() {
+        let processor = MemythosRequestProcessor::new();
+        let layer_response = processor
+            .layer_create(MemythosLayerCreateParams {
+                name: "BPM E2E".to_string(),
+                kind: MemythosLayerKind::BpmEndToEnd,
+                parent_layer_id: None,
+                objective: "Resolve an end-to-end process segment.".to_string(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosLayerCreate(layer_response) = layer_response else {
+            panic!("expected MemythosLayerCreate response");
+        };
+        let arena_response = processor
+            .arena_create(MemythosArenaCreateParams {
+                layer_id: layer_response.layer.layer_id.clone(),
+                name: "Parent peer arena".to_string(),
+                kind: MemythosArenaKind::Debate,
+                objective: "Let parent peers challenge ownership and routing.".to_string(),
+                participant_ids: vec![],
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaCreate(arena_response) = arena_response else {
+            panic!("expected MemythosArenaCreate response");
+        };
+        for thread_id in ["thread_growth", "thread_risk"] {
+            processor
+                .thread_attach(MemythosThreadAttachParams {
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    role_id: Some("bettor".to_string()),
+                    stance_id: Some(thread_id.to_string()),
+                    objective: Some("Debate the BPM node contract.".to_string()),
+                    contract_ref: Some("arena-contract.json".to_string()),
+                })
+                .await
+                .unwrap();
+        }
+
+        for (thread_id, stance) in [("thread_growth", "growth"), ("thread_risk", "risk")] {
+            let response = processor
+                .arena_parent_register(MemythosArenaParentRegisterParams {
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    parent_role: "bettor".to_string(),
+                    stance_profile: stance.to_string(),
+                    authority_scope: vec!["peer_debate".to_string()],
+                })
+                .await
+                .unwrap();
+            let ClientResponsePayload::MemythosArenaParentRegister(response) = response else {
+                panic!("expected MemythosArenaParentRegister response");
+            };
+            assert_eq!(response.parent.lifecycle_state, MemythosArenaLifecycleState::Running);
+        }
+
+        let send_response = processor
+            .arena_message_send(MemythosArenaMessageSendParams {
+                message: MemythosArenaMessage {
+                    message_id: "message-001".to_string(),
+                    case_id: "case-001".to_string(),
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    round_id: "round-001".to_string(),
+                    from_parent_thread_id: "thread_growth".to_string(),
+                    from_parent_role: "bettor".to_string(),
+                    to_parent_thread_id: "thread_risk".to_string(),
+                    to_parent_role: "bettor".to_string(),
+                    message_kind: "peer_objection".to_string(),
+                    human_summary: "Challenge ambiguous ownership before tactical execution."
+                        .to_string(),
+                    context_packet_ref: "artifact://context/minimal".to_string(),
+                    artifact_refs: vec!["arena-contract.json".to_string()],
+                    requires_response: true,
+                    response_contract: Some("peer_objection_response".to_string()),
+                },
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaMessageSend(send_response) = send_response else {
+            panic!("expected MemythosArenaMessageSend response");
+        };
+        assert_eq!(send_response.delivery.status, "delivered");
+        assert_eq!(send_response.delivery.memory_replay_required, false);
+        assert_eq!(send_response.delivery.receiver_thread_id, "thread_risk");
+
+        let list_response = processor
+            .arena_message_list(MemythosArenaMessageListParams {
+                arena_id: arena_response.arena.arena_id.clone(),
+                round_id: Some("round-001".to_string()),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaMessageList(list_response) = list_response else {
+            panic!("expected MemythosArenaMessageList response");
+        };
+        assert_eq!(list_response.deliveries.len(), 1);
+        assert_eq!(list_response.deliveries[0].message_id, "message-001");
+
+        let telemetry_response = processor
+            .telemetry_list(MemythosTelemetryListParams {
+                layer_id: Some(layer_response.layer.layer_id),
+                arena_id: Some(arena_response.arena.arena_id),
+                thread_id: Some("thread_risk".to_string()),
+                limit: Some(10),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosTelemetryList(telemetry_response) = telemetry_response
+        else {
+            panic!("expected MemythosTelemetryList response");
+        };
+        assert!(telemetry_response.telemetry_refs.iter().any(|telemetry_ref| {
+            telemetry_ref.kind == MemythosTelemetryRefKind::ArenaMessage
+                && telemetry_ref.channel == MemythosEventChannel::HumanHighlight
+                && telemetry_ref.native_event_ref.is_some()
+        }));
     }
 }

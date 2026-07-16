@@ -68,6 +68,8 @@ pub enum MemythosTelemetryRefKind {
     LayerState,
     ArenaState,
     ThreadAttachment,
+    ArenaParent,
+    ArenaMessage,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -289,6 +291,104 @@ pub struct MemythosThreadListParams {
 #[ts(export_to = "v2/")]
 pub struct MemythosThreadListResponse {
     pub attachments: Vec<MemythosThreadAttachment>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaParent {
+    pub arena_id: String,
+    pub thread_id: String,
+    pub parent_role: String,
+    pub stance_profile: String,
+    pub authority_scope: Vec<String>,
+    pub lifecycle_state: MemythosArenaLifecycleState,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaParentRegisterParams {
+    pub arena_id: String,
+    pub thread_id: String,
+    pub parent_role: String,
+    pub stance_profile: String,
+    #[serde(default)]
+    pub authority_scope: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaParentRegisterResponse {
+    pub parent: MemythosArenaParent,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessage {
+    pub message_id: String,
+    pub case_id: String,
+    pub arena_id: String,
+    pub round_id: String,
+    pub from_parent_thread_id: String,
+    pub from_parent_role: String,
+    pub to_parent_thread_id: String,
+    pub to_parent_role: String,
+    pub message_kind: String,
+    pub human_summary: String,
+    pub context_packet_ref: String,
+    #[serde(default)]
+    pub artifact_refs: Vec<String>,
+    pub requires_response: bool,
+    #[ts(optional = nullable)]
+    pub response_contract: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageDelivery {
+    pub delivery_id: String,
+    pub message_id: String,
+    pub status: String,
+    pub sender_thread_id: String,
+    pub receiver_thread_id: String,
+    pub arena_id: String,
+    pub round_id: String,
+    pub memory_replay_required: bool,
+    pub event_refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageSendParams {
+    pub message: MemythosArenaMessage,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageSendResponse {
+    pub delivery: MemythosArenaMessageDelivery,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageListParams {
+    pub arena_id: String,
+    #[ts(optional = nullable)]
+    pub round_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageListResponse {
+    pub deliveries: Vec<MemythosArenaMessageDelivery>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]

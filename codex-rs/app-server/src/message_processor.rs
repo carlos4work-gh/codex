@@ -1200,6 +1200,21 @@ impl MessageProcessor {
             ClientRequest::MemythosThreadList { params, .. } => {
                 self.memythos_processor.thread_list(params).await.map(Some)
             }
+            ClientRequest::MemythosArenaParentRegister { params, .. } => self
+                .memythos_processor
+                .arena_parent_register(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaMessageSend { params, .. } => self
+                .memythos_processor
+                .arena_message_send(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaMessageList { params, .. } => self
+                .memythos_processor
+                .arena_message_list(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosTelemetryList { params, .. } => self
                 .memythos_processor
                 .telemetry_list(params)

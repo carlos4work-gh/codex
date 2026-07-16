@@ -593,6 +593,24 @@ client_request_definitions! {
         serialization: global_shared_read("memythos"),
         response: v2::MemythosThreadListResponse,
     },
+    #[experimental("memythos/arena/parent/register")]
+    MemythosArenaParentRegister => "memythos/arena/parent/register" {
+        params: v2::MemythosArenaParentRegisterParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaParentRegisterResponse,
+    },
+    #[experimental("memythos/arena/message")]
+    MemythosArenaMessageSend => "memythos/arena/message" {
+        params: v2::MemythosArenaMessageSendParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaMessageSendResponse,
+    },
+    #[experimental("memythos/arena/message/list")]
+    MemythosArenaMessageList => "memythos/arena/message/list" {
+        params: v2::MemythosArenaMessageListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosArenaMessageListResponse,
+    },
     #[experimental("memythos/telemetry/list")]
     MemythosTelemetryList => "memythos/telemetry/list" {
         params: v2::MemythosTelemetryListParams,
