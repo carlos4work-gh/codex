@@ -923,8 +923,17 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::TokenCount(token_count_event) => {
-            handle_token_count_event(conversation_id, event_turn_id, token_count_event, &outgoing)
-                .await;
+            handle_token_count_event(
+                conversation_id,
+                event_turn_id,
+                token_count_event,
+                &outgoing,
+                memythos_processor
+                    .lock()
+                    .ok()
+                    .and_then(|processor| processor.clone()),
+            )
+            .await;
         }
         EventMsg::Error(ev) => {
             thread_watch_manager
@@ -1646,17 +1655,25 @@ async fn handle_token_count_event(
     turn_id: String,
     token_count_event: TokenCountEvent,
     outgoing: &ThreadScopedOutgoingMessageSender,
+    memythos_processor: Option<MemythosRequestProcessor>,
 ) {
     let TokenCountEvent { info, rate_limits } = token_count_event;
     if let Some(token_usage) = info.map(ThreadTokenUsage::from) {
+        let native_thread_id = conversation_id.to_string();
+        let native_turn_id = turn_id.clone();
         let notification = ThreadTokenUsageUpdatedNotification {
-            thread_id: conversation_id.to_string(),
+            thread_id: native_thread_id.clone(),
             turn_id,
             token_usage,
         };
         outgoing
             .send_server_notification(ServerNotification::ThreadTokenUsageUpdated(notification))
             .await;
+        if let Some(memythos_processor) = memythos_processor {
+            memythos_processor
+                .record_native_token_usage(&native_thread_id, &native_turn_id)
+                .await;
+        }
     }
     if let Some(rate_limits) = rate_limits {
         outgoing
@@ -3778,6 +3795,7 @@ mod tests {
                 rate_limits: Some(rate_limits),
             },
             &outgoing,
+            None,
         )
         .await;
 
@@ -3835,6 +3853,7 @@ mod tests {
                 rate_limits: None,
             },
             &outgoing,
+            None,
         )
         .await;
 

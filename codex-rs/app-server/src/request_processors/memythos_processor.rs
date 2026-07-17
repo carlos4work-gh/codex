@@ -82,6 +82,7 @@ struct MemythosRuntimeState {
     thread_attachments: HashMap<String, MemythosThreadAttachment>,
     arena_parents: HashMap<String, MemythosArenaParent>,
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
+    native_token_usage_refs: HashMap<String, String>,
     telemetry_refs: Vec<MemythosTelemetryRef>,
 }
 
@@ -491,6 +492,7 @@ impl MemythosRequestProcessor {
                 thread_attachments: HashMap::new(),
                 arena_parents: HashMap::new(),
                 arena_message_deliveries: Vec::new(),
+                native_token_usage_refs: HashMap::new(),
                 telemetry_refs: Vec::new(),
             })),
             peer_parent_delivery_adapter,
@@ -915,6 +917,7 @@ impl MemythosRequestProcessor {
             .cloned()
             .collect::<Vec<_>>();
         let deliveries = state.arena_message_deliveries.clone();
+        let native_token_usage_refs = state.native_token_usage_refs.clone();
         drop(state);
 
         let mut continuities = Vec::with_capacity(parents.len());
@@ -926,6 +929,7 @@ impl MemythosRequestProcessor {
             continuities.push(build_parent_thread_continuity(
                 &parent,
                 &deliveries,
+                &native_token_usage_refs,
                 goal_snapshot,
             ));
         }
@@ -1118,6 +1122,33 @@ impl MemythosRequestProcessor {
         matched_delivery
     }
 
+    pub(crate) async fn record_native_token_usage(&self, thread_id: &str, turn_id: &str) -> bool {
+        let mut state = self.state.lock().await;
+        let Some((layer_id, arena_id)) = find_attachment_context(&state, thread_id) else {
+            return false;
+        };
+
+        let native_event_ref =
+            format!("app-server://threads/{thread_id}/turns/{turn_id}/token-usage");
+        state.native_token_usage_refs.insert(
+            native_token_usage_key(thread_id, turn_id),
+            native_event_ref.clone(),
+        );
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::ArenaMessage,
+            MemythosTelemetrySource::AppServerNative,
+            Some(layer_id),
+            Some(arena_id),
+            Some(thread_id.to_string()),
+            Some(native_event_ref),
+            None,
+            MemythosEventChannel::StateTransition,
+            format!("Native token usage observed for thread {thread_id} turn {turn_id}."),
+        );
+        true
+    }
+
     fn push_telemetry_ref(
         &self,
         state: &mut MemythosRuntimeState,
@@ -1197,9 +1228,14 @@ fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
     format!("{arena_id}::{thread_id}")
 }
 
+fn native_token_usage_key(thread_id: &str, turn_id: &str) -> String {
+    format!("{thread_id}::{turn_id}")
+}
+
 fn build_parent_thread_continuity(
     parent: &MemythosArenaParent,
     deliveries: &[MemythosArenaMessageDelivery],
+    native_token_usage_refs: &HashMap<String, String>,
     goal_snapshot: ParentGoalSnapshot,
 ) -> MemythosParentThreadContinuity {
     let parent_deliveries = deliveries
@@ -1219,7 +1255,11 @@ fn build_parent_thread_continuity(
         .iter()
         .rev()
         .find_map(|delivery| delivery.receiver_response_event_ref.clone());
-    let token_usage_ref = None;
+    let token_usage_ref = latest_turn_id.as_ref().and_then(|turn_id| {
+        native_token_usage_refs
+            .get(&native_token_usage_key(&parent.thread_id, turn_id))
+            .cloned()
+    });
     let memory_replay_required = parent_deliveries
         .iter()
         .any(|delivery| delivery.memory_replay_required);
@@ -2427,6 +2467,9 @@ mod tests {
                 Some(2500),
             )
             .await;
+        processor
+            .record_native_token_usage("thread_risk", "turn_for_thread_risk_message-live-002")
+            .await;
 
         let continuity_response = processor
             .parent_continuity_list(MemythosParentContinuityListParams {
@@ -2464,6 +2507,12 @@ mod tests {
             continuity.latest_turn_completed_ref.as_deref(),
             Some(
                 "app-server://threads/thread_risk/turns/turn_for_thread_risk_message-live-002/completed"
+            )
+        );
+        assert_eq!(
+            continuity.token_usage_ref.as_deref(),
+            Some(
+                "app-server://threads/thread_risk/turns/turn_for_thread_risk_message-live-002/token-usage"
             )
         );
     }
