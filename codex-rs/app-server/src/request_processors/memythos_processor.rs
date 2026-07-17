@@ -11,6 +11,7 @@ use codex_app_server_protocol::MemythosArenaCreateResponse;
 use codex_app_server_protocol::MemythosArenaLifecycleState;
 use codex_app_server_protocol::MemythosArenaListParams;
 use codex_app_server_protocol::MemythosArenaListResponse;
+use codex_app_server_protocol::MemythosArenaMessage;
 use codex_app_server_protocol::MemythosArenaMessageDelivery;
 use codex_app_server_protocol::MemythosArenaMessageListParams;
 use codex_app_server_protocol::MemythosArenaMessageListResponse;
@@ -61,9 +62,61 @@ struct MemythosRuntimeState {
     telemetry_refs: Vec<MemythosTelemetryRef>,
 }
 
+#[derive(Debug, Clone)]
+struct PeerParentDeliveryAttempt {
+    status: String,
+    delivery_mechanism: String,
+    receiver_turn_id: Option<String>,
+    receiver_response_event_ref: Option<String>,
+    delivered_as_human_instruction: bool,
+    memory_replay_required: bool,
+    event_refs: Vec<String>,
+    rejection_reason: Option<String>,
+    telemetry_channel: MemythosEventChannel,
+    telemetry_summary: String,
+}
+
+trait PeerParentDeliveryAdapter: Send + Sync {
+    fn deliver_peer_parent_message(
+        &self,
+        message: &MemythosArenaMessage,
+    ) -> PeerParentDeliveryAttempt;
+}
+
+#[derive(Debug)]
+struct RecordOnlyPeerParentDeliveryAdapter;
+
+impl PeerParentDeliveryAdapter for RecordOnlyPeerParentDeliveryAdapter {
+    fn deliver_peer_parent_message(
+        &self,
+        message: &MemythosArenaMessage,
+    ) -> PeerParentDeliveryAttempt {
+        let event_ref = format!(
+            "memythos://arenas/{}/rounds/{}/messages/{}",
+            message.arena_id, message.round_id, message.message_id
+        );
+        PeerParentDeliveryAttempt {
+            status: "recorded".to_string(),
+            delivery_mechanism: "record_only".to_string(),
+            receiver_turn_id: None,
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: vec![event_ref],
+            rejection_reason: Some("live delivery not available in this runtime mode".to_string()),
+            telemetry_channel: MemythosEventChannel::TechnicalDetail,
+            telemetry_summary: format!(
+                "Arena message {} recorded from {} to {}; live turn delivery is not proven.",
+                message.message_id, message.from_parent_thread_id, message.to_parent_thread_id
+            ),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct MemythosRequestProcessor {
     state: Arc<Mutex<MemythosRuntimeState>>,
+    peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
     next_layer_id: Arc<AtomicU64>,
     next_arena_id: Arc<AtomicU64>,
     next_attachment_id: Arc<AtomicU64>,
@@ -78,6 +131,16 @@ impl MemythosRequestProcessor {
     }
 
     pub(crate) fn new_for_transport(rpc_transport: AppServerRpcTransport) -> Self {
+        Self::new_for_transport_with_peer_delivery(
+            rpc_transport,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+        )
+    }
+
+    fn new_for_transport_with_peer_delivery(
+        rpc_transport: AppServerRpcTransport,
+        peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
+    ) -> Self {
         let (connection_mode, transport_owner, transport_id, daemon_runtime_verified) =
             match rpc_transport {
                 AppServerRpcTransport::Stdio => ("stdio", "app_server", Some("stdio"), false),
@@ -112,6 +175,7 @@ impl MemythosRequestProcessor {
                 arena_message_deliveries: Vec::new(),
                 telemetry_refs: Vec::new(),
             })),
+            peer_parent_delivery_adapter,
             next_layer_id: Arc::new(AtomicU64::default()),
             next_arena_id: Arc::new(AtomicU64::default()),
             next_attachment_id: Arc::new(AtomicU64::default()),
@@ -468,25 +532,26 @@ impl MemythosRequestProcessor {
         }
 
         let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
-        let event_refs = vec![format!(
-            "memythos://arenas/{}/rounds/{}/messages/{}",
-            params.message.arena_id, params.message.round_id, params.message.message_id
-        )];
+        let delivery_attempt = self
+            .peer_parent_delivery_adapter
+            .deliver_peer_parent_message(&params.message);
+        let telemetry_channel = delivery_attempt.telemetry_channel;
+        let telemetry_summary = delivery_attempt.telemetry_summary.clone();
         let delivery = MemythosArenaMessageDelivery {
             delivery_id,
             message_id: params.message.message_id,
-            status: "recorded".to_string(),
+            status: delivery_attempt.status,
             sender_thread_id: params.message.from_parent_thread_id,
             receiver_thread_id: params.message.to_parent_thread_id,
             arena_id: params.message.arena_id,
             round_id: params.message.round_id,
-            delivery_mechanism: "record_only".to_string(),
-            receiver_turn_id: None,
-            receiver_response_event_ref: None,
-            delivered_as_human_instruction: false,
-            memory_replay_required: false,
-            event_refs,
-            rejection_reason: None,
+            delivery_mechanism: delivery_attempt.delivery_mechanism,
+            receiver_turn_id: delivery_attempt.receiver_turn_id,
+            receiver_response_event_ref: delivery_attempt.receiver_response_event_ref,
+            delivered_as_human_instruction: delivery_attempt.delivered_as_human_instruction,
+            memory_replay_required: delivery_attempt.memory_replay_required,
+            event_refs: delivery_attempt.event_refs,
+            rejection_reason: delivery_attempt.rejection_reason,
         };
         state.arena_message_deliveries.push(delivery.clone());
         self.push_telemetry_ref(
@@ -498,11 +563,8 @@ impl MemythosRequestProcessor {
             Some(delivery.receiver_thread_id.clone()),
             delivery.event_refs.first().cloned(),
             None,
-            MemythosEventChannel::TechnicalDetail,
-            format!(
-                "Arena message {} recorded from {} to {}; live turn delivery is not proven.",
-                delivery.message_id, delivery.sender_thread_id, delivery.receiver_thread_id
-            ),
+            telemetry_channel,
+            telemetry_summary,
         );
 
         Ok(MemythosArenaMessageSendResponse { delivery }.into())
@@ -694,6 +756,41 @@ mod tests {
     use codex_app_server_protocol::MemythosArenaKind;
     use codex_app_server_protocol::MemythosArenaMessage;
     use codex_app_server_protocol::MemythosLayerKind;
+
+    #[derive(Debug)]
+    struct FakeLivePeerParentDeliveryAdapter;
+
+    impl PeerParentDeliveryAdapter for FakeLivePeerParentDeliveryAdapter {
+        fn deliver_peer_parent_message(
+            &self,
+            message: &MemythosArenaMessage,
+        ) -> PeerParentDeliveryAttempt {
+            PeerParentDeliveryAttempt {
+                status: "delivered_to_live_thread".to_string(),
+                delivery_mechanism: "turn_start".to_string(),
+                receiver_turn_id: Some(format!("turn_for_{}", message.to_parent_thread_id)),
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: vec![
+                    format!(
+                        "memythos://arenas/{}/rounds/{}/messages/{}",
+                        message.arena_id, message.round_id, message.message_id
+                    ),
+                    format!(
+                        "app-server://threads/{}/turns/turn_for_{}",
+                        message.to_parent_thread_id, message.to_parent_thread_id
+                    ),
+                ],
+                rejection_reason: None,
+                telemetry_channel: MemythosEventChannel::StateTransition,
+                telemetry_summary: format!(
+                    "Arena message {} delivered to live parent thread {}.",
+                    message.message_id, message.to_parent_thread_id
+                ),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn creates_layer_and_arena_contract() {
@@ -1153,6 +1250,105 @@ mod tests {
                         && telemetry_ref.channel == MemythosEventChannel::TechnicalDetail
                         && telemetry_ref.native_event_ref.is_some()
                 })
+        );
+    }
+
+    #[tokio::test]
+    async fn arena_message_send_can_use_live_peer_parent_delivery_adapter() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_peer_delivery(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+        );
+        let layer_response = processor
+            .layer_create(MemythosLayerCreateParams {
+                name: "BPM E2E".to_string(),
+                kind: MemythosLayerKind::BpmEndToEnd,
+                parent_layer_id: None,
+                objective: "Resolve an end-to-end process segment.".to_string(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosLayerCreate(layer_response) = layer_response else {
+            panic!("expected MemythosLayerCreate response");
+        };
+        let arena_response = processor
+            .arena_create(MemythosArenaCreateParams {
+                layer_id: layer_response.layer.layer_id.clone(),
+                name: "Parent peer arena".to_string(),
+                kind: MemythosArenaKind::Debate,
+                objective: "Let parent peers challenge ownership and routing.".to_string(),
+                participant_ids: vec![],
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaCreate(arena_response) = arena_response else {
+            panic!("expected MemythosArenaCreate response");
+        };
+
+        for thread_id in ["thread_growth", "thread_risk"] {
+            processor
+                .thread_attach(MemythosThreadAttachParams {
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    role_id: Some("bettor".to_string()),
+                    stance_id: Some(thread_id.to_string()),
+                    objective: Some("Debate the BPM node contract.".to_string()),
+                    contract_ref: Some("arena-contract.json".to_string()),
+                })
+                .await
+                .unwrap();
+            processor
+                .arena_parent_register(MemythosArenaParentRegisterParams {
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    parent_role: "bettor".to_string(),
+                    stance_profile: thread_id.to_string(),
+                    authority_scope: vec!["peer_debate".to_string()],
+                })
+                .await
+                .unwrap();
+        }
+
+        let send_response = processor
+            .arena_message_send(MemythosArenaMessageSendParams {
+                message: MemythosArenaMessage {
+                    message_id: "message-live-001".to_string(),
+                    case_id: "case-001".to_string(),
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    round_id: "round-001".to_string(),
+                    from_parent_thread_id: "thread_growth".to_string(),
+                    from_parent_role: "bettor".to_string(),
+                    to_parent_thread_id: "thread_risk".to_string(),
+                    to_parent_role: "bettor".to_string(),
+                    message_kind: "peer_objection".to_string(),
+                    human_summary: "Challenge ambiguous ownership before tactical execution."
+                        .to_string(),
+                    context_packet_ref: "artifact://context/minimal".to_string(),
+                    artifact_refs: vec!["arena-contract.json".to_string()],
+                    requires_response: true,
+                    response_contract: Some("peer_objection_response".to_string()),
+                },
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaMessageSend(send_response) = send_response else {
+            panic!("expected MemythosArenaMessageSend response");
+        };
+
+        assert_eq!(send_response.delivery.status, "delivered_to_live_thread");
+        assert_eq!(send_response.delivery.delivery_mechanism, "turn_start");
+        assert_eq!(
+            send_response.delivery.receiver_turn_id.as_deref(),
+            Some("turn_for_thread_risk")
+        );
+        assert_eq!(send_response.delivery.receiver_response_event_ref, None);
+        assert!(!send_response.delivery.delivered_as_human_instruction);
+        assert!(
+            send_response
+                .delivery
+                .event_refs
+                .iter()
+                .any(|event_ref| event_ref.contains("app-server://threads/thread_risk"))
         );
     }
 }
