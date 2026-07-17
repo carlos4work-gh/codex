@@ -81,6 +81,31 @@ pub enum MemythosTelemetrySource {
     SyntheticFixture,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum MemythosParentPeerResponseKind {
+    PendingResponse,
+    Ack,
+    Question,
+    Objection,
+    Bet,
+    RollupRequest,
+    OffTopic,
+    NoResponse,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum MemythosSemanticAlignment {
+    Pending,
+    Acceptable,
+    Strong,
+    Weak,
+    Invalid,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -397,6 +422,44 @@ pub struct MemythosArenaMessageListParams {
 #[ts(export_to = "v2/")]
 pub struct MemythosArenaMessageListResponse {
     pub deliveries: Vec<MemythosArenaMessageDelivery>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosParentPeerResponseObservation {
+    pub observation_id: String,
+    pub message_id: String,
+    pub receiver_thread_id: String,
+    #[ts(optional = nullable)]
+    pub receiver_turn_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub response_event_ref: Option<String>,
+    pub observed_response_kind: MemythosParentPeerResponseKind,
+    pub role_preserved: bool,
+    pub treated_as_human_instruction: bool,
+    pub semantic_alignment: MemythosSemanticAlignment,
+    #[ts(optional = nullable)]
+    pub actionable_next_step: Option<String>,
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageObservationListParams {
+    pub arena_id: String,
+    #[ts(optional = nullable)]
+    pub round_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub message_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageObservationListResponse {
+    pub observations: Vec<MemythosParentPeerResponseObservation>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]

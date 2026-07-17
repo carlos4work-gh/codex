@@ -611,6 +611,12 @@ client_request_definitions! {
         serialization: global_shared_read("memythos"),
         response: v2::MemythosArenaMessageListResponse,
     },
+    #[experimental("memythos/arena/message/observation/list")]
+    MemythosArenaMessageObservationList => "memythos/arena/message/observation/list" {
+        params: v2::MemythosArenaMessageObservationListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosArenaMessageObservationListResponse,
+    },
     #[experimental("memythos/telemetry/list")]
     MemythosTelemetryList => "memythos/telemetry/list" {
         params: v2::MemythosTelemetryListParams,

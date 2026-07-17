@@ -19,6 +19,8 @@ use codex_app_server_protocol::MemythosArenaMessage;
 use codex_app_server_protocol::MemythosArenaMessageDelivery;
 use codex_app_server_protocol::MemythosArenaMessageListParams;
 use codex_app_server_protocol::MemythosArenaMessageListResponse;
+use codex_app_server_protocol::MemythosArenaMessageObservationListParams;
+use codex_app_server_protocol::MemythosArenaMessageObservationListResponse;
 use codex_app_server_protocol::MemythosArenaMessageSendParams;
 use codex_app_server_protocol::MemythosArenaMessageSendResponse;
 use codex_app_server_protocol::MemythosArenaParent;
@@ -30,11 +32,14 @@ use codex_app_server_protocol::MemythosLayerCreateParams;
 use codex_app_server_protocol::MemythosLayerCreateResponse;
 use codex_app_server_protocol::MemythosLayerListParams;
 use codex_app_server_protocol::MemythosLayerListResponse;
+use codex_app_server_protocol::MemythosParentPeerResponseKind;
+use codex_app_server_protocol::MemythosParentPeerResponseObservation;
 use codex_app_server_protocol::MemythosRuntimeCloseParams;
 use codex_app_server_protocol::MemythosRuntimeCloseResponse;
 use codex_app_server_protocol::MemythosRuntimeHealthParams;
 use codex_app_server_protocol::MemythosRuntimeHealthResponse;
 use codex_app_server_protocol::MemythosRuntimeLifecycleState;
+use codex_app_server_protocol::MemythosSemanticAlignment;
 use codex_app_server_protocol::MemythosTelemetryListParams;
 use codex_app_server_protocol::MemythosTelemetryListResponse;
 use codex_app_server_protocol::MemythosTelemetryRef;
@@ -800,6 +805,40 @@ impl MemythosRequestProcessor {
         Ok(MemythosArenaMessageListResponse { deliveries }.into())
     }
 
+    pub(crate) async fn arena_message_observation_list(
+        &self,
+        params: MemythosArenaMessageObservationListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state = self.state.lock().await;
+        if !state.arenas.contains_key(&params.arena_id) {
+            return Err(invalid_params(format!(
+                "unknown arena id: {}",
+                params.arena_id
+            )));
+        }
+
+        let observations = state
+            .arena_message_deliveries
+            .iter()
+            .filter(|delivery| delivery.arena_id == params.arena_id)
+            .filter(|delivery| {
+                params
+                    .round_id
+                    .as_ref()
+                    .map_or(true, |round_id| &delivery.round_id == round_id)
+            })
+            .filter(|delivery| {
+                params
+                    .message_id
+                    .as_ref()
+                    .map_or(true, |message_id| &delivery.message_id == message_id)
+            })
+            .map(build_parent_peer_response_observation)
+            .collect();
+
+        Ok(MemythosArenaMessageObservationListResponse { observations }.into())
+    }
+
     pub(crate) async fn telemetry_list(
         &self,
         params: MemythosTelemetryListParams,
@@ -937,6 +976,51 @@ fn find_attachment_context(
 
 fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
     format!("{arena_id}::{thread_id}")
+}
+
+fn build_parent_peer_response_observation(
+    delivery: &MemythosArenaMessageDelivery,
+) -> MemythosParentPeerResponseObservation {
+    let observed_response_kind = if delivery.receiver_response_event_ref.is_some() {
+        MemythosParentPeerResponseKind::Ack
+    } else if delivery.receiver_turn_id.is_some() {
+        MemythosParentPeerResponseKind::PendingResponse
+    } else {
+        MemythosParentPeerResponseKind::NoResponse
+    };
+    let semantic_alignment = if delivery.receiver_response_event_ref.is_some() {
+        MemythosSemanticAlignment::Acceptable
+    } else if delivery.receiver_turn_id.is_some() {
+        MemythosSemanticAlignment::Pending
+    } else {
+        MemythosSemanticAlignment::Invalid
+    };
+    let actionable_next_step = match observed_response_kind {
+        MemythosParentPeerResponseKind::PendingResponse => {
+            Some("Wait for the receiver turn response event before promoting debate.".to_string())
+        }
+        MemythosParentPeerResponseKind::NoResponse => {
+            Some("Retry or escalate because no receiver turn was created.".to_string())
+        }
+        _ => None,
+    };
+
+    MemythosParentPeerResponseObservation {
+        observation_id: format!(
+            "mem_observation_{}_{}",
+            delivery.arena_id, delivery.message_id
+        ),
+        message_id: delivery.message_id.clone(),
+        receiver_thread_id: delivery.receiver_thread_id.clone(),
+        receiver_turn_id: delivery.receiver_turn_id.clone(),
+        response_event_ref: delivery.receiver_response_event_ref.clone(),
+        observed_response_kind,
+        role_preserved: !delivery.delivered_as_human_instruction,
+        treated_as_human_instruction: delivery.delivered_as_human_instruction,
+        semantic_alignment,
+        actionable_next_step,
+        evidence_refs: delivery.event_refs.clone(),
+    }
 }
 
 fn compact_summary(summary: String) -> String {
@@ -1433,6 +1517,29 @@ mod tests {
         assert_eq!(list_response.deliveries.len(), 1);
         assert_eq!(list_response.deliveries[0].message_id, "message-001");
 
+        let observation_response = processor
+            .arena_message_observation_list(MemythosArenaMessageObservationListParams {
+                arena_id: arena_response.arena.arena_id.clone(),
+                round_id: Some("round-001".to_string()),
+                message_id: Some("message-001".to_string()),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaMessageObservationList(observation_response) =
+            observation_response
+        else {
+            panic!("expected MemythosArenaMessageObservationList response");
+        };
+        assert_eq!(observation_response.observations.len(), 1);
+        assert_eq!(
+            observation_response.observations[0].observed_response_kind,
+            MemythosParentPeerResponseKind::NoResponse
+        );
+        assert_eq!(
+            observation_response.observations[0].semantic_alignment,
+            MemythosSemanticAlignment::Invalid
+        );
+
         let telemetry_response = processor
             .telemetry_list(MemythosTelemetryListParams {
                 layer_id: Some(layer_response.layer.layer_id),
@@ -1555,5 +1662,35 @@ mod tests {
                 .iter()
                 .any(|event_ref| event_ref.contains("app-server://threads/thread_risk"))
         );
+
+        let observation_response = processor
+            .arena_message_observation_list(MemythosArenaMessageObservationListParams {
+                arena_id: arena_response.arena.arena_id,
+                round_id: Some("round-001".to_string()),
+                message_id: Some("message-live-001".to_string()),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaMessageObservationList(observation_response) =
+            observation_response
+        else {
+            panic!("expected MemythosArenaMessageObservationList response");
+        };
+        assert_eq!(observation_response.observations.len(), 1);
+        assert_eq!(
+            observation_response.observations[0].observed_response_kind,
+            MemythosParentPeerResponseKind::PendingResponse
+        );
+        assert_eq!(
+            observation_response.observations[0].semantic_alignment,
+            MemythosSemanticAlignment::Pending
+        );
+        assert_eq!(
+            observation_response.observations[0]
+                .receiver_turn_id
+                .as_deref(),
+            Some("turn_for_thread_risk")
+        );
+        assert!(!observation_response.observations[0].treated_as_human_instruction);
     }
 }
