@@ -40,6 +40,7 @@ use crate::request_processors::SearchRequestProcessor;
 use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
+use crate::request_processors::TurnStartPeerParentDeliveryAdapter;
 use crate::request_processors::WindowsSandboxRequestProcessor;
 use crate::request_serialization::QueuedInitializedRequest;
 use crate::request_serialization::RequestSerializationQueueKey;
@@ -463,7 +464,6 @@ impl MessageProcessor {
             outgoing.clone(),
             config_manager.clone(),
         );
-        let memythos_processor = MemythosRequestProcessor::new_for_transport(rpc_transport);
         let plugin_processor = PluginRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -512,6 +512,12 @@ impl MessageProcessor {
             thread_watch_manager,
             thread_list_state_permit,
             Arc::clone(&skills_watcher),
+        );
+        let memythos_processor = MemythosRequestProcessor::new_for_transport_with_peer_delivery(
+            rpc_transport,
+            Arc::new(TurnStartPeerParentDeliveryAdapter::new(
+                turn_processor.clone(),
+            )),
         );
         if matches!(plugin_startup_tasks, crate::PluginStartupTasks::Start) {
             // Keep plugin startup warmups aligned at app-server startup.

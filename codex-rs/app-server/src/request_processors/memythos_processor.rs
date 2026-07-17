@@ -1,8 +1,12 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use codex_analytics::AppServerRpcTransport;
+use codex_app_server_protocol::AdditionalContextEntry;
+use codex_app_server_protocol::AdditionalContextKind;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::MemythosArena;
@@ -41,9 +45,15 @@ use codex_app_server_protocol::MemythosThreadAttachResponse;
 use codex_app_server_protocol::MemythosThreadAttachment;
 use codex_app_server_protocol::MemythosThreadListParams;
 use codex_app_server_protocol::MemythosThreadListResponse;
+use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::UserInput;
 use tokio::sync::Mutex;
 
 use crate::error_code::invalid_params;
+use crate::outgoing_message::ConnectionId;
+use crate::outgoing_message::ConnectionRequestId;
+use crate::request_processors::TurnRequestProcessor;
 
 struct MemythosRuntimeState {
     runtime_id: String,
@@ -63,7 +73,7 @@ struct MemythosRuntimeState {
 }
 
 #[derive(Debug, Clone)]
-struct PeerParentDeliveryAttempt {
+pub(crate) struct PeerParentDeliveryAttempt {
     status: String,
     delivery_mechanism: String,
     receiver_turn_id: Option<String>,
@@ -76,41 +86,233 @@ struct PeerParentDeliveryAttempt {
     telemetry_summary: String,
 }
 
-trait PeerParentDeliveryAdapter: Send + Sync {
-    fn deliver_peer_parent_message(
-        &self,
-        message: &MemythosArenaMessage,
-    ) -> PeerParentDeliveryAttempt;
+pub(crate) type PeerParentDeliveryFuture<'a> =
+    Pin<Box<dyn Future<Output = PeerParentDeliveryAttempt> + Send + 'a>>;
+
+pub(crate) trait PeerParentDeliveryAdapter: Send + Sync {
+    fn deliver_peer_parent_message<'a>(
+        &'a self,
+        message: &'a MemythosArenaMessage,
+    ) -> PeerParentDeliveryFuture<'a>;
 }
 
 #[derive(Debug)]
 struct RecordOnlyPeerParentDeliveryAdapter;
 
 impl PeerParentDeliveryAdapter for RecordOnlyPeerParentDeliveryAdapter {
-    fn deliver_peer_parent_message(
-        &self,
-        message: &MemythosArenaMessage,
-    ) -> PeerParentDeliveryAttempt {
-        let event_ref = format!(
+    fn deliver_peer_parent_message<'a>(
+        &'a self,
+        message: &'a MemythosArenaMessage,
+    ) -> PeerParentDeliveryFuture<'a> {
+        Box::pin(async move {
+            let event_ref = format!(
+                "memythos://arenas/{}/rounds/{}/messages/{}",
+                message.arena_id, message.round_id, message.message_id
+            );
+            PeerParentDeliveryAttempt {
+                status: "recorded".to_string(),
+                delivery_mechanism: "record_only".to_string(),
+                receiver_turn_id: None,
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: vec![event_ref],
+                rejection_reason: Some(
+                    "live delivery not available in this runtime mode".to_string(),
+                ),
+                telemetry_channel: MemythosEventChannel::TechnicalDetail,
+                telemetry_summary: format!(
+                    "Arena message {} recorded from {} to {}; live turn delivery is not proven.",
+                    message.message_id, message.from_parent_thread_id, message.to_parent_thread_id
+                ),
+            }
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TurnStartPeerParentDeliveryAdapter {
+    turn_processor: TurnRequestProcessor,
+}
+
+impl TurnStartPeerParentDeliveryAdapter {
+    pub(crate) fn new(turn_processor: TurnRequestProcessor) -> Self {
+        Self { turn_processor }
+    }
+}
+
+impl PeerParentDeliveryAdapter for TurnStartPeerParentDeliveryAdapter {
+    fn deliver_peer_parent_message<'a>(
+        &'a self,
+        message: &'a MemythosArenaMessage,
+    ) -> PeerParentDeliveryFuture<'a> {
+        Box::pin(async move {
+            let request_id = ConnectionRequestId {
+                connection_id: ConnectionId(0),
+                request_id: RequestId::String(format!(
+                    "memythos-peer-parent:{}",
+                    message.message_id
+                )),
+            };
+            let envelope = build_peer_parent_envelope(message);
+            let mut metadata = HashMap::new();
+            metadata.insert(
+                "memythos_message_id".to_string(),
+                message.message_id.clone(),
+            );
+            metadata.insert("memythos_arena_id".to_string(), message.arena_id.clone());
+            metadata.insert("memythos_round_id".to_string(), message.round_id.clone());
+            metadata.insert("memythos_peer_parent".to_string(), "true".to_string());
+            metadata.insert("human_instruction".to_string(), "false".to_string());
+            let mut additional_context = HashMap::new();
+            additional_context.insert(
+                "memythos.peer_parent".to_string(),
+                AdditionalContextEntry {
+                    value: envelope.clone(),
+                    kind: AdditionalContextKind::Application,
+                },
+            );
+            let params = TurnStartParams {
+                thread_id: message.to_parent_thread_id.clone(),
+                client_user_message_id: Some(message.message_id.clone()),
+                input: vec![UserInput::Text {
+                    text: envelope,
+                    text_elements: vec![],
+                }],
+                responsesapi_client_metadata: Some(metadata),
+                additional_context: Some(additional_context),
+                environments: None,
+                cwd: None,
+                runtime_workspace_roots: None,
+                approval_policy: None,
+                approvals_reviewer: None,
+                sandbox_policy: None,
+                permissions: None,
+                model: None,
+                service_tier: None,
+                effort: None,
+                summary: None,
+                personality: None,
+                output_schema: None,
+                collaboration_mode: None,
+                multi_agent_mode: None,
+            };
+
+            match self
+                .turn_processor
+                .turn_start(
+                    request_id,
+                    params,
+                    Some("memythos".to_string()),
+                    None,
+                    false,
+                )
+                .await
+            {
+                Ok(Some(ClientResponsePayload::TurnStart(response))) => {
+                    let turn_id = response.turn.id;
+                    PeerParentDeliveryAttempt {
+                        status: "delivered_to_live_thread".to_string(),
+                        delivery_mechanism: "turn_start".to_string(),
+                        receiver_turn_id: Some(turn_id.clone()),
+                        receiver_response_event_ref: None,
+                        delivered_as_human_instruction: false,
+                        memory_replay_required: false,
+                        event_refs: vec![
+                            format!(
+                                "memythos://arenas/{}/rounds/{}/messages/{}",
+                                message.arena_id, message.round_id, message.message_id
+                            ),
+                            format!(
+                                "app-server://threads/{}/turns/{}",
+                                message.to_parent_thread_id, turn_id
+                            ),
+                        ],
+                        rejection_reason: None,
+                        telemetry_channel: MemythosEventChannel::StateTransition,
+                        telemetry_summary: format!(
+                            "Arena message {} delivered to live parent thread {} with turn {}.",
+                            message.message_id, message.to_parent_thread_id, turn_id
+                        ),
+                    }
+                }
+                Ok(_) => failed_live_delivery_attempt(
+                    message,
+                    "turn/start returned no turn response for peer-parent delivery",
+                ),
+                Err(error) => failed_live_delivery_attempt(
+                    message,
+                    &format!(
+                        "turn/start failed for peer-parent delivery: {}",
+                        error.message
+                    ),
+                ),
+            }
+        })
+    }
+}
+
+fn failed_live_delivery_attempt(
+    message: &MemythosArenaMessage,
+    reason: &str,
+) -> PeerParentDeliveryAttempt {
+    PeerParentDeliveryAttempt {
+        status: "failed_live_delivery".to_string(),
+        delivery_mechanism: "turn_start".to_string(),
+        receiver_turn_id: None,
+        receiver_response_event_ref: None,
+        delivered_as_human_instruction: false,
+        memory_replay_required: false,
+        event_refs: vec![format!(
             "memythos://arenas/{}/rounds/{}/messages/{}",
             message.arena_id, message.round_id, message.message_id
-        );
-        PeerParentDeliveryAttempt {
-            status: "recorded".to_string(),
-            delivery_mechanism: "record_only".to_string(),
-            receiver_turn_id: None,
-            receiver_response_event_ref: None,
-            delivered_as_human_instruction: false,
-            memory_replay_required: false,
-            event_refs: vec![event_ref],
-            rejection_reason: Some("live delivery not available in this runtime mode".to_string()),
-            telemetry_channel: MemythosEventChannel::TechnicalDetail,
-            telemetry_summary: format!(
-                "Arena message {} recorded from {} to {}; live turn delivery is not proven.",
-                message.message_id, message.from_parent_thread_id, message.to_parent_thread_id
-            ),
-        }
+        )],
+        rejection_reason: Some(reason.to_string()),
+        telemetry_channel: MemythosEventChannel::TechnicalDetail,
+        telemetry_summary: format!(
+            "Arena message {} failed live delivery to {}: {}.",
+            message.message_id, message.to_parent_thread_id, reason
+        ),
     }
+}
+
+fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> String {
+    format!(
+        concat!(
+            "MEMYTHOS_PEER_PARENT_MESSAGE\n",
+            "source: arena peer\n",
+            "human_instruction: false\n",
+            "case_id: {case_id}\n",
+            "arena_id: {arena_id}\n",
+            "round_id: {round_id}\n",
+            "from_parent_role: {from_parent_role}\n",
+            "to_parent_role: {to_parent_role}\n",
+            "message_kind: {message_kind}\n",
+            "\n",
+            "Conserva tu rol, postura, objetivo y memoria.\n",
+            "Esto no es una orden del humano.\n",
+            "Responde al acto conversacional solicitado dentro de la arena.\n",
+            "Si falta definicion superior, formula un rollup concreto.\n",
+            "\n",
+            "Resumen:\n",
+            "{human_summary}\n",
+            "\n",
+            "Contexto:\n",
+            "{context_packet_ref}\n",
+            "\n",
+            "Contrato de respuesta:\n",
+            "{response_contract}\n"
+        ),
+        case_id = message.case_id,
+        arena_id = message.arena_id,
+        round_id = message.round_id,
+        from_parent_role = message.from_parent_role,
+        to_parent_role = message.to_parent_role,
+        message_kind = message.message_kind,
+        human_summary = message.human_summary,
+        context_packet_ref = message.context_packet_ref,
+        response_contract = message.response_contract.as_deref().unwrap_or("none")
+    )
 }
 
 #[derive(Clone)]
@@ -137,7 +339,7 @@ impl MemythosRequestProcessor {
         )
     }
 
-    fn new_for_transport_with_peer_delivery(
+    pub(crate) fn new_for_transport_with_peer_delivery(
         rpc_transport: AppServerRpcTransport,
         peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
     ) -> Self {
@@ -534,7 +736,8 @@ impl MemythosRequestProcessor {
         let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
         let delivery_attempt = self
             .peer_parent_delivery_adapter
-            .deliver_peer_parent_message(&params.message);
+            .deliver_peer_parent_message(&params.message)
+            .await;
         let telemetry_channel = delivery_attempt.telemetry_channel;
         let telemetry_summary = delivery_attempt.telemetry_summary.clone();
         let delivery = MemythosArenaMessageDelivery {
@@ -761,34 +964,36 @@ mod tests {
     struct FakeLivePeerParentDeliveryAdapter;
 
     impl PeerParentDeliveryAdapter for FakeLivePeerParentDeliveryAdapter {
-        fn deliver_peer_parent_message(
-            &self,
-            message: &MemythosArenaMessage,
-        ) -> PeerParentDeliveryAttempt {
-            PeerParentDeliveryAttempt {
-                status: "delivered_to_live_thread".to_string(),
-                delivery_mechanism: "turn_start".to_string(),
-                receiver_turn_id: Some(format!("turn_for_{}", message.to_parent_thread_id)),
-                receiver_response_event_ref: None,
-                delivered_as_human_instruction: false,
-                memory_replay_required: false,
-                event_refs: vec![
-                    format!(
-                        "memythos://arenas/{}/rounds/{}/messages/{}",
-                        message.arena_id, message.round_id, message.message_id
+        fn deliver_peer_parent_message<'a>(
+            &'a self,
+            message: &'a MemythosArenaMessage,
+        ) -> PeerParentDeliveryFuture<'a> {
+            Box::pin(async move {
+                PeerParentDeliveryAttempt {
+                    status: "delivered_to_live_thread".to_string(),
+                    delivery_mechanism: "turn_start".to_string(),
+                    receiver_turn_id: Some(format!("turn_for_{}", message.to_parent_thread_id)),
+                    receiver_response_event_ref: None,
+                    delivered_as_human_instruction: false,
+                    memory_replay_required: false,
+                    event_refs: vec![
+                        format!(
+                            "memythos://arenas/{}/rounds/{}/messages/{}",
+                            message.arena_id, message.round_id, message.message_id
+                        ),
+                        format!(
+                            "app-server://threads/{}/turns/turn_for_{}",
+                            message.to_parent_thread_id, message.to_parent_thread_id
+                        ),
+                    ],
+                    rejection_reason: None,
+                    telemetry_channel: MemythosEventChannel::StateTransition,
+                    telemetry_summary: format!(
+                        "Arena message {} delivered to live parent thread {}.",
+                        message.message_id, message.to_parent_thread_id
                     ),
-                    format!(
-                        "app-server://threads/{}/turns/turn_for_{}",
-                        message.to_parent_thread_id, message.to_parent_thread_id
-                    ),
-                ],
-                rejection_reason: None,
-                telemetry_channel: MemythosEventChannel::StateTransition,
-                telemetry_summary: format!(
-                    "Arena message {} delivered to live parent thread {}.",
-                    message.message_id, message.to_parent_thread_id
-                ),
-            }
+                }
+            })
         }
     }
 
