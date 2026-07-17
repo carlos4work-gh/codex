@@ -106,6 +106,17 @@ pub enum MemythosSemanticAlignment {
     Invalid,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum MemythosParentContinuityStatus {
+    NoTurns,
+    SingleTurnObserved,
+    TurnContinuityObserved,
+    Verified,
+    Degraded,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -460,6 +471,40 @@ pub struct MemythosArenaMessageObservationListParams {
 #[ts(export_to = "v2/")]
 pub struct MemythosArenaMessageObservationListResponse {
     pub observations: Vec<MemythosParentPeerResponseObservation>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosParentThreadContinuity {
+    pub arena_id: String,
+    pub thread_id: String,
+    pub parent_role: String,
+    pub stance_profile: String,
+    pub continuity_status: MemythosParentContinuityStatus,
+    pub first_turn_id: Option<String>,
+    pub latest_turn_id: Option<String>,
+    pub observed_turn_count: usize,
+    pub memory_replay_required: bool,
+    pub goal_snapshot_available: bool,
+    pub evidence_refs: Vec<String>,
+    pub degraded_reasons: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosParentContinuityListParams {
+    pub arena_id: String,
+    #[ts(optional = nullable)]
+    pub thread_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosParentContinuityListResponse {
+    pub continuities: Vec<MemythosParentThreadContinuity>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]

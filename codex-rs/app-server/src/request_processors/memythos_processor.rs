@@ -32,8 +32,12 @@ use codex_app_server_protocol::MemythosLayerCreateParams;
 use codex_app_server_protocol::MemythosLayerCreateResponse;
 use codex_app_server_protocol::MemythosLayerListParams;
 use codex_app_server_protocol::MemythosLayerListResponse;
+use codex_app_server_protocol::MemythosParentContinuityListParams;
+use codex_app_server_protocol::MemythosParentContinuityListResponse;
+use codex_app_server_protocol::MemythosParentContinuityStatus;
 use codex_app_server_protocol::MemythosParentPeerResponseKind;
 use codex_app_server_protocol::MemythosParentPeerResponseObservation;
+use codex_app_server_protocol::MemythosParentThreadContinuity;
 use codex_app_server_protocol::MemythosRuntimeCloseParams;
 use codex_app_server_protocol::MemythosRuntimeCloseResponse;
 use codex_app_server_protocol::MemythosRuntimeHealthParams;
@@ -778,6 +782,34 @@ impl MemythosRequestProcessor {
         Ok(MemythosArenaMessageSendResponse { delivery }.into())
     }
 
+    pub(crate) async fn parent_continuity_list(
+        &self,
+        params: MemythosParentContinuityListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state = self.state.lock().await;
+        if !state.arenas.contains_key(&params.arena_id) {
+            return Err(invalid_params(format!(
+                "unknown arena id: {}",
+                params.arena_id
+            )));
+        }
+
+        let continuities = state
+            .arena_parents
+            .values()
+            .filter(|parent| parent.arena_id == params.arena_id)
+            .filter(|parent| {
+                params
+                    .thread_id
+                    .as_ref()
+                    .map_or(true, |thread_id| &parent.thread_id == thread_id)
+            })
+            .map(|parent| build_parent_thread_continuity(parent, &state.arena_message_deliveries))
+            .collect();
+
+        Ok(MemythosParentContinuityListResponse { continuities }.into())
+    }
+
     pub(crate) async fn arena_message_list(
         &self,
         params: MemythosArenaMessageListParams,
@@ -978,6 +1010,68 @@ fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
     format!("{arena_id}::{thread_id}")
 }
 
+fn build_parent_thread_continuity(
+    parent: &MemythosArenaParent,
+    deliveries: &[MemythosArenaMessageDelivery],
+) -> MemythosParentThreadContinuity {
+    let parent_deliveries = deliveries
+        .iter()
+        .filter(|delivery| {
+            delivery.arena_id == parent.arena_id && delivery.receiver_thread_id == parent.thread_id
+        })
+        .collect::<Vec<_>>();
+    let turn_ids = parent_deliveries
+        .iter()
+        .filter_map(|delivery| delivery.receiver_turn_id.clone())
+        .collect::<Vec<_>>();
+    let first_turn_id = turn_ids.first().cloned();
+    let latest_turn_id = turn_ids.last().cloned();
+    let observed_turn_count = turn_ids.len();
+    let memory_replay_required = parent_deliveries
+        .iter()
+        .any(|delivery| delivery.memory_replay_required);
+    let mut degraded_reasons = Vec::new();
+
+    if memory_replay_required {
+        degraded_reasons.push("at least one delivery required memory replay".to_string());
+    }
+
+    let continuity_status = match observed_turn_count {
+        0 => {
+            degraded_reasons.push("no receiver turns observed for parent thread".to_string());
+            MemythosParentContinuityStatus::NoTurns
+        }
+        1 => {
+            degraded_reasons.push("only one receiver turn observed".to_string());
+            MemythosParentContinuityStatus::SingleTurnObserved
+        }
+        _ if memory_replay_required => MemythosParentContinuityStatus::Degraded,
+        _ => MemythosParentContinuityStatus::TurnContinuityObserved,
+    };
+
+    let mut evidence_refs = parent_deliveries
+        .iter()
+        .flat_map(|delivery| delivery.event_refs.clone())
+        .collect::<Vec<_>>();
+    evidence_refs.sort();
+    evidence_refs.dedup();
+
+    MemythosParentThreadContinuity {
+        arena_id: parent.arena_id.clone(),
+        thread_id: parent.thread_id.clone(),
+        parent_role: parent.parent_role.clone(),
+        stance_profile: parent.stance_profile.clone(),
+        continuity_status,
+        first_turn_id,
+        latest_turn_id,
+        observed_turn_count,
+        memory_replay_required,
+        goal_snapshot_available: false,
+        evidence_refs,
+        degraded_reasons,
+    }
+}
+
 fn build_parent_peer_response_observation(
     delivery: &MemythosArenaMessageDelivery,
 ) -> MemythosParentPeerResponseObservation {
@@ -1056,7 +1150,10 @@ mod tests {
                 PeerParentDeliveryAttempt {
                     status: "delivered_to_live_thread".to_string(),
                     delivery_mechanism: "turn_start".to_string(),
-                    receiver_turn_id: Some(format!("turn_for_{}", message.to_parent_thread_id)),
+                    receiver_turn_id: Some(format!(
+                        "turn_for_{}_{}",
+                        message.to_parent_thread_id, message.message_id
+                    )),
                     receiver_response_event_ref: None,
                     delivered_as_human_instruction: false,
                     memory_replay_required: false,
@@ -1066,8 +1163,10 @@ mod tests {
                             message.arena_id, message.round_id, message.message_id
                         ),
                         format!(
-                            "app-server://threads/{}/turns/turn_for_{}",
-                            message.to_parent_thread_id, message.to_parent_thread_id
+                            "app-server://threads/{}/turns/turn_for_{}_{}",
+                            message.to_parent_thread_id,
+                            message.to_parent_thread_id,
+                            message.message_id
                         ),
                     ],
                     rejection_reason: None,
@@ -1651,7 +1750,7 @@ mod tests {
         assert_eq!(send_response.delivery.delivery_mechanism, "turn_start");
         assert_eq!(
             send_response.delivery.receiver_turn_id.as_deref(),
-            Some("turn_for_thread_risk")
+            Some("turn_for_thread_risk_message-live-001")
         );
         assert_eq!(send_response.delivery.receiver_response_event_ref, None);
         assert!(!send_response.delivery.delivered_as_human_instruction);
@@ -1689,8 +1788,120 @@ mod tests {
             observation_response.observations[0]
                 .receiver_turn_id
                 .as_deref(),
-            Some("turn_for_thread_risk")
+            Some("turn_for_thread_risk_message-live-001")
         );
         assert!(!observation_response.observations[0].treated_as_human_instruction);
+    }
+
+    #[tokio::test]
+    async fn parent_continuity_tracks_multiple_receiver_turns() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_peer_delivery(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+        );
+        let layer_response = processor
+            .layer_create(MemythosLayerCreateParams {
+                name: "BPM E2E".to_string(),
+                kind: MemythosLayerKind::BpmEndToEnd,
+                parent_layer_id: None,
+                objective: "Resolve an end-to-end process segment.".to_string(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosLayerCreate(layer_response) = layer_response else {
+            panic!("expected MemythosLayerCreate response");
+        };
+        let arena_response = processor
+            .arena_create(MemythosArenaCreateParams {
+                layer_id: layer_response.layer.layer_id,
+                name: "Parent peer arena".to_string(),
+                kind: MemythosArenaKind::Debate,
+                objective: "Let parent peers challenge ownership and routing.".to_string(),
+                participant_ids: vec![],
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaCreate(arena_response) = arena_response else {
+            panic!("expected MemythosArenaCreate response");
+        };
+
+        for thread_id in ["thread_growth", "thread_risk"] {
+            processor
+                .thread_attach(MemythosThreadAttachParams {
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    role_id: Some("bettor".to_string()),
+                    stance_id: Some(thread_id.to_string()),
+                    objective: Some("Debate the BPM node contract.".to_string()),
+                    contract_ref: Some("arena-contract.json".to_string()),
+                })
+                .await
+                .unwrap();
+            processor
+                .arena_parent_register(MemythosArenaParentRegisterParams {
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    parent_role: "bettor".to_string(),
+                    stance_profile: thread_id.to_string(),
+                    authority_scope: vec!["peer_debate".to_string()],
+                })
+                .await
+                .unwrap();
+        }
+
+        for message_id in ["message-live-001", "message-live-002"] {
+            processor
+                .arena_message_send(MemythosArenaMessageSendParams {
+                    message: MemythosArenaMessage {
+                        message_id: message_id.to_string(),
+                        case_id: "case-001".to_string(),
+                        arena_id: arena_response.arena.arena_id.clone(),
+                        round_id: "round-001".to_string(),
+                        from_parent_thread_id: "thread_growth".to_string(),
+                        from_parent_role: "bettor".to_string(),
+                        to_parent_thread_id: "thread_risk".to_string(),
+                        to_parent_role: "bettor".to_string(),
+                        message_kind: "peer_objection".to_string(),
+                        human_summary: "Challenge ambiguous ownership before tactical execution."
+                            .to_string(),
+                        context_packet_ref: "artifact://context/minimal".to_string(),
+                        artifact_refs: vec!["arena-contract.json".to_string()],
+                        requires_response: true,
+                        response_contract: Some("peer_objection_response".to_string()),
+                    },
+                })
+                .await
+                .unwrap();
+        }
+
+        let continuity_response = processor
+            .parent_continuity_list(MemythosParentContinuityListParams {
+                arena_id: arena_response.arena.arena_id,
+                thread_id: Some("thread_risk".to_string()),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosParentContinuityList(continuity_response) =
+            continuity_response
+        else {
+            panic!("expected MemythosParentContinuityList response");
+        };
+        assert_eq!(continuity_response.continuities.len(), 1);
+        let continuity = &continuity_response.continuities[0];
+        assert_eq!(
+            continuity.continuity_status,
+            MemythosParentContinuityStatus::TurnContinuityObserved
+        );
+        assert_eq!(continuity.observed_turn_count, 2);
+        assert_eq!(
+            continuity.first_turn_id.as_deref(),
+            Some("turn_for_thread_risk_message-live-001")
+        );
+        assert_eq!(
+            continuity.latest_turn_id.as_deref(),
+            Some("turn_for_thread_risk_message-live-002")
+        );
+        assert!(!continuity.memory_replay_required);
+        assert!(!continuity.goal_snapshot_available);
     }
 }

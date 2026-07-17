@@ -1211,6 +1211,11 @@ impl MessageProcessor {
                 .arena_parent_register(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosParentContinuityList { params, .. } => self
+                .memythos_processor
+                .parent_continuity_list(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosArenaMessageSend { params, .. } => self
                 .memythos_processor
                 .arena_message_send(params)

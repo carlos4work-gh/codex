@@ -599,6 +599,12 @@ client_request_definitions! {
         serialization: global("memythos"),
         response: v2::MemythosArenaParentRegisterResponse,
     },
+    #[experimental("memythos/arena/parent/continuity/list")]
+    MemythosParentContinuityList => "memythos/arena/parent/continuity/list" {
+        params: v2::MemythosParentContinuityListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosParentContinuityListResponse,
+    },
     #[experimental("memythos/arena/message")]
     MemythosArenaMessageSend => "memythos/arena/message" {
         params: v2::MemythosArenaMessageSendParams,
