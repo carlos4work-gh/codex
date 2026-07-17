@@ -2,6 +2,7 @@ use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
 use crate::outgoing_message::ClientRequestResult;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
+use crate::request_processors::MemythosRequestProcessor;
 use crate::request_processors::populate_thread_turns_from_history;
 use crate::request_processors::thread_from_stored_thread;
 use crate::request_processors::thread_settings_from_core_snapshot;
@@ -145,6 +146,7 @@ pub(crate) async fn apply_bespoke_event_handling(
     thread_watch_manager: ThreadWatchManager,
     thread_list_state_permit: Arc<tokio::sync::Semaphore>,
     fallback_model_provider: String,
+    memythos_processor: Arc<std::sync::Mutex<Option<MemythosRequestProcessor>>>,
 ) {
     let Event {
         id: event_turn_id,
@@ -195,6 +197,10 @@ pub(crate) async fn apply_bespoke_event_handling(
                 turn_complete_event,
                 &outgoing,
                 &thread_state,
+                memythos_processor
+                    .lock()
+                    .ok()
+                    .and_then(|processor| processor.clone()),
             )
             .await;
         }
@@ -1509,6 +1515,7 @@ async fn handle_turn_complete(
     turn_complete_event: TurnCompleteEvent,
     outgoing: &ThreadScopedOutgoingMessageSender,
     thread_state: &Arc<Mutex<ThreadState>>,
+    memythos_processor: Option<MemythosRequestProcessor>,
 ) {
     let turn_summary = find_and_remove_turn_summary(conversation_id, thread_state).await;
 
@@ -1516,6 +1523,11 @@ async fn handle_turn_complete(
         Some(error) => (TurnStatus::Failed, Some(error)),
         None => (TurnStatus::Completed, None),
     };
+    let status_label = turn_status_label(&status);
+    let completed_at = turn_complete_event.completed_at;
+    let duration_ms = turn_complete_event.duration_ms;
+    let native_thread_id = conversation_id.to_string();
+    let native_turn_id = event_turn_id.clone();
 
     emit_turn_completed_with_status(
         conversation_id,
@@ -1524,12 +1536,33 @@ async fn handle_turn_complete(
             status,
             error,
             started_at: turn_summary.started_at,
-            completed_at: turn_complete_event.completed_at,
-            duration_ms: turn_complete_event.duration_ms,
+            completed_at,
+            duration_ms,
         },
         outgoing,
     )
     .await;
+
+    if let Some(memythos_processor) = memythos_processor {
+        memythos_processor
+            .record_native_turn_completed(
+                &native_thread_id,
+                &native_turn_id,
+                status_label,
+                completed_at,
+                duration_ms,
+            )
+            .await;
+    }
+}
+
+fn turn_status_label(status: &TurnStatus) -> &'static str {
+    match status {
+        TurnStatus::Completed => "completed",
+        TurnStatus::Interrupted => "interrupted",
+        TurnStatus::Failed => "failed",
+        TurnStatus::InProgress => "in_progress",
+    }
 }
 
 async fn handle_turn_interrupted(
@@ -2404,6 +2437,7 @@ mod tests {
                 self.thread_watch_manager.clone(),
                 Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
                 "test-provider".to_string(),
+                Arc::new(std::sync::Mutex::new(None)),
             )
             .await;
         }
@@ -3363,6 +3397,7 @@ mod tests {
             thread_watch_manager,
             Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             "test-provider".to_string(),
+            Arc::new(std::sync::Mutex::new(None)),
         )
         .await;
 
@@ -3433,6 +3468,7 @@ mod tests {
             thread_watch_manager.clone(),
             Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             "test-provider".to_string(),
+            Arc::new(std::sync::Mutex::new(None)),
         )
         .await;
 
@@ -3505,6 +3541,7 @@ mod tests {
             turn_complete_event(&event_turn_id),
             &outgoing,
             &thread_state,
+            None,
         )
         .await;
 
@@ -3608,6 +3645,7 @@ mod tests {
             turn_complete_event(&event_turn_id),
             &outgoing,
             &thread_state,
+            None,
         )
         .await;
 
@@ -3843,6 +3881,7 @@ mod tests {
             turn_complete_event(&a_turn1),
             &outgoing,
             &thread_state,
+            None,
         )
         .await;
 
@@ -3864,6 +3903,7 @@ mod tests {
             turn_complete_event(&b_turn1),
             &outgoing,
             &thread_state,
+            None,
         )
         .await;
 
@@ -3875,6 +3915,7 @@ mod tests {
             turn_complete_event(&a_turn2),
             &outgoing,
             &thread_state,
+            None,
         )
         .await;
 

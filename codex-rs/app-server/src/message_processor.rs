@@ -396,6 +396,7 @@ impl MessageProcessor {
         let skills_watcher = SkillsWatcher::new(thread_manager.skills_service(), outgoing.clone());
 
         let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
+        let memythos_processor_holder = Arc::new(std::sync::Mutex::new(None));
         let thread_watch_manager =
             crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
         let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
@@ -498,6 +499,7 @@ impl MessageProcessor {
             state_db.clone(),
             log_db,
             Arc::clone(&skills_watcher),
+            Arc::clone(&memythos_processor_holder),
         );
         let turn_processor = TurnRequestProcessor::new(
             auth_manager.clone(),
@@ -512,6 +514,7 @@ impl MessageProcessor {
             thread_watch_manager,
             thread_list_state_permit,
             Arc::clone(&skills_watcher),
+            Arc::clone(&memythos_processor_holder),
         );
         let memythos_processor = MemythosRequestProcessor::new_for_transport_with_peer_delivery(
             rpc_transport,
@@ -519,6 +522,9 @@ impl MessageProcessor {
                 turn_processor.clone(),
             )),
         );
+        *memythos_processor_holder
+            .lock()
+            .expect("memythos processor holder poisoned") = Some(memythos_processor.clone());
         if matches!(plugin_startup_tasks, crate::PluginStartupTasks::Start) {
             // Keep plugin startup warmups aligned at app-server startup.
             let on_effective_plugins_changed =

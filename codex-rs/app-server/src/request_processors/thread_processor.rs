@@ -360,6 +360,7 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) log_db: Option<LogDbLayer>,
     pub(super) background_tasks: TaskTracker,
     pub(super) skills_watcher: Arc<SkillsWatcher>,
+    pub(super) memythos_processor: Arc<std::sync::Mutex<Option<MemythosRequestProcessor>>>,
 }
 
 /// Outcome of trying to satisfy a resume request from an already loaded thread.
@@ -391,6 +392,7 @@ impl ThreadRequestProcessor {
         state_db: Option<StateDbHandle>,
         log_db: Option<LogDbLayer>,
         skills_watcher: Arc<SkillsWatcher>,
+        memythos_processor: Arc<std::sync::Mutex<Option<MemythosRequestProcessor>>>,
     ) -> Self {
         Self {
             auth_manager,
@@ -409,6 +411,7 @@ impl ThreadRequestProcessor {
             log_db,
             background_tasks: TaskTracker::new(),
             skills_watcher,
+            memythos_processor,
         }
     }
 
@@ -842,6 +845,7 @@ impl ThreadRequestProcessor {
             fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
+            memythos_processor: Arc::clone(&self.memythos_processor),
         }
     }
 
@@ -942,6 +946,7 @@ impl ThreadRequestProcessor {
             fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
+            memythos_processor: Arc::clone(&self.memythos_processor),
         };
         let request_trace = request_context.request_trace();
         let config_manager = self.config_manager.clone();

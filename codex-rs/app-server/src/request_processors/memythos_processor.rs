@@ -931,6 +931,70 @@ impl MemythosRequestProcessor {
         true
     }
 
+    pub(crate) async fn record_native_turn_completed(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        status: &str,
+        completed_at: Option<i64>,
+        duration_ms: Option<i64>,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        let Some((layer_id, arena_id)) = find_attachment_context(&state, thread_id) else {
+            return false;
+        };
+
+        let native_event_ref =
+            format!("app-server://threads/{thread_id}/turns/{turn_id}/completed");
+        let mut matched_delivery = false;
+        for delivery in state
+            .arena_message_deliveries
+            .iter_mut()
+            .filter(|delivery| {
+                delivery.receiver_thread_id == thread_id
+                    && delivery.receiver_turn_id.as_deref() == Some(turn_id)
+            })
+        {
+            matched_delivery = true;
+            delivery.status = match status {
+                "completed" => "receiver_turn_completed".to_string(),
+                "failed" => "receiver_turn_failed".to_string(),
+                "interrupted" => "receiver_turn_interrupted".to_string(),
+                _ => format!("receiver_turn_{status}"),
+            };
+            delivery.receiver_response_event_ref = Some(native_event_ref.clone());
+            if !delivery.event_refs.contains(&native_event_ref) {
+                delivery.event_refs.push(native_event_ref.clone());
+            }
+        }
+
+        let detail_ref = completed_at.map(|completed_at| {
+            format!("app-server://threads/{thread_id}/turns/{turn_id}/completed_at/{completed_at}")
+        });
+        let summary = match duration_ms {
+            Some(duration_ms) => format!(
+                "Native turn {turn_id} for thread {thread_id} completed with status {status} in {duration_ms}ms."
+            ),
+            None => format!(
+                "Native turn {turn_id} for thread {thread_id} completed with status {status}."
+            ),
+        };
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::ArenaMessage,
+            MemythosTelemetrySource::AppServerNative,
+            Some(layer_id),
+            Some(arena_id),
+            Some(thread_id.to_string()),
+            Some(native_event_ref),
+            detail_ref,
+            MemythosEventChannel::StateTransition,
+            summary,
+        );
+
+        matched_delivery
+    }
+
     fn push_telemetry_ref(
         &self,
         state: &mut MemythosRuntimeState,
@@ -1791,6 +1855,169 @@ mod tests {
             Some("turn_for_thread_risk_message-live-001")
         );
         assert!(!observation_response.observations[0].treated_as_human_instruction);
+    }
+
+    #[tokio::test]
+    async fn native_turn_completion_promotes_parent_peer_observation() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_peer_delivery(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+        );
+        let layer_response = processor
+            .layer_create(MemythosLayerCreateParams {
+                name: "BPM E2E".to_string(),
+                kind: MemythosLayerKind::BpmEndToEnd,
+                parent_layer_id: None,
+                objective: "Resolve an end-to-end process segment.".to_string(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosLayerCreate(layer_response) = layer_response else {
+            panic!("expected MemythosLayerCreate response");
+        };
+        let arena_response = processor
+            .arena_create(MemythosArenaCreateParams {
+                layer_id: layer_response.layer.layer_id.clone(),
+                name: "Parent peer arena".to_string(),
+                kind: MemythosArenaKind::Debate,
+                objective: "Let parent peers challenge ownership and routing.".to_string(),
+                participant_ids: vec![],
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaCreate(arena_response) = arena_response else {
+            panic!("expected MemythosArenaCreate response");
+        };
+
+        for thread_id in ["thread_growth", "thread_risk"] {
+            processor
+                .thread_attach(MemythosThreadAttachParams {
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    role_id: Some("bettor".to_string()),
+                    stance_id: Some(thread_id.to_string()),
+                    objective: Some("Debate the BPM node contract.".to_string()),
+                    contract_ref: Some("arena-contract.json".to_string()),
+                })
+                .await
+                .unwrap();
+            processor
+                .arena_parent_register(MemythosArenaParentRegisterParams {
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    parent_role: "bettor".to_string(),
+                    stance_profile: thread_id.to_string(),
+                    authority_scope: vec!["peer_debate".to_string()],
+                })
+                .await
+                .unwrap();
+        }
+
+        processor
+            .arena_message_send(MemythosArenaMessageSendParams {
+                message: MemythosArenaMessage {
+                    message_id: "message-live-002".to_string(),
+                    case_id: "case-001".to_string(),
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    round_id: "round-001".to_string(),
+                    from_parent_thread_id: "thread_growth".to_string(),
+                    from_parent_role: "bettor".to_string(),
+                    to_parent_thread_id: "thread_risk".to_string(),
+                    to_parent_role: "bettor".to_string(),
+                    message_kind: "peer_objection".to_string(),
+                    human_summary: "Challenge ambiguous ownership before tactical execution."
+                        .to_string(),
+                    context_packet_ref: "artifact://context/minimal".to_string(),
+                    artifact_refs: vec!["arena-contract.json".to_string()],
+                    requires_response: true,
+                    response_contract: Some("peer_objection_response".to_string()),
+                },
+            })
+            .await
+            .unwrap();
+
+        let matched = processor
+            .record_native_turn_completed(
+                "thread_risk",
+                "turn_for_thread_risk_message-live-002",
+                "completed",
+                Some(1234),
+                Some(2500),
+            )
+            .await;
+        assert!(matched);
+
+        let list_response = processor
+            .arena_message_list(MemythosArenaMessageListParams {
+                arena_id: arena_response.arena.arena_id.clone(),
+                round_id: Some("round-001".to_string()),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaMessageList(list_response) = list_response else {
+            panic!("expected MemythosArenaMessageList response");
+        };
+        assert_eq!(list_response.deliveries.len(), 1);
+        assert_eq!(
+            list_response.deliveries[0].status,
+            "receiver_turn_completed"
+        );
+        assert_eq!(
+            list_response.deliveries[0]
+                .receiver_response_event_ref
+                .as_deref(),
+            Some(
+                "app-server://threads/thread_risk/turns/turn_for_thread_risk_message-live-002/completed"
+            )
+        );
+
+        let observation_response = processor
+            .arena_message_observation_list(MemythosArenaMessageObservationListParams {
+                arena_id: arena_response.arena.arena_id.clone(),
+                round_id: Some("round-001".to_string()),
+                message_id: Some("message-live-002".to_string()),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaMessageObservationList(observation_response) =
+            observation_response
+        else {
+            panic!("expected MemythosArenaMessageObservationList response");
+        };
+        assert_eq!(
+            observation_response.observations[0].observed_response_kind,
+            MemythosParentPeerResponseKind::Ack
+        );
+        assert_eq!(
+            observation_response.observations[0].semantic_alignment,
+            MemythosSemanticAlignment::Acceptable
+        );
+
+        let telemetry_response = processor
+            .telemetry_list(MemythosTelemetryListParams {
+                layer_id: Some(layer_response.layer.layer_id),
+                arena_id: Some(arena_response.arena.arena_id),
+                thread_id: Some("thread_risk".to_string()),
+                limit: Some(20),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosTelemetryList(telemetry_response) = telemetry_response
+        else {
+            panic!("expected MemythosTelemetryList response");
+        };
+        assert!(
+            telemetry_response
+                .telemetry_refs
+                .iter()
+                .any(|telemetry_ref| {
+                    telemetry_ref.source == MemythosTelemetrySource::AppServerNative
+                        && telemetry_ref.native_event_ref.as_deref()
+                            == Some(
+                                "app-server://threads/thread_risk/turns/turn_for_thread_risk_message-live-002/completed"
+                            )
+                })
+        );
     }
 
     #[tokio::test]
