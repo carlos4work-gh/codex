@@ -3,6 +3,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use ts_rs::TS;
 
+use super::ThreadGoalStatus;
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = "v2/")]
@@ -487,6 +489,22 @@ pub struct MemythosParentThreadContinuity {
     pub observed_turn_count: usize,
     pub memory_replay_required: bool,
     pub goal_snapshot_available: bool,
+    #[ts(optional = nullable)]
+    pub goal_snapshot_ref: Option<String>,
+    #[ts(optional = nullable)]
+    pub budget_state_ref: Option<String>,
+    #[ts(optional = nullable)]
+    pub goal_status: Option<ThreadGoalStatus>,
+    #[ts(optional = nullable)]
+    pub token_budget: Option<i64>,
+    #[ts(optional = nullable)]
+    pub tokens_used: Option<i64>,
+    #[ts(optional = nullable)]
+    pub time_used_seconds: Option<i64>,
+    #[ts(optional = nullable)]
+    pub latest_turn_completed_ref: Option<String>,
+    #[ts(optional = nullable)]
+    pub token_usage_ref: Option<String>,
     pub evidence_refs: Vec<String>,
     pub degraded_reasons: Vec<String>,
 }

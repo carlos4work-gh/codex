@@ -55,6 +55,9 @@ use codex_app_server_protocol::MemythosThreadAttachment;
 use codex_app_server_protocol::MemythosThreadListParams;
 use codex_app_server_protocol::MemythosThreadListResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadGoal;
+use codex_app_server_protocol::ThreadGoalGetParams;
+use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput;
 use tokio::sync::Mutex;
@@ -62,6 +65,7 @@ use tokio::sync::Mutex;
 use crate::error_code::invalid_params;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
+use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
 
 struct MemythosRuntimeState {
@@ -79,6 +83,96 @@ struct MemythosRuntimeState {
     arena_parents: HashMap<String, MemythosArenaParent>,
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
     telemetry_refs: Vec<MemythosTelemetryRef>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParentGoalSnapshot {
+    goal_snapshot_ref: Option<String>,
+    budget_state_ref: Option<String>,
+    goal_status: Option<ThreadGoalStatus>,
+    token_budget: Option<i64>,
+    tokens_used: Option<i64>,
+    time_used_seconds: Option<i64>,
+    evidence_refs: Vec<String>,
+    degraded_reason: Option<String>,
+}
+
+pub(crate) type ParentGoalSnapshotFuture<'a> =
+    Pin<Box<dyn Future<Output = ParentGoalSnapshot> + Send + 'a>>;
+
+pub(crate) trait ParentGoalSnapshotAdapter: Send + Sync {
+    fn current_goal_snapshot<'a>(&'a self, thread_id: &'a str) -> ParentGoalSnapshotFuture<'a>;
+}
+
+#[derive(Debug)]
+struct RecordOnlyParentGoalSnapshotAdapter;
+
+impl ParentGoalSnapshotAdapter for RecordOnlyParentGoalSnapshotAdapter {
+    fn current_goal_snapshot<'a>(&'a self, _thread_id: &'a str) -> ParentGoalSnapshotFuture<'a> {
+        Box::pin(async move {
+            ParentGoalSnapshot {
+                goal_snapshot_ref: None,
+                budget_state_ref: None,
+                goal_status: None,
+                token_budget: None,
+                tokens_used: None,
+                time_used_seconds: None,
+                evidence_refs: Vec::new(),
+                degraded_reason: Some("goal snapshot adapter not available".to_string()),
+            }
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ThreadGoalParentSnapshotAdapter {
+    thread_goal_processor: ThreadGoalRequestProcessor,
+}
+
+impl ThreadGoalParentSnapshotAdapter {
+    pub(crate) fn new(thread_goal_processor: ThreadGoalRequestProcessor) -> Self {
+        Self {
+            thread_goal_processor,
+        }
+    }
+}
+
+impl ParentGoalSnapshotAdapter for ThreadGoalParentSnapshotAdapter {
+    fn current_goal_snapshot<'a>(&'a self, thread_id: &'a str) -> ParentGoalSnapshotFuture<'a> {
+        Box::pin(async move {
+            match self
+                .thread_goal_processor
+                .thread_goal_get(ThreadGoalGetParams {
+                    thread_id: thread_id.to_string(),
+                })
+                .await
+            {
+                Ok(Some(ClientResponsePayload::ThreadGoalGet(response))) => {
+                    parent_goal_snapshot_from_goal(thread_id, response.goal)
+                }
+                Ok(_) => ParentGoalSnapshot {
+                    goal_snapshot_ref: None,
+                    budget_state_ref: None,
+                    goal_status: None,
+                    token_budget: None,
+                    tokens_used: None,
+                    time_used_seconds: None,
+                    evidence_refs: Vec::new(),
+                    degraded_reason: Some("thread/goal/get returned no goal payload".to_string()),
+                },
+                Err(error) => ParentGoalSnapshot {
+                    goal_snapshot_ref: None,
+                    budget_state_ref: None,
+                    goal_status: None,
+                    token_budget: None,
+                    tokens_used: None,
+                    time_used_seconds: None,
+                    evidence_refs: Vec::new(),
+                    degraded_reason: Some(format!("thread/goal/get failed: {}", error.message)),
+                },
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +422,7 @@ fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> String {
 pub(crate) struct MemythosRequestProcessor {
     state: Arc<Mutex<MemythosRuntimeState>>,
     peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
+    parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
     next_layer_id: Arc<AtomicU64>,
     next_arena_id: Arc<AtomicU64>,
     next_attachment_id: Arc<AtomicU64>,
@@ -351,6 +446,18 @@ impl MemythosRequestProcessor {
     pub(crate) fn new_for_transport_with_peer_delivery(
         rpc_transport: AppServerRpcTransport,
         peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
+    ) -> Self {
+        Self::new_for_transport_with_adapters(
+            rpc_transport,
+            peer_parent_delivery_adapter,
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+        )
+    }
+
+    pub(crate) fn new_for_transport_with_adapters(
+        rpc_transport: AppServerRpcTransport,
+        peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
+        parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
     ) -> Self {
         let (connection_mode, transport_owner, transport_id, daemon_runtime_verified) =
             match rpc_transport {
@@ -387,6 +494,7 @@ impl MemythosRequestProcessor {
                 telemetry_refs: Vec::new(),
             })),
             peer_parent_delivery_adapter,
+            parent_goal_snapshot_adapter,
             next_layer_id: Arc::new(AtomicU64::default()),
             next_arena_id: Arc::new(AtomicU64::default()),
             next_attachment_id: Arc::new(AtomicU64::default()),
@@ -794,7 +902,7 @@ impl MemythosRequestProcessor {
             )));
         }
 
-        let continuities = state
+        let parents = state
             .arena_parents
             .values()
             .filter(|parent| parent.arena_id == params.arena_id)
@@ -804,8 +912,23 @@ impl MemythosRequestProcessor {
                     .as_ref()
                     .map_or(true, |thread_id| &parent.thread_id == thread_id)
             })
-            .map(|parent| build_parent_thread_continuity(parent, &state.arena_message_deliveries))
-            .collect();
+            .cloned()
+            .collect::<Vec<_>>();
+        let deliveries = state.arena_message_deliveries.clone();
+        drop(state);
+
+        let mut continuities = Vec::with_capacity(parents.len());
+        for parent in parents {
+            let goal_snapshot = self
+                .parent_goal_snapshot_adapter
+                .current_goal_snapshot(&parent.thread_id)
+                .await;
+            continuities.push(build_parent_thread_continuity(
+                &parent,
+                &deliveries,
+                goal_snapshot,
+            ));
+        }
 
         Ok(MemythosParentContinuityListResponse { continuities }.into())
     }
@@ -1077,6 +1200,7 @@ fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
 fn build_parent_thread_continuity(
     parent: &MemythosArenaParent,
     deliveries: &[MemythosArenaMessageDelivery],
+    goal_snapshot: ParentGoalSnapshot,
 ) -> MemythosParentThreadContinuity {
     let parent_deliveries = deliveries
         .iter()
@@ -1091,6 +1215,11 @@ fn build_parent_thread_continuity(
     let first_turn_id = turn_ids.first().cloned();
     let latest_turn_id = turn_ids.last().cloned();
     let observed_turn_count = turn_ids.len();
+    let latest_turn_completed_ref = parent_deliveries
+        .iter()
+        .rev()
+        .find_map(|delivery| delivery.receiver_response_event_ref.clone());
+    let token_usage_ref = None;
     let memory_replay_required = parent_deliveries
         .iter()
         .any(|delivery| delivery.memory_replay_required);
@@ -1098,6 +1227,9 @@ fn build_parent_thread_continuity(
 
     if memory_replay_required {
         degraded_reasons.push("at least one delivery required memory replay".to_string());
+    }
+    if let Some(degraded_reason) = goal_snapshot.degraded_reason.clone() {
+        degraded_reasons.push(degraded_reason);
     }
 
     let continuity_status = match observed_turn_count {
@@ -1110,6 +1242,9 @@ fn build_parent_thread_continuity(
             MemythosParentContinuityStatus::SingleTurnObserved
         }
         _ if memory_replay_required => MemythosParentContinuityStatus::Degraded,
+        _ if goal_snapshot.goal_snapshot_ref.is_some() && latest_turn_completed_ref.is_some() => {
+            MemythosParentContinuityStatus::Verified
+        }
         _ => MemythosParentContinuityStatus::TurnContinuityObserved,
     };
 
@@ -1117,6 +1252,13 @@ fn build_parent_thread_continuity(
         .iter()
         .flat_map(|delivery| delivery.event_refs.clone())
         .collect::<Vec<_>>();
+    evidence_refs.extend(goal_snapshot.evidence_refs.clone());
+    if let Some(latest_turn_completed_ref) = latest_turn_completed_ref.clone() {
+        evidence_refs.push(latest_turn_completed_ref);
+    }
+    if let Some(token_usage_ref) = token_usage_ref.clone() {
+        evidence_refs.push(token_usage_ref);
+    }
     evidence_refs.sort();
     evidence_refs.dedup();
 
@@ -1130,9 +1272,45 @@ fn build_parent_thread_continuity(
         latest_turn_id,
         observed_turn_count,
         memory_replay_required,
-        goal_snapshot_available: false,
+        goal_snapshot_available: goal_snapshot.goal_snapshot_ref.is_some(),
+        goal_snapshot_ref: goal_snapshot.goal_snapshot_ref,
+        budget_state_ref: goal_snapshot.budget_state_ref,
+        goal_status: goal_snapshot.goal_status,
+        token_budget: goal_snapshot.token_budget,
+        tokens_used: goal_snapshot.tokens_used,
+        time_used_seconds: goal_snapshot.time_used_seconds,
+        latest_turn_completed_ref,
+        token_usage_ref,
         evidence_refs,
         degraded_reasons,
+    }
+}
+
+fn parent_goal_snapshot_from_goal(thread_id: &str, goal: Option<ThreadGoal>) -> ParentGoalSnapshot {
+    let Some(goal) = goal else {
+        return ParentGoalSnapshot {
+            goal_snapshot_ref: None,
+            budget_state_ref: None,
+            goal_status: None,
+            token_budget: None,
+            tokens_used: None,
+            time_used_seconds: None,
+            evidence_refs: Vec::new(),
+            degraded_reason: Some("thread/goal/get returned no active goal".to_string()),
+        };
+    };
+
+    let goal_snapshot_ref = format!("app-server://threads/{thread_id}/goals/current");
+    let budget_state_ref = format!("app-server://threads/{thread_id}/budget/current");
+    ParentGoalSnapshot {
+        goal_snapshot_ref: Some(goal_snapshot_ref.clone()),
+        budget_state_ref: Some(budget_state_ref.clone()),
+        goal_status: Some(goal.status),
+        token_budget: goal.token_budget,
+        tokens_used: Some(goal.tokens_used),
+        time_used_seconds: Some(goal.time_used_seconds),
+        evidence_refs: vec![goal_snapshot_ref, budget_state_ref],
+        degraded_reason: None,
     }
 }
 
@@ -1239,6 +1417,33 @@ mod tests {
                         "Arena message {} delivered to live parent thread {}.",
                         message.message_id, message.to_parent_thread_id
                     ),
+                }
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeParentGoalSnapshotAdapter;
+
+    impl ParentGoalSnapshotAdapter for FakeParentGoalSnapshotAdapter {
+        fn current_goal_snapshot<'a>(&'a self, thread_id: &'a str) -> ParentGoalSnapshotFuture<'a> {
+            Box::pin(async move {
+                ParentGoalSnapshot {
+                    goal_snapshot_ref: Some(format!(
+                        "app-server://threads/{thread_id}/goals/current"
+                    )),
+                    budget_state_ref: Some(format!(
+                        "app-server://threads/{thread_id}/budget/current"
+                    )),
+                    goal_status: Some(ThreadGoalStatus::Active),
+                    token_budget: Some(20_000),
+                    tokens_used: Some(3_800),
+                    time_used_seconds: Some(71),
+                    evidence_refs: vec![
+                        format!("app-server://threads/{thread_id}/goals/current"),
+                        format!("app-server://threads/{thread_id}/budget/current"),
+                    ],
+                    degraded_reason: None,
                 }
             })
         }
@@ -2130,5 +2335,136 @@ mod tests {
         );
         assert!(!continuity.memory_replay_required);
         assert!(!continuity.goal_snapshot_available);
+    }
+
+    #[tokio::test]
+    async fn parent_continuity_is_verified_with_goal_snapshot_and_completed_turn() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+        );
+        let layer_response = processor
+            .layer_create(MemythosLayerCreateParams {
+                name: "BPM E2E".to_string(),
+                kind: MemythosLayerKind::BpmEndToEnd,
+                parent_layer_id: None,
+                objective: "Resolve an end-to-end process segment.".to_string(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosLayerCreate(layer_response) = layer_response else {
+            panic!("expected MemythosLayerCreate response");
+        };
+        let arena_response = processor
+            .arena_create(MemythosArenaCreateParams {
+                layer_id: layer_response.layer.layer_id,
+                name: "Parent peer arena".to_string(),
+                kind: MemythosArenaKind::Debate,
+                objective: "Let parent peers challenge ownership and routing.".to_string(),
+                participant_ids: vec![],
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaCreate(arena_response) = arena_response else {
+            panic!("expected MemythosArenaCreate response");
+        };
+
+        for thread_id in ["thread_growth", "thread_risk"] {
+            processor
+                .thread_attach(MemythosThreadAttachParams {
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    role_id: Some("bettor".to_string()),
+                    stance_id: Some(thread_id.to_string()),
+                    objective: Some("Debate the BPM node contract.".to_string()),
+                    contract_ref: Some("arena-contract.json".to_string()),
+                })
+                .await
+                .unwrap();
+            processor
+                .arena_parent_register(MemythosArenaParentRegisterParams {
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    parent_role: "bettor".to_string(),
+                    stance_profile: thread_id.to_string(),
+                    authority_scope: vec!["peer_debate".to_string()],
+                })
+                .await
+                .unwrap();
+        }
+
+        for message_id in ["message-live-001", "message-live-002"] {
+            processor
+                .arena_message_send(MemythosArenaMessageSendParams {
+                    message: MemythosArenaMessage {
+                        message_id: message_id.to_string(),
+                        case_id: "case-001".to_string(),
+                        arena_id: arena_response.arena.arena_id.clone(),
+                        round_id: "round-001".to_string(),
+                        from_parent_thread_id: "thread_growth".to_string(),
+                        from_parent_role: "bettor".to_string(),
+                        to_parent_thread_id: "thread_risk".to_string(),
+                        to_parent_role: "bettor".to_string(),
+                        message_kind: "peer_objection".to_string(),
+                        human_summary: "Challenge ambiguous ownership before tactical execution."
+                            .to_string(),
+                        context_packet_ref: "artifact://context/minimal".to_string(),
+                        artifact_refs: vec!["arena-contract.json".to_string()],
+                        requires_response: true,
+                        response_contract: Some("peer_objection_response".to_string()),
+                    },
+                })
+                .await
+                .unwrap();
+        }
+        processor
+            .record_native_turn_completed(
+                "thread_risk",
+                "turn_for_thread_risk_message-live-002",
+                "completed",
+                Some(1234),
+                Some(2500),
+            )
+            .await;
+
+        let continuity_response = processor
+            .parent_continuity_list(MemythosParentContinuityListParams {
+                arena_id: arena_response.arena.arena_id,
+                thread_id: Some("thread_risk".to_string()),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosParentContinuityList(continuity_response) =
+            continuity_response
+        else {
+            panic!("expected MemythosParentContinuityList response");
+        };
+
+        assert_eq!(continuity_response.continuities.len(), 1);
+        let continuity = &continuity_response.continuities[0];
+        assert_eq!(
+            continuity.continuity_status,
+            MemythosParentContinuityStatus::Verified
+        );
+        assert!(continuity.goal_snapshot_available);
+        assert_eq!(
+            continuity.goal_snapshot_ref.as_deref(),
+            Some("app-server://threads/thread_risk/goals/current")
+        );
+        assert_eq!(
+            continuity.budget_state_ref.as_deref(),
+            Some("app-server://threads/thread_risk/budget/current")
+        );
+        assert_eq!(continuity.goal_status, Some(ThreadGoalStatus::Active));
+        assert_eq!(continuity.token_budget, Some(20_000));
+        assert_eq!(continuity.tokens_used, Some(3_800));
+        assert_eq!(continuity.time_used_seconds, Some(71));
+        assert_eq!(
+            continuity.latest_turn_completed_ref.as_deref(),
+            Some(
+                "app-server://threads/thread_risk/turns/turn_for_thread_risk_message-live-002/completed"
+            )
+        );
     }
 }

@@ -37,6 +37,7 @@ use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
 use crate::request_processors::SearchRequestProcessor;
+use crate::request_processors::ThreadGoalParentSnapshotAdapter;
 use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
@@ -516,10 +517,13 @@ impl MessageProcessor {
             Arc::clone(&skills_watcher),
             Arc::clone(&memythos_processor_holder),
         );
-        let memythos_processor = MemythosRequestProcessor::new_for_transport_with_peer_delivery(
+        let memythos_processor = MemythosRequestProcessor::new_for_transport_with_adapters(
             rpc_transport,
             Arc::new(TurnStartPeerParentDeliveryAdapter::new(
                 turn_processor.clone(),
+            )),
+            Arc::new(ThreadGoalParentSnapshotAdapter::new(
+                thread_goal_processor.clone(),
             )),
         );
         *memythos_processor_holder
