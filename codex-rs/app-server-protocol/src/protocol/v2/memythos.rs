@@ -357,8 +357,16 @@ pub struct MemythosArenaMessageDelivery {
     pub receiver_thread_id: String,
     pub arena_id: String,
     pub round_id: String,
+    pub delivery_mechanism: String,
+    #[ts(optional = nullable)]
+    pub receiver_turn_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub receiver_response_event_ref: Option<String>,
+    pub delivered_as_human_instruction: bool,
     pub memory_replay_required: bool,
     pub event_refs: Vec<String>,
+    #[ts(optional = nullable)]
+    pub rejection_reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

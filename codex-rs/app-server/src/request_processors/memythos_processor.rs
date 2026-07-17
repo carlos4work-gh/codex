@@ -450,8 +450,10 @@ impl MemythosRequestProcessor {
             &params.message.arena_id,
             &params.message.from_parent_thread_id,
         );
-        let receiver_key =
-            arena_parent_key(&params.message.arena_id, &params.message.to_parent_thread_id);
+        let receiver_key = arena_parent_key(
+            &params.message.arena_id,
+            &params.message.to_parent_thread_id,
+        );
         if !state.arena_parents.contains_key(&sender_key) {
             return Err(invalid_params(format!(
                 "sender parent {} is not registered in arena {}",
@@ -473,13 +475,18 @@ impl MemythosRequestProcessor {
         let delivery = MemythosArenaMessageDelivery {
             delivery_id,
             message_id: params.message.message_id,
-            status: "delivered".to_string(),
+            status: "recorded".to_string(),
             sender_thread_id: params.message.from_parent_thread_id,
             receiver_thread_id: params.message.to_parent_thread_id,
             arena_id: params.message.arena_id,
             round_id: params.message.round_id,
+            delivery_mechanism: "record_only".to_string(),
+            receiver_turn_id: None,
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
             memory_replay_required: false,
             event_refs,
+            rejection_reason: None,
         };
         state.arena_message_deliveries.push(delivery.clone());
         self.push_telemetry_ref(
@@ -491,9 +498,9 @@ impl MemythosRequestProcessor {
             Some(delivery.receiver_thread_id.clone()),
             delivery.event_refs.first().cloned(),
             None,
-            MemythosEventChannel::HumanHighlight,
+            MemythosEventChannel::TechnicalDetail,
             format!(
-                "Arena message {} delivered from {} to {}.",
+                "Arena message {} recorded from {} to {}; live turn delivery is not proven.",
                 delivery.message_id, delivery.sender_thread_id, delivery.receiver_thread_id
             ),
         );
@@ -684,8 +691,8 @@ fn compact_summary(summary: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_app_server_protocol::MemythosArenaMessage;
     use codex_app_server_protocol::MemythosArenaKind;
+    use codex_app_server_protocol::MemythosArenaMessage;
     use codex_app_server_protocol::MemythosLayerKind;
 
     #[tokio::test]
@@ -1072,7 +1079,10 @@ mod tests {
             let ClientResponsePayload::MemythosArenaParentRegister(response) = response else {
                 panic!("expected MemythosArenaParentRegister response");
             };
-            assert_eq!(response.parent.lifecycle_state, MemythosArenaLifecycleState::Running);
+            assert_eq!(
+                response.parent.lifecycle_state,
+                MemythosArenaLifecycleState::Running
+            );
         }
 
         let send_response = processor
@@ -1100,7 +1110,11 @@ mod tests {
         let ClientResponsePayload::MemythosArenaMessageSend(send_response) = send_response else {
             panic!("expected MemythosArenaMessageSend response");
         };
-        assert_eq!(send_response.delivery.status, "delivered");
+        assert_eq!(send_response.delivery.status, "recorded");
+        assert_eq!(send_response.delivery.delivery_mechanism, "record_only");
+        assert_eq!(send_response.delivery.receiver_turn_id, None);
+        assert_eq!(send_response.delivery.receiver_response_event_ref, None);
+        assert!(!send_response.delivery.delivered_as_human_instruction);
         assert_eq!(send_response.delivery.memory_replay_required, false);
         assert_eq!(send_response.delivery.receiver_thread_id, "thread_risk");
 
@@ -1130,10 +1144,15 @@ mod tests {
         else {
             panic!("expected MemythosTelemetryList response");
         };
-        assert!(telemetry_response.telemetry_refs.iter().any(|telemetry_ref| {
-            telemetry_ref.kind == MemythosTelemetryRefKind::ArenaMessage
-                && telemetry_ref.channel == MemythosEventChannel::HumanHighlight
-                && telemetry_ref.native_event_ref.is_some()
-        }));
+        assert!(
+            telemetry_response
+                .telemetry_refs
+                .iter()
+                .any(|telemetry_ref| {
+                    telemetry_ref.kind == MemythosTelemetryRefKind::ArenaMessage
+                        && telemetry_ref.channel == MemythosEventChannel::TechnicalDetail
+                        && telemetry_ref.native_event_ref.is_some()
+                })
+        );
     }
 }
