@@ -522,6 +522,121 @@ pub struct MemythosRoomRegisterResponse {
     pub event_refs: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomActivityListParams {
+    pub room_id: String,
+    #[ts(optional = nullable)]
+    pub round_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub since_cursor: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub include_debug_refs: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomActivityParticipant {
+    pub parent_key: String,
+    pub thread_id: String,
+    pub parent_role: String,
+    pub stance_profile: String,
+    pub status: String,
+    #[ts(optional = nullable)]
+    pub goal_ref: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomActivityItem {
+    pub kind: String,
+    pub status: String,
+    pub summary: String,
+    #[ts(optional = nullable)]
+    pub text: Option<String>,
+    pub event_ref: String,
+    #[serde(default)]
+    pub refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomActivityTurn {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub status: String,
+    pub items: Vec<MemythosRoomActivityItem>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomActivityLifecycle {
+    pub room_state: String,
+    pub active_turns: usize,
+    pub completed_turns: usize,
+    pub failed_turns: usize,
+    pub clean_close: bool,
+    pub force_closed: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomActivityCollab {
+    pub send_input_count: usize,
+    pub completed_send_input_count: usize,
+    pub failed_send_input_count: usize,
+    pub wait_count: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomActivitySubagents {
+    pub activity_count: usize,
+    pub started_count: usize,
+    pub interacted_count: usize,
+    pub interrupted_count: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomActivityUsage {
+    pub token_usage_events: usize,
+    pub refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomActivityListResponse {
+    pub room_id: String,
+    pub case_id: String,
+    pub layer_id: String,
+    pub arena_id: String,
+    #[ts(optional = nullable)]
+    pub round_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub cursor: Option<String>,
+    pub source_method: String,
+    pub participants: Vec<MemythosRoomActivityParticipant>,
+    pub turns: Vec<MemythosRoomActivityTurn>,
+    pub lifecycle: MemythosRoomActivityLifecycle,
+    pub collab: MemythosRoomActivityCollab,
+    pub subagents: MemythosRoomActivitySubagents,
+    pub usage: MemythosRoomActivityUsage,
+    pub blockers: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

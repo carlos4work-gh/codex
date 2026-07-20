@@ -1246,6 +1246,11 @@ impl MessageProcessor {
                 .room_register(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosRoomActivityList { params, .. } => self
+                .memythos_processor
+                .room_activity_list(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosRoomSendInput { params, .. } => self
                 .memythos_processor
                 .room_send_input(params)

@@ -40,6 +40,15 @@ use codex_app_server_protocol::MemythosParentPeerResponseKind;
 use codex_app_server_protocol::MemythosParentPeerResponseObservation;
 use codex_app_server_protocol::MemythosParentThreadContinuity;
 use codex_app_server_protocol::MemythosRoom;
+use codex_app_server_protocol::MemythosRoomActivityCollab;
+use codex_app_server_protocol::MemythosRoomActivityItem;
+use codex_app_server_protocol::MemythosRoomActivityLifecycle;
+use codex_app_server_protocol::MemythosRoomActivityListParams;
+use codex_app_server_protocol::MemythosRoomActivityListResponse;
+use codex_app_server_protocol::MemythosRoomActivityParticipant;
+use codex_app_server_protocol::MemythosRoomActivitySubagents;
+use codex_app_server_protocol::MemythosRoomActivityTurn;
+use codex_app_server_protocol::MemythosRoomActivityUsage;
 use codex_app_server_protocol::MemythosRoomParticipant;
 use codex_app_server_protocol::MemythosRoomRegisterParams;
 use codex_app_server_protocol::MemythosRoomRegisterResponse;
@@ -115,8 +124,10 @@ pub(crate) trait ParentGoalSnapshotAdapter: Send + Sync {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct RecordOnlyParentGoalSnapshotAdapter;
 
+#[cfg(test)]
 impl ParentGoalSnapshotAdapter for RecordOnlyParentGoalSnapshotAdapter {
     fn current_goal_snapshot<'a>(&'a self, _thread_id: &'a str) -> ParentGoalSnapshotFuture<'a> {
         Box::pin(async move {
@@ -210,8 +221,10 @@ pub(crate) trait PeerParentDeliveryAdapter: Send + Sync {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct RecordOnlyPeerParentDeliveryAdapter;
 
+#[cfg(test)]
 impl PeerParentDeliveryAdapter for RecordOnlyPeerParentDeliveryAdapter {
     fn deliver_peer_parent_message<'a>(
         &'a self,
@@ -446,6 +459,7 @@ impl MemythosRequestProcessor {
         Self::new_for_transport(AppServerRpcTransport::Stdio)
     }
 
+    #[cfg(test)]
     pub(crate) fn new_for_transport(rpc_transport: AppServerRpcTransport) -> Self {
         Self::new_for_transport_with_peer_delivery(
             rpc_transport,
@@ -453,6 +467,7 @@ impl MemythosRequestProcessor {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_for_transport_with_peer_delivery(
         rpc_transport: AppServerRpcTransport,
         peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
@@ -543,6 +558,7 @@ impl MemythosRequestProcessor {
                 "memythos/arena/message".to_string(),
                 "memythos/arena/message/list".to_string(),
                 "memythos/room/register".to_string(),
+                "memythos/room/activity/list".to_string(),
                 "memythos/room/sendInput".to_string(),
                 "memythos/telemetry/list".to_string(),
             ],
@@ -1229,6 +1245,162 @@ impl MemythosRequestProcessor {
         .into())
     }
 
+    pub(crate) async fn room_activity_list(
+        &self,
+        params: MemythosRoomActivityListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state = self.state.lock().await;
+        let room = state
+            .rooms
+            .get(&params.room_id)
+            .cloned()
+            .ok_or_else(|| invalid_params(format!("unknown room id: {}", params.room_id)))?;
+        let participant_thread_ids = room
+            .participants
+            .iter()
+            .map(|participant| participant.thread_id.as_str())
+            .collect::<HashSet<_>>();
+        let mut deliveries = state
+            .arena_message_deliveries
+            .iter()
+            .filter(|delivery| delivery.arena_id == room.arena_id)
+            .filter(|delivery| {
+                params
+                    .round_id
+                    .as_ref()
+                    .map_or(true, |round_id| &delivery.round_id == round_id)
+            })
+            .filter(|delivery| {
+                participant_thread_ids.contains(delivery.sender_thread_id.as_str())
+                    || participant_thread_ids.contains(delivery.receiver_thread_id.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
+        if let Some(limit) = params.limit {
+            deliveries.truncate(limit);
+        }
+
+        let completed_turns = deliveries
+            .iter()
+            .filter(|delivery| delivery.status == "receiver_turn_completed")
+            .count();
+        let failed_turns = deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.status.contains("failed")
+                    || delivery.status.contains("interrupted")
+                    || delivery.rejection_reason.is_some()
+            })
+            .count();
+        let active_turns = deliveries
+            .iter()
+            .filter(|delivery| delivery.receiver_turn_id.is_some())
+            .filter(|delivery| {
+                delivery.status == "delivered_to_live_thread"
+                    || delivery.status == "recorded"
+                    || delivery.status == "receiver_turn_running"
+            })
+            .count();
+        let clean_close = active_turns == 0 && failed_turns == 0;
+        let token_usage_refs = state
+            .native_token_usage_refs
+            .iter()
+            .filter(|(key, _)| {
+                participant_thread_ids
+                    .iter()
+                    .any(|thread_id| key.starts_with(&format!("{thread_id}::")))
+            })
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        let participants = room
+            .participants
+            .iter()
+            .map(|participant| {
+                let participant_deliveries = deliveries
+                    .iter()
+                    .filter(|delivery| delivery.receiver_thread_id == participant.thread_id)
+                    .collect::<Vec<_>>();
+                let status = if participant_deliveries
+                    .iter()
+                    .any(|delivery| delivery.status.contains("failed"))
+                {
+                    "failed"
+                } else if participant_deliveries
+                    .iter()
+                    .any(|delivery| delivery.status == "delivered_to_live_thread")
+                {
+                    "running"
+                } else if participant_deliveries.iter().any(|delivery| {
+                    delivery.status == "receiver_turn_completed"
+                        || delivery.receiver_response_event_ref.is_some()
+                }) {
+                    "completed"
+                } else {
+                    "idle"
+                };
+                MemythosRoomActivityParticipant {
+                    parent_key: participant.parent_key.clone(),
+                    thread_id: participant.thread_id.clone(),
+                    parent_role: participant.parent_role.clone(),
+                    stance_profile: participant.stance_profile.clone(),
+                    status: status.to_string(),
+                    goal_ref: participant.goal_ref.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let turns = deliveries
+            .iter()
+            .filter_map(|delivery| {
+                room_activity_turn_from_delivery(delivery, params.include_debug_refs)
+            })
+            .collect::<Vec<_>>();
+        let cursor = turns
+            .last()
+            .map(|turn| format!("{}::{}", turn.thread_id, turn.turn_id));
+        Ok(MemythosRoomActivityListResponse {
+            room_id: room.room_id,
+            case_id: room.case_id,
+            layer_id: room.layer_id,
+            arena_id: room.arena_id,
+            round_id: params.round_id,
+            cursor,
+            source_method: "memythos/room/activity/list".to_string(),
+            participants,
+            turns,
+            lifecycle: MemythosRoomActivityLifecycle {
+                room_state: if clean_close {
+                    "round_closed".to_string()
+                } else {
+                    "running".to_string()
+                },
+                active_turns,
+                completed_turns,
+                failed_turns,
+                clean_close,
+                force_closed: false,
+            },
+            collab: MemythosRoomActivityCollab {
+                send_input_count: deliveries.len(),
+                completed_send_input_count: completed_turns,
+                failed_send_input_count: failed_turns,
+                wait_count: 0,
+            },
+            subagents: MemythosRoomActivitySubagents {
+                activity_count: 0,
+                started_count: 0,
+                interacted_count: 0,
+                interrupted_count: 0,
+            },
+            usage: MemythosRoomActivityUsage {
+                token_usage_events: token_usage_refs.len(),
+                refs: token_usage_refs,
+            },
+            blockers: Vec::new(),
+        }
+        .into())
+    }
+
     pub(crate) async fn telemetry_list(
         &self,
         params: MemythosTelemetryListParams,
@@ -1441,18 +1613,82 @@ impl MemythosRequestProcessor {
     }
 }
 
+fn room_activity_turn_from_delivery(
+    delivery: &MemythosArenaMessageDelivery,
+    include_debug_refs: bool,
+) -> Option<MemythosRoomActivityTurn> {
+    let turn_id = delivery.receiver_turn_id.clone()?;
+    let status = if delivery.status == "receiver_turn_completed" {
+        "completed"
+    } else if delivery.status.contains("failed") || delivery.rejection_reason.is_some() {
+        "failed"
+    } else {
+        "running"
+    };
+    let mut refs = vec![
+        format!(
+            "app-server://rooms/{}/deliveries/{}",
+            delivery.arena_id, delivery.delivery_id
+        ),
+        format!(
+            "app-server://threads/{}/turns/{}",
+            delivery.receiver_thread_id, turn_id
+        ),
+    ];
+    if include_debug_refs {
+        refs.extend(delivery.event_refs.clone());
+    }
+    let event_ref = delivery
+        .receiver_response_event_ref
+        .clone()
+        .unwrap_or_else(|| {
+            format!(
+                "app-server://threads/{}/turns/{}",
+                delivery.receiver_thread_id, turn_id
+            )
+        });
+    Some(MemythosRoomActivityTurn {
+        thread_id: delivery.receiver_thread_id.clone(),
+        turn_id,
+        status: status.to_string(),
+        items: vec![MemythosRoomActivityItem {
+            kind: "collab_call".to_string(),
+            status: delivery.status.clone(),
+            summary: compact_summary(format!(
+                "{} delivered {} from {} to {}",
+                delivery.delivery_mechanism,
+                delivery.message_id,
+                delivery.sender_thread_id,
+                delivery.receiver_thread_id
+            )),
+            text: None,
+            event_ref,
+            refs: compact_event_refs(refs),
+        }],
+    })
+}
+
 const MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS: usize = 240;
 
 fn find_attachment_context(
     state: &MemythosRuntimeState,
     thread_id: &str,
 ) -> Option<(String, String)> {
-    let attachment = state
+    if let Some(attachment) = state
         .thread_attachments
         .values()
-        .find(|attachment| attachment.thread_id == thread_id)?;
-    let arena = state.arenas.get(&attachment.arena_id)?;
-    Some((arena.layer_id.clone(), attachment.arena_id.clone()))
+        .find(|attachment| attachment.thread_id == thread_id)
+    {
+        let arena = state.arenas.get(&attachment.arena_id)?;
+        return Some((arena.layer_id.clone(), attachment.arena_id.clone()));
+    }
+
+    state.rooms.values().find_map(|room| {
+        room.participants
+            .iter()
+            .any(|participant| participant.thread_id == thread_id)
+            .then(|| (room.layer_id.clone(), room.arena_id.clone()))
+    })
 }
 
 fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
@@ -1875,7 +2111,10 @@ mod tests {
                 response_contract: "peer_response_contract".to_string(),
                 client_user_message_id: Some("message-001".to_string()),
                 prompt: "No soy humano; soy peer de arena. Objeta mi propuesta.".to_string(),
-                metadata: serde_json::Map::new(),
+                metadata: serde_json::Map::from_iter([(
+                    "memythos_round_id".to_string(),
+                    serde_json::Value::String("round-001".to_string()),
+                )]),
                 output_schema: None,
             })
             .await
@@ -1933,7 +2172,10 @@ mod tests {
                 response_contract: "peer_response_contract".to_string(),
                 client_user_message_id: Some("message-002".to_string()),
                 prompt: "Concierge entrega un mensaje entre peers.".to_string(),
-                metadata: serde_json::Map::new(),
+                metadata: serde_json::Map::from_iter([(
+                    "memythos_round_id".to_string(),
+                    serde_json::Value::String("round-001".to_string()),
+                )]),
                 output_schema: None,
             })
             .await
@@ -1946,6 +2188,117 @@ mod tests {
         assert_eq!(
             send_response.delivery.delivery_mechanism,
             "room_loopback_send_input"
+        );
+    }
+
+    #[tokio::test]
+    async fn room_activity_list_returns_compact_initial_view() {
+        let processor = MemythosRequestProcessor::new();
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+
+        let response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: Some("round-001".to_string()),
+                since_cursor: None,
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(response) = response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+
+        assert_eq!(response.source_method, "memythos/room/activity/list");
+        assert_eq!(response.participants.len(), 2);
+        assert!(response.turns.is_empty());
+        assert_eq!(response.lifecycle.room_state, "round_closed");
+        assert!(response.lifecycle.clean_close);
+        assert_eq!(response.collab.send_input_count, 0);
+    }
+
+    #[tokio::test]
+    async fn room_activity_list_summarizes_delivery_completion_and_usage() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+        );
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+        processor
+            .room_send_input(MemythosRoomSendInputParams {
+                room_id: "room-001".to_string(),
+                room_message_ref: "artifact://room/messages/message-003.json".to_string(),
+                delivery_ref: "artifact://room/deliveries/delivery-003.json".to_string(),
+                from_parent_thread_id: Some("thread_growth".to_string()),
+                via_concierge_thread_id: None,
+                to_parent_thread_id: "thread_risk".to_string(),
+                source_parent_key: "case/bpm_e2e/arena/bettor/growth".to_string(),
+                target_parent_key: "case/bpm_e2e/arena/bettor/risk".to_string(),
+                message_kind: "peer_bet".to_string(),
+                message_authority: "peer_debate".to_string(),
+                human_instruction: false,
+                response_contract: "peer_response_contract".to_string(),
+                client_user_message_id: Some("message-003".to_string()),
+                prompt: "Apuesta y declara condiciones de ejecucion.".to_string(),
+                metadata: serde_json::Map::from_iter([(
+                    "memythos_round_id".to_string(),
+                    serde_json::Value::String("round-001".to_string()),
+                )]),
+                output_schema: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            processor
+                .record_native_turn_completed(
+                    "thread_risk",
+                    "turn_for_thread_risk_message-003",
+                    "completed",
+                    Some(1_000),
+                    Some(250)
+                )
+                .await
+        );
+        assert!(
+            processor
+                .record_native_token_usage("thread_risk", "turn_for_thread_risk_message-003")
+                .await
+        );
+
+        let response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: Some("round-001".to_string()),
+                since_cursor: None,
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(response) = response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+
+        assert_eq!(response.turns.len(), 1);
+        assert_eq!(response.turns[0].status, "completed");
+        assert_eq!(response.lifecycle.completed_turns, 1);
+        assert_eq!(response.lifecycle.failed_turns, 0);
+        assert!(response.lifecycle.clean_close);
+        assert_eq!(response.collab.completed_send_input_count, 1);
+        assert_eq!(response.usage.token_usage_events, 1);
+        assert!(
+            response.turns[0].items[0]
+                .refs
+                .iter()
+                .all(|event_ref| { !event_ref.contains("/events/") })
         );
     }
 
