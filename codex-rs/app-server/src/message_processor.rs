@@ -1241,6 +1241,16 @@ impl MessageProcessor {
                 .arena_message_observation_list(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosRoomRegister { params, .. } => self
+                .memythos_processor
+                .room_register(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomSendInput { params, .. } => self
+                .memythos_processor
+                .room_send_input(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosTelemetryList { params, .. } => self
                 .memythos_processor
                 .telemetry_list(params)

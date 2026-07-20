@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -38,6 +39,13 @@ use codex_app_server_protocol::MemythosParentContinuityStatus;
 use codex_app_server_protocol::MemythosParentPeerResponseKind;
 use codex_app_server_protocol::MemythosParentPeerResponseObservation;
 use codex_app_server_protocol::MemythosParentThreadContinuity;
+use codex_app_server_protocol::MemythosRoom;
+use codex_app_server_protocol::MemythosRoomParticipant;
+use codex_app_server_protocol::MemythosRoomRegisterParams;
+use codex_app_server_protocol::MemythosRoomRegisterResponse;
+use codex_app_server_protocol::MemythosRoomSendInputDelivery;
+use codex_app_server_protocol::MemythosRoomSendInputParams;
+use codex_app_server_protocol::MemythosRoomSendInputResponse;
 use codex_app_server_protocol::MemythosRuntimeCloseParams;
 use codex_app_server_protocol::MemythosRuntimeCloseResponse;
 use codex_app_server_protocol::MemythosRuntimeHealthParams;
@@ -79,6 +87,7 @@ struct MemythosRuntimeState {
     degraded_reasons: Vec<String>,
     layers: HashMap<String, MemythosLayer>,
     arenas: HashMap<String, MemythosArena>,
+    rooms: HashMap<String, MemythosRoom>,
     thread_attachments: HashMap<String, MemythosThreadAttachment>,
     arena_parents: HashMap<String, MemythosArenaParent>,
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
@@ -489,6 +498,7 @@ impl MemythosRequestProcessor {
                 degraded_reasons: Vec::new(),
                 layers: HashMap::new(),
                 arenas: HashMap::new(),
+                rooms: HashMap::new(),
                 thread_attachments: HashMap::new(),
                 arena_parents: HashMap::new(),
                 arena_message_deliveries: Vec::new(),
@@ -532,6 +542,8 @@ impl MemythosRequestProcessor {
                 "memythos/arena/parent/register".to_string(),
                 "memythos/arena/message".to_string(),
                 "memythos/arena/message/list".to_string(),
+                "memythos/room/register".to_string(),
+                "memythos/room/sendInput".to_string(),
                 "memythos/telemetry/list".to_string(),
             ],
             active_layers: state.layers.len(),
@@ -998,6 +1010,225 @@ impl MemythosRequestProcessor {
         Ok(MemythosArenaMessageObservationListResponse { observations }.into())
     }
 
+    pub(crate) async fn room_register(
+        &self,
+        params: MemythosRoomRegisterParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        validate_room_registration(&params)?;
+        let mut state = self.state.lock().await;
+        let event_ref = format!("app-server://rooms/{}/registered", params.room_id);
+        let room = MemythosRoom {
+            room_id: params.room_id,
+            case_id: params.case_id,
+            layer_id: params.layer_id,
+            arena_id: params.arena_id,
+            topology: params.topology,
+            participants: params.participants,
+        };
+        let room_id = room.room_id.clone();
+        let layer_id = room.layer_id.clone();
+        let arena_id = room.arena_id.clone();
+        state.rooms.insert(room_id.clone(), room.clone());
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::ArenaState,
+            MemythosTelemetrySource::MemythosRuntimeState,
+            Some(layer_id),
+            Some(arena_id),
+            None,
+            Some(event_ref.clone()),
+            Some(format!("app-server://rooms/{room_id}")),
+            MemythosEventChannel::StateTransition,
+            format!(
+                "Room {} registered with {} independent parent participants.",
+                room_id,
+                room.participants.len()
+            ),
+        );
+
+        Ok(MemythosRoomRegisterResponse {
+            room,
+            event_refs: vec![event_ref],
+        }
+        .into())
+    }
+
+    pub(crate) async fn room_send_input(
+        &self,
+        params: MemythosRoomSendInputParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        if params.human_instruction {
+            return Err(invalid_params(
+                "memythos/room/sendInput requires humanInstruction=false".to_string(),
+            ));
+        }
+        let room = {
+            let state = self.state.lock().await;
+            state
+                .rooms
+                .get(&params.room_id)
+                .cloned()
+                .ok_or_else(|| invalid_params(format!("unknown room id: {}", params.room_id)))?
+        };
+        let target =
+            room_participant_by_thread(&room, &params.to_parent_thread_id).ok_or_else(|| {
+                invalid_params(format!(
+                    "target parent thread {} is not registered in room {}",
+                    params.to_parent_thread_id, params.room_id
+                ))
+            })?;
+        let source_thread_id = params
+            .via_concierge_thread_id
+            .clone()
+            .filter(|thread_id| !thread_id.is_empty())
+            .unwrap_or_else(|| {
+                params
+                    .from_parent_thread_id
+                    .clone()
+                    .unwrap_or_else(|| "room_concierge".to_string())
+            });
+        let source = room_participant_by_thread(&room, &source_thread_id);
+        if source.is_none()
+            && params
+                .via_concierge_thread_id
+                .as_deref()
+                .map_or(true, |thread_id| {
+                    room_participant_by_thread(&room, thread_id).is_none()
+                })
+        {
+            return Err(invalid_params(format!(
+                "source or concierge thread must be registered in room {}",
+                params.room_id
+            )));
+        }
+        if target.parent_key != params.target_parent_key {
+            return Err(invalid_params(format!(
+                "targetParentKey {} does not match registered parent {}",
+                params.target_parent_key, target.parent_key
+            )));
+        }
+        if let Some(source) = source.as_ref() {
+            if source.parent_key != params.source_parent_key {
+                return Err(invalid_params(format!(
+                    "sourceParentKey {} does not match registered parent {}",
+                    params.source_parent_key, source.parent_key
+                )));
+            }
+        }
+
+        let message = MemythosArenaMessage {
+            message_id: params
+                .client_user_message_id
+                .clone()
+                .unwrap_or_else(|| params.delivery_ref.clone()),
+            case_id: room.case_id.clone(),
+            arena_id: room.arena_id.clone(),
+            round_id: params
+                .metadata
+                .get("memythos_round_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("room_loopback")
+                .to_string(),
+            from_parent_thread_id: source_thread_id.clone(),
+            from_parent_role: source
+                .as_ref()
+                .map(|participant| participant.parent_role.clone())
+                .unwrap_or_else(|| "room_concierge".to_string()),
+            to_parent_thread_id: params.to_parent_thread_id.clone(),
+            to_parent_role: target.parent_role.clone(),
+            message_kind: params.message_kind.clone(),
+            human_summary: params.prompt.clone(),
+            context_packet_ref: params.room_message_ref.clone(),
+            artifact_refs: vec![params.delivery_ref.clone()],
+            requires_response: true,
+            response_contract: Some(params.response_contract.clone()),
+        };
+        let delivery_id = self.next_id("mem_room_delivery", &self.next_delivery_id);
+        let delivery_attempt = self
+            .peer_parent_delivery_adapter
+            .deliver_peer_parent_message(&message)
+            .await;
+        let target_turn_id = delivery_attempt.receiver_turn_id.clone().ok_or_else(|| {
+            invalid_params(format!(
+                "room sendInput failed to create target turn: {}",
+                delivery_attempt
+                    .rejection_reason
+                    .clone()
+                    .unwrap_or_else(|| "unknown delivery failure".to_string())
+            ))
+        })?;
+        let room_event_ref = format!(
+            "app-server://rooms/{}/messages/{}/delivered",
+            params.room_id, message.message_id
+        );
+        let target_turn_ref = format!(
+            "app-server://threads/{}/turns/{}",
+            params.to_parent_thread_id, target_turn_id
+        );
+        let event_refs = compact_event_refs(
+            vec![
+                room_event_ref.clone(),
+                target_turn_ref,
+                format!(
+                    "app-server://rooms/{}/messages/{}/targetTurnStarted/{}",
+                    params.room_id, message.message_id, target_turn_id
+                ),
+            ]
+            .into_iter()
+            .chain(delivery_attempt.event_refs.clone())
+            .collect(),
+        );
+
+        let delivery = MemythosArenaMessageDelivery {
+            delivery_id,
+            message_id: message.message_id.clone(),
+            status: "delivered_to_live_thread".to_string(),
+            sender_thread_id: source_thread_id,
+            receiver_thread_id: params.to_parent_thread_id.clone(),
+            arena_id: room.arena_id.clone(),
+            round_id: message.round_id.clone(),
+            delivery_mechanism: "room_loopback_send_input".to_string(),
+            receiver_turn_id: Some(target_turn_id.clone()),
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: event_refs.clone(),
+            rejection_reason: None,
+        };
+        let mut state = self.state.lock().await;
+        state.arena_message_deliveries.push(delivery);
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::ArenaMessage,
+            MemythosTelemetrySource::AppServerNative,
+            Some(room.layer_id.clone()),
+            Some(room.arena_id.clone()),
+            Some(params.to_parent_thread_id.clone()),
+            Some(room_event_ref),
+            Some(format!("app-server://rooms/{}", params.room_id)),
+            MemythosEventChannel::StateTransition,
+            format!(
+                "Room {} delivered {} to parent thread {} with turn {}.",
+                params.room_id, message.message_id, params.to_parent_thread_id, target_turn_id
+            ),
+        );
+
+        Ok(MemythosRoomSendInputResponse {
+            delivery: MemythosRoomSendInputDelivery {
+                thread_id: params.to_parent_thread_id,
+                turn_id: target_turn_id,
+                event_refs,
+                room_id: params.room_id,
+                room_message_ref: params.room_message_ref,
+                delivery_ref: params.delivery_ref,
+                delivery_mechanism: "room_loopback_send_input".to_string(),
+                human_instruction: false,
+                message_authority: params.message_authority,
+            },
+        }
+        .into())
+    }
+
     pub(crate) async fn telemetry_list(
         &self,
         params: MemythosTelemetryListParams,
@@ -1399,6 +1630,85 @@ fn build_parent_peer_response_observation(
     }
 }
 
+fn validate_room_registration(
+    params: &MemythosRoomRegisterParams,
+) -> Result<(), JSONRPCErrorError> {
+    if params.room_id.trim().is_empty() {
+        return Err(invalid_params("room_id is required".to_string()));
+    }
+    if params.case_id.trim().is_empty() {
+        return Err(invalid_params("case_id is required".to_string()));
+    }
+    if params.layer_id.trim().is_empty() {
+        return Err(invalid_params("layer_id is required".to_string()));
+    }
+    if params.arena_id.trim().is_empty() {
+        return Err(invalid_params("arena_id is required".to_string()));
+    }
+    if params.topology != "cross_parent_room" {
+        return Err(invalid_params(
+            "room topology must be cross_parent_room".to_string(),
+        ));
+    }
+    if params.participants.len() < 2 {
+        return Err(invalid_params(
+            "room requires at least two participants".to_string(),
+        ));
+    }
+
+    let mut seen_threads = HashSet::new();
+    let mut seen_parent_keys = HashSet::new();
+    for participant in &params.participants {
+        if participant.parent_key.trim().is_empty() {
+            return Err(invalid_params(
+                "room participant parent_key is required".to_string(),
+            ));
+        }
+        if participant.thread_id.trim().is_empty() {
+            return Err(invalid_params(format!(
+                "room participant {} must include thread_id",
+                participant.parent_key
+            )));
+        }
+        if participant.parent_role.trim().is_empty() {
+            return Err(invalid_params(format!(
+                "room participant {} must include parent_role",
+                participant.parent_key
+            )));
+        }
+        if !seen_threads.insert(participant.thread_id.clone()) {
+            return Err(invalid_params(format!(
+                "duplicate room participant thread: {}",
+                participant.thread_id
+            )));
+        }
+        if !seen_parent_keys.insert(participant.parent_key.clone()) {
+            return Err(invalid_params(format!(
+                "duplicate room participant parent_key: {}",
+                participant.parent_key
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn room_participant_by_thread<'a>(
+    room: &'a MemythosRoom,
+    thread_id: &str,
+) -> Option<&'a MemythosRoomParticipant> {
+    room.participants
+        .iter()
+        .find(|participant| participant.thread_id == thread_id)
+}
+
+fn compact_event_refs(mut event_refs: Vec<String>) -> Vec<String> {
+    event_refs.retain(|event_ref| !event_ref.trim().is_empty());
+    event_refs.sort();
+    event_refs.dedup();
+    event_refs
+}
+
 fn compact_summary(summary: String) -> String {
     let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.chars().count() <= MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS {
@@ -1487,6 +1797,156 @@ mod tests {
                 }
             })
         }
+    }
+
+    fn room_register_params() -> MemythosRoomRegisterParams {
+        MemythosRoomRegisterParams {
+            room_id: "room-001".to_string(),
+            case_id: "case-001".to_string(),
+            layer_id: "bpm_e2e".to_string(),
+            arena_id: "arena-room-001".to_string(),
+            topology: "cross_parent_room".to_string(),
+            participants: vec![
+                MemythosRoomParticipant {
+                    parent_key: "case/bpm_e2e/arena/bettor/growth".to_string(),
+                    thread_id: "thread_growth".to_string(),
+                    parent_role: "bettor".to_string(),
+                    stance_profile: "growth".to_string(),
+                    goal_ref: Some("app-server://threads/thread_growth/goals/current".to_string()),
+                    authority_scope: vec!["peer_debate".to_string()],
+                },
+                MemythosRoomParticipant {
+                    parent_key: "case/bpm_e2e/arena/bettor/risk".to_string(),
+                    thread_id: "thread_risk".to_string(),
+                    parent_role: "bettor".to_string(),
+                    stance_profile: "risk".to_string(),
+                    goal_ref: Some("app-server://threads/thread_risk/goals/current".to_string()),
+                    authority_scope: vec!["peer_debate".to_string()],
+                },
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn room_registration_rejects_duplicate_threads() {
+        let processor = MemythosRequestProcessor::new();
+        let mut params = room_register_params();
+        params.participants[1].thread_id = params.participants[0].thread_id.clone();
+
+        let error = processor.room_register(params).await.unwrap_err();
+
+        assert!(
+            error.message.contains("duplicate room participant thread"),
+            "unexpected error: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn room_send_input_uses_native_loopback_delivery() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+        );
+        let register_response = processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomRegister(register_response) = register_response
+        else {
+            panic!("expected MemythosRoomRegister response");
+        };
+        assert_eq!(register_response.event_refs.len(), 1);
+
+        let send_response = processor
+            .room_send_input(MemythosRoomSendInputParams {
+                room_id: "room-001".to_string(),
+                room_message_ref: "artifact://room/messages/message-001.json".to_string(),
+                delivery_ref: "artifact://room/deliveries/delivery-001.json".to_string(),
+                from_parent_thread_id: Some("thread_growth".to_string()),
+                via_concierge_thread_id: None,
+                to_parent_thread_id: "thread_risk".to_string(),
+                source_parent_key: "case/bpm_e2e/arena/bettor/growth".to_string(),
+                target_parent_key: "case/bpm_e2e/arena/bettor/risk".to_string(),
+                message_kind: "peer_objection".to_string(),
+                message_authority: "peer_debate".to_string(),
+                human_instruction: false,
+                response_contract: "peer_response_contract".to_string(),
+                client_user_message_id: Some("message-001".to_string()),
+                prompt: "No soy humano; soy peer de arena. Objeta mi propuesta.".to_string(),
+                metadata: serde_json::Map::new(),
+                output_schema: None,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomSendInput(send_response) = send_response else {
+            panic!("expected MemythosRoomSendInput response");
+        };
+
+        assert_eq!(
+            send_response.delivery.delivery_mechanism,
+            "room_loopback_send_input"
+        );
+        assert!(!send_response.delivery.human_instruction);
+        assert_eq!(send_response.delivery.thread_id, "thread_risk");
+        assert_eq!(
+            send_response.delivery.turn_id,
+            "turn_for_thread_risk_message-001"
+        );
+        assert!(send_response.delivery.event_refs.iter().any(|event_ref| {
+            event_ref == "app-server://rooms/room-001/messages/message-001/delivered"
+        }));
+    }
+
+    #[tokio::test]
+    async fn room_send_input_prefers_concierge_source_when_present() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+        );
+        let mut params = room_register_params();
+        params.participants.push(MemythosRoomParticipant {
+            parent_key: "case/bpm_e2e/arena/observer/room_concierge".to_string(),
+            thread_id: "thread_concierge".to_string(),
+            parent_role: "observer".to_string(),
+            stance_profile: "room_concierge".to_string(),
+            goal_ref: Some("app-server://threads/thread_concierge/goals/current".to_string()),
+            authority_scope: vec!["room_coordination".to_string()],
+        });
+        processor.room_register(params).await.unwrap();
+
+        let send_response = processor
+            .room_send_input(MemythosRoomSendInputParams {
+                room_id: "room-001".to_string(),
+                room_message_ref: "artifact://room/messages/message-002.json".to_string(),
+                delivery_ref: "artifact://room/deliveries/delivery-002.json".to_string(),
+                from_parent_thread_id: Some("thread_growth".to_string()),
+                via_concierge_thread_id: Some("thread_concierge".to_string()),
+                to_parent_thread_id: "thread_risk".to_string(),
+                source_parent_key: "case/bpm_e2e/arena/observer/room_concierge".to_string(),
+                target_parent_key: "case/bpm_e2e/arena/bettor/risk".to_string(),
+                message_kind: "peer_proposal".to_string(),
+                message_authority: "peer_debate".to_string(),
+                human_instruction: false,
+                response_contract: "peer_response_contract".to_string(),
+                client_user_message_id: Some("message-002".to_string()),
+                prompt: "Concierge entrega un mensaje entre peers.".to_string(),
+                metadata: serde_json::Map::new(),
+                output_schema: None,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomSendInput(send_response) = send_response else {
+            panic!("expected MemythosRoomSendInput response");
+        };
+
+        assert_eq!(send_response.delivery.thread_id, "thread_risk");
+        assert_eq!(
+            send_response.delivery.delivery_mechanism,
+            "room_loopback_send_input"
+        );
     }
 
     #[tokio::test]

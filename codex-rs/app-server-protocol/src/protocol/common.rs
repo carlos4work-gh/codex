@@ -623,6 +623,18 @@ client_request_definitions! {
         serialization: global_shared_read("memythos"),
         response: v2::MemythosArenaMessageObservationListResponse,
     },
+    #[experimental("memythos/room/register")]
+    MemythosRoomRegister => "memythos/room/register" {
+        params: v2::MemythosRoomRegisterParams,
+        serialization: global("memythos"),
+        response: v2::MemythosRoomRegisterResponse,
+    },
+    #[experimental("memythos/room/sendInput")]
+    MemythosRoomSendInput => "memythos/room/sendInput" {
+        params: v2::MemythosRoomSendInputParams,
+        serialization: global("memythos"),
+        response: v2::MemythosRoomSendInputResponse,
+    },
     #[experimental("memythos/telemetry/list")]
     MemythosTelemetryList => "memythos/telemetry/list" {
         params: v2::MemythosTelemetryListParams,
