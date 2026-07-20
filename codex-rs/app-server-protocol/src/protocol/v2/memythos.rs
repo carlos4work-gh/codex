@@ -395,6 +395,9 @@ pub struct MemythosArenaMessageDelivery {
     pub receiver_thread_id: String,
     pub arena_id: String,
     pub round_id: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub phase: Option<String>,
     pub delivery_mechanism: String,
     #[ts(optional = nullable)]
     pub receiver_turn_id: Option<String>,
@@ -529,6 +532,9 @@ pub struct MemythosRoomActivityListParams {
     pub room_id: String,
     #[ts(optional = nullable)]
     pub round_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub phase: Option<String>,
     #[ts(optional = nullable)]
     pub since_cursor: Option<String>,
     #[serde(default)]
@@ -560,6 +566,15 @@ pub struct MemythosRoomActivityItem {
     pub summary: String,
     #[ts(optional = nullable)]
     pub text: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub human_highlight: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub technical_summary: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub artifact_ref: Option<String>,
     pub event_ref: String,
     #[serde(default)]
     pub refs: Vec<String>,
@@ -569,8 +584,13 @@ pub struct MemythosRoomActivityItem {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct MemythosRoomActivityTurn {
+    pub parent_key: String,
     pub thread_id: String,
     pub turn_id: String,
+    #[ts(optional = nullable)]
+    pub round_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub phase: Option<String>,
     pub status: String,
     pub items: Vec<MemythosRoomActivityItem>,
 }

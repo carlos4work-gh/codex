@@ -889,12 +889,13 @@ impl MemythosRequestProcessor {
         let telemetry_summary = delivery_attempt.telemetry_summary.clone();
         let delivery = MemythosArenaMessageDelivery {
             delivery_id,
-            message_id: params.message.message_id,
+            message_id: params.message.message_id.clone(),
             status: delivery_attempt.status,
             sender_thread_id: params.message.from_parent_thread_id,
             receiver_thread_id: params.message.to_parent_thread_id,
             arena_id: params.message.arena_id,
             round_id: params.message.round_id,
+            phase: phase_from_message_kind(&params.message.message_kind),
             delivery_mechanism: delivery_attempt.delivery_mechanism,
             receiver_turn_id: delivery_attempt.receiver_turn_id,
             receiver_response_event_ref: delivery_attempt.receiver_response_event_ref,
@@ -1203,6 +1204,12 @@ impl MemythosRequestProcessor {
             receiver_thread_id: params.to_parent_thread_id.clone(),
             arena_id: room.arena_id.clone(),
             round_id: message.round_id.clone(),
+            phase: params
+                .metadata
+                .get("memythos_phase")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+                .or_else(|| phase_from_message_kind(&message.message_kind)),
             delivery_mechanism: "room_loopback_send_input".to_string(),
             receiver_turn_id: Some(target_turn_id.clone()),
             receiver_response_event_ref: None,
@@ -1269,6 +1276,11 @@ impl MemythosRequestProcessor {
                     .round_id
                     .as_ref()
                     .map_or(true, |round_id| &delivery.round_id == round_id)
+            })
+            .filter(|delivery| {
+                params.phase.as_ref().map_or(true, |phase| {
+                    delivery.phase.as_deref() == Some(phase.as_str())
+                })
             })
             .filter(|delivery| {
                 participant_thread_ids.contains(delivery.sender_thread_id.as_str())
@@ -1352,7 +1364,7 @@ impl MemythosRequestProcessor {
         let turns = deliveries
             .iter()
             .filter_map(|delivery| {
-                room_activity_turn_from_delivery(delivery, params.include_debug_refs)
+                room_activity_turn_from_delivery(&room, delivery, params.include_debug_refs)
             })
             .collect::<Vec<_>>();
         let cursor = turns
@@ -1614,6 +1626,7 @@ impl MemythosRequestProcessor {
 }
 
 fn room_activity_turn_from_delivery(
+    room: &MemythosRoom,
     delivery: &MemythosArenaMessageDelivery,
     include_debug_refs: bool,
 ) -> Option<MemythosRoomActivityTurn> {
@@ -1647,25 +1660,57 @@ fn room_activity_turn_from_delivery(
                 delivery.receiver_thread_id, turn_id
             )
         });
+    let parent_key = room
+        .participants
+        .iter()
+        .find(|participant| participant.thread_id == delivery.receiver_thread_id)
+        .map(|participant| participant.parent_key.clone())
+        .unwrap_or_else(|| arena_parent_key(&delivery.arena_id, &delivery.receiver_thread_id));
+    let phase = delivery.phase.clone();
+    let human_highlight = phase.as_ref().map(|phase| {
+        compact_summary(format!(
+            "{} received {} for phase {phase}.",
+            parent_key, delivery.message_id
+        ))
+    });
+    let technical_summary = compact_summary(format!(
+        "{} delivered {} from {} to {} as {}",
+        delivery.delivery_mechanism,
+        delivery.message_id,
+        delivery.sender_thread_id,
+        delivery.receiver_thread_id,
+        delivery.status
+    ));
     Some(MemythosRoomActivityTurn {
+        parent_key,
         thread_id: delivery.receiver_thread_id.clone(),
         turn_id,
+        round_id: Some(delivery.round_id.clone()),
+        phase,
         status: status.to_string(),
         items: vec![MemythosRoomActivityItem {
             kind: "collab_call".to_string(),
             status: delivery.status.clone(),
-            summary: compact_summary(format!(
-                "{} delivered {} from {} to {}",
-                delivery.delivery_mechanism,
-                delivery.message_id,
-                delivery.sender_thread_id,
-                delivery.receiver_thread_id
-            )),
-            text: None,
+            summary: technical_summary.clone(),
+            text: human_highlight.clone(),
+            human_highlight,
+            technical_summary: Some(technical_summary),
+            artifact_ref: Some(delivery.message_id.clone()),
             event_ref,
             refs: compact_event_refs(refs),
         }],
     })
+}
+
+fn phase_from_message_kind(message_kind: &str) -> Option<String> {
+    match message_kind {
+        "dispatch_proposals" => Some("proposal".to_string()),
+        "dispatch_cross_read" => Some("cross_read".to_string()),
+        "dispatch_bets" => Some("bet".to_string()),
+        "request_judge" => Some("judge".to_string()),
+        "notify_coordinator" => Some("learning".to_string()),
+        _ => None,
+    }
 }
 
 const MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS: usize = 240;
@@ -2111,10 +2156,16 @@ mod tests {
                 response_contract: "peer_response_contract".to_string(),
                 client_user_message_id: Some("message-001".to_string()),
                 prompt: "No soy humano; soy peer de arena. Objeta mi propuesta.".to_string(),
-                metadata: serde_json::Map::from_iter([(
-                    "memythos_round_id".to_string(),
-                    serde_json::Value::String("round-001".to_string()),
-                )]),
+                metadata: serde_json::Map::from_iter([
+                    (
+                        "memythos_round_id".to_string(),
+                        serde_json::Value::String("round-001".to_string()),
+                    ),
+                    (
+                        "memythos_phase".to_string(),
+                        serde_json::Value::String("bet".to_string()),
+                    ),
+                ]),
                 output_schema: None,
             })
             .await
@@ -2172,10 +2223,16 @@ mod tests {
                 response_contract: "peer_response_contract".to_string(),
                 client_user_message_id: Some("message-002".to_string()),
                 prompt: "Concierge entrega un mensaje entre peers.".to_string(),
-                metadata: serde_json::Map::from_iter([(
-                    "memythos_round_id".to_string(),
-                    serde_json::Value::String("round-001".to_string()),
-                )]),
+                metadata: serde_json::Map::from_iter([
+                    (
+                        "memythos_round_id".to_string(),
+                        serde_json::Value::String("round-001".to_string()),
+                    ),
+                    (
+                        "memythos_phase".to_string(),
+                        serde_json::Value::String("bet".to_string()),
+                    ),
+                ]),
                 output_schema: None,
             })
             .await
@@ -2203,6 +2260,7 @@ mod tests {
             .room_activity_list(MemythosRoomActivityListParams {
                 room_id: "room-001".to_string(),
                 round_id: Some("round-001".to_string()),
+                phase: None,
                 since_cursor: None,
                 limit: Some(25),
                 include_debug_refs: false,
@@ -2248,10 +2306,16 @@ mod tests {
                 response_contract: "peer_response_contract".to_string(),
                 client_user_message_id: Some("message-003".to_string()),
                 prompt: "Apuesta y declara condiciones de ejecucion.".to_string(),
-                metadata: serde_json::Map::from_iter([(
-                    "memythos_round_id".to_string(),
-                    serde_json::Value::String("round-001".to_string()),
-                )]),
+                metadata: serde_json::Map::from_iter([
+                    (
+                        "memythos_round_id".to_string(),
+                        serde_json::Value::String("round-001".to_string()),
+                    ),
+                    (
+                        "memythos_phase".to_string(),
+                        serde_json::Value::String("bet".to_string()),
+                    ),
+                ]),
                 output_schema: None,
             })
             .await
@@ -2277,6 +2341,7 @@ mod tests {
             .room_activity_list(MemythosRoomActivityListParams {
                 room_id: "room-001".to_string(),
                 round_id: Some("round-001".to_string()),
+                phase: None,
                 since_cursor: None,
                 limit: Some(25),
                 include_debug_refs: false,
@@ -2289,6 +2354,12 @@ mod tests {
 
         assert_eq!(response.turns.len(), 1);
         assert_eq!(response.turns[0].status, "completed");
+        assert_eq!(
+            response.turns[0].parent_key,
+            "case/bpm_e2e/arena/bettor/risk"
+        );
+        assert_eq!(response.turns[0].round_id.as_deref(), Some("round-001"));
+        assert_eq!(response.turns[0].phase.as_deref(), Some("bet"));
         assert_eq!(response.lifecycle.completed_turns, 1);
         assert_eq!(response.lifecycle.failed_turns, 0);
         assert!(response.lifecycle.clean_close);
@@ -2300,6 +2371,38 @@ mod tests {
                 .iter()
                 .all(|event_ref| { !event_ref.contains("/events/") })
         );
+
+        let bet_response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: Some("round-001".to_string()),
+                phase: Some("bet".to_string()),
+                since_cursor: None,
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(bet_response) = bet_response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+        assert_eq!(bet_response.turns.len(), 1);
+
+        let judge_response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: Some("round-001".to_string()),
+                phase: Some("judge".to_string()),
+                since_cursor: None,
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(judge_response) = judge_response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+        assert!(judge_response.turns.is_empty());
     }
 
     #[tokio::test]
