@@ -1221,6 +1221,16 @@ impl MessageProcessor {
                 .arena_parent_register(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosArenaParticipantRegister { params, .. } => self
+                .memythos_processor
+                .arena_participant_register(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaPhaseStart { params, .. } => self
+                .memythos_processor
+                .arena_phase_start(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosParentContinuityList { params, .. } => self
                 .memythos_processor
                 .parent_continuity_list(params)
@@ -1229,6 +1239,11 @@ impl MessageProcessor {
             ClientRequest::MemythosArenaMessageSend { params, .. } => self
                 .memythos_processor
                 .arena_message_send(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaMessageSendV2 { params, .. } => self
+                .memythos_processor
+                .arena_message_send_v2(params)
                 .await
                 .map(Some),
             ClientRequest::MemythosArenaMessageList { params, .. } => self
@@ -1241,6 +1256,24 @@ impl MessageProcessor {
                 .arena_message_observation_list(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosArenaMessageObserve { params, .. } => self
+                .memythos_processor
+                .arena_message_observe(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaStateGet { params, .. } => self
+                .memythos_processor
+                .arena_state_get(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaPhaseClose { params, .. } => self
+                .memythos_processor
+                .arena_phase_close(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaRun { params, .. } => {
+                self.memythos_processor.arena_run(params).await.map(Some)
+            }
             ClientRequest::MemythosRoomRegister { params, .. } => self
                 .memythos_processor
                 .room_register(params)

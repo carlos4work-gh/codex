@@ -22,11 +22,25 @@ use codex_app_server_protocol::MemythosArenaMessageListParams;
 use codex_app_server_protocol::MemythosArenaMessageListResponse;
 use codex_app_server_protocol::MemythosArenaMessageObservationListParams;
 use codex_app_server_protocol::MemythosArenaMessageObservationListResponse;
+use codex_app_server_protocol::MemythosArenaMessageObserveParams;
+use codex_app_server_protocol::MemythosArenaMessageObserveResponse;
 use codex_app_server_protocol::MemythosArenaMessageSendParams;
 use codex_app_server_protocol::MemythosArenaMessageSendResponse;
+use codex_app_server_protocol::MemythosArenaMessageSendV2Params;
+use codex_app_server_protocol::MemythosArenaMessageSendV2Response;
 use codex_app_server_protocol::MemythosArenaParent;
 use codex_app_server_protocol::MemythosArenaParentRegisterParams;
 use codex_app_server_protocol::MemythosArenaParentRegisterResponse;
+use codex_app_server_protocol::MemythosArenaParticipantRegisterParams;
+use codex_app_server_protocol::MemythosArenaParticipantRegisterResponse;
+use codex_app_server_protocol::MemythosArenaPhaseCloseParams;
+use codex_app_server_protocol::MemythosArenaPhaseCloseResponse;
+use codex_app_server_protocol::MemythosArenaPhaseStartResponse;
+use codex_app_server_protocol::MemythosArenaPhaseStartParams;
+use codex_app_server_protocol::MemythosArenaRunParams;
+use codex_app_server_protocol::MemythosArenaRunResponse;
+use codex_app_server_protocol::MemythosArenaStateGetParams;
+use codex_app_server_protocol::MemythosArenaStateGetResponse;
 use codex_app_server_protocol::MemythosEventChannel;
 use codex_app_server_protocol::MemythosLayer;
 use codex_app_server_protocol::MemythosLayerCreateParams;
@@ -102,6 +116,14 @@ struct MemythosRuntimeState {
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
     native_token_usage_refs: HashMap<String, String>,
     telemetry_refs: Vec<MemythosTelemetryRef>,
+}
+
+struct MemythosArenaPhaseUpdate {
+    arena_id: String,
+    round_id: String,
+    phase: String,
+    lifecycle_state: MemythosArenaLifecycleState,
+    event_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -555,11 +577,18 @@ impl MemythosRequestProcessor {
                 "memythos/thread/attach".to_string(),
                 "memythos/thread/list".to_string(),
                 "memythos/arena/parent/register".to_string(),
+                "memythos/arena/participant/register".to_string(),
+                "memythos/arena/phase/start".to_string(),
                 "memythos/arena/message".to_string(),
+                "memythos/arena/message/send".to_string(),
                 "memythos/arena/message/list".to_string(),
+                "memythos/arena/message/observe".to_string(),
                 "memythos/room/register".to_string(),
                 "memythos/room/activity/list".to_string(),
                 "memythos/room/sendInput".to_string(),
+                "memythos/arena/state/get".to_string(),
+                "memythos/arena/phase/close".to_string(),
+                "memythos/arena/run".to_string(),
                 "memythos/telemetry/list".to_string(),
             ],
             active_layers: state.layers.len(),
@@ -847,6 +876,45 @@ impl MemythosRequestProcessor {
         Ok(MemythosArenaParentRegisterResponse { parent }.into())
     }
 
+    pub(crate) async fn arena_participant_register(
+        &self,
+        params: MemythosArenaParticipantRegisterParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let payload = self.arena_parent_register(params).await?;
+        if let ClientResponsePayload::MemythosArenaParentRegister(response) = payload {
+            return Ok(MemythosArenaParticipantRegisterResponse {
+                parent: response.parent,
+            }
+            .into());
+        }
+        Err(invalid_params(
+            "arena parent register returned unexpected payload".to_string(),
+        ))
+    }
+
+    pub(crate) async fn arena_phase_start(
+        &self,
+        params: MemythosArenaPhaseStartParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let update = self.update_arena_phase(
+            params.arena_id,
+            params.round_id,
+            params.phase,
+            MemythosArenaLifecycleState::Running,
+            "started",
+        )
+        .await?;
+        Ok(MemythosArenaPhaseStartResponse {
+            arena_id: update.arena_id,
+            round_id: update.round_id,
+            phase: update.phase,
+            lifecycle_state: update.lifecycle_state,
+            phase_state_source: "app_server_protocol".to_string(),
+            event_refs: update.event_refs,
+        }
+        .into())
+    }
+
     pub(crate) async fn arena_message_send(
         &self,
         params: MemythosArenaMessageSendParams,
@@ -919,6 +987,22 @@ impl MemythosRequestProcessor {
         );
 
         Ok(MemythosArenaMessageSendResponse { delivery }.into())
+    }
+
+    pub(crate) async fn arena_message_send_v2(
+        &self,
+        params: MemythosArenaMessageSendV2Params,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let payload = self.arena_message_send(params).await?;
+        if let ClientResponsePayload::MemythosArenaMessageSend(response) = payload {
+            return Ok(MemythosArenaMessageSendV2Response {
+                delivery: response.delivery,
+            }
+            .into());
+        }
+        Err(invalid_params(
+            "arena message send returned unexpected payload".to_string(),
+        ))
     }
 
     pub(crate) async fn parent_continuity_list(
@@ -1025,6 +1109,140 @@ impl MemythosRequestProcessor {
             .collect();
 
         Ok(MemythosArenaMessageObservationListResponse { observations }.into())
+    }
+
+    pub(crate) async fn arena_message_observe(
+        &self,
+        params: MemythosArenaMessageObserveParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let payload = self.arena_message_observation_list(params).await?;
+        if let ClientResponsePayload::MemythosArenaMessageObservationList(response) = payload {
+            return Ok(MemythosArenaMessageObserveResponse {
+                observations: response.observations,
+            }
+            .into());
+        }
+        Err(invalid_params(
+            "arena message observe returned unexpected payload".to_string(),
+        ))
+    }
+
+    pub(crate) async fn arena_state_get(
+        &self,
+        params: MemythosArenaStateGetParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state = self.state.lock().await;
+        let arena = state
+            .arenas
+            .get(&params.arena_id)
+            .cloned()
+            .ok_or_else(|| invalid_params(format!("unknown arena id: {}", params.arena_id)))?;
+        let mut parents = state
+            .arena_parents
+            .values()
+            .filter(|parent| parent.arena_id == params.arena_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        parents.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+        let mut deliveries = state
+            .arena_message_deliveries
+            .iter()
+            .filter(|delivery| delivery.arena_id == params.arena_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
+        Ok(MemythosArenaStateGetResponse {
+            arena,
+            parents,
+            deliveries,
+            phase_state_source: "app_server_protocol".to_string(),
+            local_ts_arena_state_used: false,
+        }
+        .into())
+    }
+
+    async fn update_arena_phase(
+        &self,
+        arena_id: String,
+        round_id: String,
+        phase: String,
+        lifecycle_state: MemythosArenaLifecycleState,
+        action: &str,
+    ) -> Result<MemythosArenaPhaseUpdate, JSONRPCErrorError> {
+        let mut state = self.state.lock().await;
+        let Some(arena) = state.arenas.get_mut(&arena_id) else {
+            return Err(invalid_params(format!("unknown arena id: {}", arena_id)));
+        };
+        arena.lifecycle_state = lifecycle_state;
+        let layer_id = arena.layer_id.clone();
+        let arena_id = arena.arena_id.clone();
+        let event_ref = format!("app-server://memythos/arenas/{arena_id}/rounds/{round_id}/phases/{phase}/{action}");
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::ArenaState,
+            MemythosTelemetrySource::AppServerNative,
+            Some(layer_id),
+            Some(arena_id.clone()),
+            None,
+            Some(event_ref.clone()),
+            None,
+            MemythosEventChannel::StateTransition,
+            format!("Arena {arena_id} phase {phase} {action}."),
+        );
+        Ok(MemythosArenaPhaseUpdate {
+            arena_id,
+            round_id,
+            phase,
+            lifecycle_state,
+            event_refs: vec![event_ref],
+        })
+    }
+
+    pub(crate) async fn arena_phase_close(
+        &self,
+        params: MemythosArenaPhaseCloseParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let update = self.update_arena_phase(
+            params.arena_id,
+            params.round_id,
+            params.phase,
+            MemythosArenaLifecycleState::ArtifactComplete,
+            "closed",
+        )
+        .await?;
+        Ok(MemythosArenaPhaseCloseResponse {
+            arena_id: update.arena_id,
+            round_id: update.round_id,
+            phase: update.phase,
+            lifecycle_state: update.lifecycle_state,
+            phase_state_source: "app_server_protocol".to_string(),
+            event_refs: update.event_refs,
+        }
+        .into())
+    }
+
+    pub(crate) async fn arena_run(
+        &self,
+        params: MemythosArenaRunParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state = self.state.lock().await;
+        let arena = state
+            .arenas
+            .get(&params.arena_id)
+            .cloned()
+            .ok_or_else(|| invalid_params(format!("unknown arena id: {}", params.arena_id)))?;
+        Ok(MemythosArenaRunResponse {
+            arena_id: params.arena_id,
+            round_id: params.round_id,
+            lifecycle_state: arena.lifecycle_state,
+            phase_state_source: "app_server_protocol".to_string(),
+            local_ts_arena_state_used: false,
+            event_refs: vec![format!(
+                "app-server://memythos/arenas/{}/run/{}",
+                arena.arena_id, arena.lifecycle_state as u8
+            )],
+        }
+        .into())
     }
 
     pub(crate) async fn room_register(

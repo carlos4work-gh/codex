@@ -362,6 +362,95 @@ pub struct MemythosArenaParentRegisterResponse {
     pub parent: MemythosArenaParent,
 }
 
+pub type MemythosArenaParticipantRegisterParams = MemythosArenaParentRegisterParams;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaParticipantRegisterResponse {
+    pub parent: MemythosArenaParent,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaPhaseStartParams {
+    pub arena_id: String,
+    pub round_id: String,
+    pub phase: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaPhaseStartResponse {
+    pub arena_id: String,
+    pub round_id: String,
+    pub phase: String,
+    pub lifecycle_state: MemythosArenaLifecycleState,
+    pub phase_state_source: String,
+    pub event_refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaStateGetParams {
+    pub arena_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaStateGetResponse {
+    pub arena: MemythosArena,
+    pub parents: Vec<MemythosArenaParent>,
+    pub deliveries: Vec<MemythosArenaMessageDelivery>,
+    pub phase_state_source: String,
+    pub local_ts_arena_state_used: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaPhaseCloseParams {
+    pub arena_id: String,
+    pub round_id: String,
+    pub phase: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaPhaseCloseResponse {
+    pub arena_id: String,
+    pub round_id: String,
+    pub phase: String,
+    pub lifecycle_state: MemythosArenaLifecycleState,
+    pub phase_state_source: String,
+    pub event_refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaRunParams {
+    pub arena_id: String,
+    pub round_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaRunResponse {
+    pub arena_id: String,
+    pub round_id: String,
+    pub lifecycle_state: MemythosArenaLifecycleState,
+    pub phase_state_source: String,
+    pub local_ts_arena_state_used: bool,
+    pub event_refs: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -424,6 +513,15 @@ pub struct MemythosArenaMessageSendResponse {
     pub delivery: MemythosArenaMessageDelivery,
 }
 
+pub type MemythosArenaMessageSendV2Params = MemythosArenaMessageSendParams;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageSendV2Response {
+    pub delivery: MemythosArenaMessageDelivery,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -475,6 +573,15 @@ pub struct MemythosArenaMessageObservationListParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct MemythosArenaMessageObservationListResponse {
+    pub observations: Vec<MemythosParentPeerResponseObservation>,
+}
+
+pub type MemythosArenaMessageObserveParams = MemythosArenaMessageObservationListParams;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageObserveResponse {
     pub observations: Vec<MemythosParentPeerResponseObservation>,
 }
 
