@@ -516,6 +516,7 @@ pub(crate) use marketplace_processor::MarketplaceRequestProcessor;
 pub(crate) use mcp_processor::McpRequestProcessor;
 pub(crate) use memythos_processor::MemythosRequestProcessor;
 pub(crate) use memythos_processor::ThreadGoalParentSnapshotAdapter;
+pub(crate) use memythos_processor::TurnStartThreadConsolidationAdapter;
 pub(crate) use memythos_processor::TurnStartPeerParentDeliveryAdapter;
 pub(crate) use plugins::PluginRequestProcessor;
 pub(crate) use process_exec_processor::ProcessExecRequestProcessor;

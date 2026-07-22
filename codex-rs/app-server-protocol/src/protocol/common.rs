@@ -683,6 +683,12 @@ client_request_definitions! {
         serialization: global("memythos"),
         response: v2::MemythosRoomSendInputResponse,
     },
+    #[experimental("memythos/thread/consolidate")]
+    MemythosThreadConsolidate => "memythos/thread/consolidate" {
+        params: v2::MemythosThreadConsolidateParams,
+        serialization: global("memythos"),
+        response: v2::MemythosThreadConsolidateResponse,
+    },
     #[experimental("memythos/telemetry/list")]
     MemythosTelemetryList => "memythos/telemetry/list" {
         params: v2::MemythosTelemetryListParams,

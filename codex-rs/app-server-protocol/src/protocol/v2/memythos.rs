@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -72,6 +74,7 @@ pub enum MemythosTelemetryRefKind {
     ThreadAttachment,
     ArenaParent,
     ArenaMessage,
+    ThreadConsolidation,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -117,6 +120,30 @@ pub enum MemythosParentContinuityStatus {
     TurnContinuityObserved,
     Verified,
     Degraded,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum MemythosThreadConsolidationPurpose {
+    ArenaRoundConsolidation,
+    ParentRollup,
+    JudgeBriefing,
+    ScrumMasterBriefing,
+    HumanInterlocutor,
+    ChildLayerResume,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum MemythosThreadConsolidationAuthorityMode {
+    PeerCoordination,
+    ParentRollup,
+    JudgeBriefing,
+    ScrumMasterBriefing,
+    HumanInterlocutor,
+    ChildLayerResume,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -895,6 +922,63 @@ pub struct MemythosTelemetryListResponse {
     pub telemetry_refs: Vec<MemythosTelemetryRef>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosThreadConsolidationSourceRef {
+    pub thread_id: String,
+    pub turn_refs: Vec<String>,
+    pub items_view: String,
+    #[ts(optional = nullable)]
+    pub cursor: Option<String>,
+    #[ts(optional = nullable)]
+    pub next_cursor: Option<String>,
+    #[ts(optional = nullable)]
+    pub latest_agent_message_ref: Option<String>,
+    #[ts(optional = nullable)]
+    pub latest_agent_message_text: Option<String>,
+    pub technical_evidence_refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosThreadConsolidateParams {
+    pub coordinator_thread_id: String,
+    pub source_thread_ids: Vec<String>,
+    #[serde(default)]
+    pub since_cursors: HashMap<String, String>,
+    #[ts(optional = nullable)]
+    pub items_view: Option<String>,
+    pub purpose: MemythosThreadConsolidationPurpose,
+    pub authority_mode: MemythosThreadConsolidationAuthorityMode,
+    pub instructions: String,
+    #[serde(default)]
+    pub per_source_limit: Option<u32>,
+    #[ts(optional = nullable)]
+    pub client_user_message_id: Option<String>,
+    #[serde(default)]
+    #[ts(type = "unknown")]
+    pub output_schema: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosThreadConsolidateResponse {
+    pub consolidation_turn_id: String,
+    pub coordinator_thread_id: String,
+    pub source_refs: Vec<MemythosThreadConsolidationSourceRef>,
+    #[ts(optional = nullable)]
+    pub agent_message_ref: Option<String>,
+    #[ts(optional = nullable)]
+    pub structured_output_ref: Option<String>,
+    pub technical_evidence_refs: Vec<String>,
+    pub source_method: String,
+    pub used_thread_turns_summary: bool,
+    pub blockers: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -955,6 +1039,41 @@ mod tests {
                 "stanceId": "skeptic",
                 "objective": "Challenge the implementation PID.",
                 "contractRef": "implementation-pid.md"
+            })
+        );
+    }
+
+    #[test]
+    fn thread_consolidate_params_use_camel_case_contract() {
+        let params = MemythosThreadConsolidateParams {
+            coordinator_thread_id: "thread_concierge".to_string(),
+            source_thread_ids: vec!["thread_a".to_string(), "thread_b".to_string()],
+            since_cursors: HashMap::from([(
+                "thread_a".to_string(),
+                "cursor-a".to_string(),
+            )]),
+            items_view: Some("summary".to_string()),
+            purpose: MemythosThreadConsolidationPurpose::ArenaRoundConsolidation,
+            authority_mode: MemythosThreadConsolidationAuthorityMode::PeerCoordination,
+            instructions: "Consolidate the peer round.".to_string(),
+            per_source_limit: Some(2),
+            client_user_message_id: Some("consolidation-001".to_string()),
+            output_schema: Some(json!({"type": "object"})),
+        };
+
+        assert_eq!(
+            serde_json::to_value(params).unwrap(),
+            json!({
+                "coordinatorThreadId": "thread_concierge",
+                "sourceThreadIds": ["thread_a", "thread_b"],
+                "sinceCursors": {"thread_a": "cursor-a"},
+                "itemsView": "summary",
+                "purpose": "arenaRoundConsolidation",
+                "authorityMode": "peerCoordination",
+                "instructions": "Consolidate the peer round.",
+                "perSourceLimit": 2,
+                "clientUserMessageId": "consolidation-001",
+                "outputSchema": {"type": "object"}
             })
         );
     }

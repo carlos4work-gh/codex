@@ -80,15 +80,22 @@ use codex_app_server_protocol::MemythosTelemetryListResponse;
 use codex_app_server_protocol::MemythosTelemetryRef;
 use codex_app_server_protocol::MemythosTelemetryRefKind;
 use codex_app_server_protocol::MemythosTelemetrySource;
+use codex_app_server_protocol::MemythosThreadConsolidateParams;
+use codex_app_server_protocol::MemythosThreadConsolidateResponse;
+use codex_app_server_protocol::MemythosThreadConsolidationSourceRef;
 use codex_app_server_protocol::MemythosThreadAttachParams;
 use codex_app_server_protocol::MemythosThreadAttachResponse;
 use codex_app_server_protocol::MemythosThreadAttachment;
 use codex_app_server_protocol::MemythosThreadListParams;
 use codex_app_server_protocol::MemythosThreadListResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadGoal;
 use codex_app_server_protocol::ThreadGoalGetParams;
 use codex_app_server_protocol::ThreadGoalStatus;
+use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadTurnsListParams;
+use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput;
 use tokio::sync::Mutex;
@@ -97,6 +104,7 @@ use crate::error_code::invalid_params;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::request_processors::ThreadGoalRequestProcessor;
+use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
 
 struct MemythosRuntimeState {
@@ -463,11 +471,316 @@ fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> String {
     )
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ThreadConsolidationAttempt {
+    consolidation_turn_id: Option<String>,
+    source_refs: Vec<MemythosThreadConsolidationSourceRef>,
+    agent_message_ref: Option<String>,
+    structured_output_ref: Option<String>,
+    technical_evidence_refs: Vec<String>,
+    source_method: String,
+    used_thread_turns_summary: bool,
+    blockers: Vec<String>,
+}
+
+pub(crate) type ThreadConsolidationFuture<'a> =
+    Pin<Box<dyn Future<Output = ThreadConsolidationAttempt> + Send + 'a>>;
+
+pub(crate) trait ThreadConsolidationAdapter: Send + Sync {
+    fn consolidate_threads<'a>(
+        &'a self,
+        params: &'a MemythosThreadConsolidateParams,
+    ) -> ThreadConsolidationFuture<'a>;
+}
+
+#[derive(Debug)]
+#[cfg(test)]
+struct RecordOnlyThreadConsolidationAdapter;
+
+#[cfg(test)]
+impl ThreadConsolidationAdapter for RecordOnlyThreadConsolidationAdapter {
+    fn consolidate_threads<'a>(
+        &'a self,
+        params: &'a MemythosThreadConsolidateParams,
+    ) -> ThreadConsolidationFuture<'a> {
+        Box::pin(async move {
+            ThreadConsolidationAttempt {
+                consolidation_turn_id: None,
+                source_refs: params
+                    .source_thread_ids
+                    .iter()
+                    .map(|thread_id| MemythosThreadConsolidationSourceRef {
+                        thread_id: thread_id.clone(),
+                        turn_refs: Vec::new(),
+                        items_view: "summary".to_string(),
+                        cursor: params.since_cursors.get(thread_id).cloned(),
+                        next_cursor: params.since_cursors.get(thread_id).cloned(),
+                        latest_agent_message_ref: None,
+                        latest_agent_message_text: None,
+                        technical_evidence_refs: Vec::new(),
+                    })
+                    .collect(),
+                agent_message_ref: None,
+                structured_output_ref: None,
+                technical_evidence_refs: Vec::new(),
+                source_method: "record_only".to_string(),
+                used_thread_turns_summary: false,
+                blockers: vec![
+                    "thread consolidation adapter not available in this runtime mode".to_string(),
+                ],
+            }
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TurnStartThreadConsolidationAdapter {
+    thread_processor: ThreadRequestProcessor,
+    turn_processor: TurnRequestProcessor,
+}
+
+impl TurnStartThreadConsolidationAdapter {
+    pub(crate) fn new(
+        thread_processor: ThreadRequestProcessor,
+        turn_processor: TurnRequestProcessor,
+    ) -> Self {
+        Self {
+            thread_processor,
+            turn_processor,
+        }
+    }
+}
+
+impl ThreadConsolidationAdapter for TurnStartThreadConsolidationAdapter {
+    fn consolidate_threads<'a>(
+        &'a self,
+        params: &'a MemythosThreadConsolidateParams,
+    ) -> ThreadConsolidationFuture<'a> {
+        Box::pin(async move {
+            let mut source_refs = Vec::with_capacity(params.source_thread_ids.len());
+            let mut technical_evidence_refs = Vec::new();
+            let mut blockers = Vec::new();
+            let items_view = normalize_consolidation_items_view(params.items_view.as_deref());
+            let per_source_limit = params.per_source_limit.unwrap_or(3).clamp(1, 10);
+
+            for source_thread_id in &params.source_thread_ids {
+                let cursor = params.since_cursors.get(source_thread_id).cloned();
+                match self
+                    .thread_processor
+                    .thread_turns_list(ThreadTurnsListParams {
+                        thread_id: source_thread_id.clone(),
+                        cursor: cursor.clone(),
+                        limit: Some(per_source_limit),
+                        sort_direction: Some(SortDirection::Desc),
+                        items_view: Some(TurnItemsView::Summary),
+                    })
+                    .await
+                {
+                    Ok(Some(ClientResponsePayload::ThreadTurnsList(response))) => {
+                        let mut turn_refs = Vec::new();
+                        let mut source_technical_evidence_refs = Vec::new();
+                        let mut latest_agent_message_ref = None;
+                        let mut latest_agent_message_text = None;
+                        for turn in &response.data {
+                            let turn_ref = format!(
+                                "app-server://threads/{}/turns/{}",
+                                source_thread_id, turn.id
+                            );
+                            turn_refs.push(turn_ref);
+                            for item in &turn.items {
+                                match item {
+                                    ThreadItem::AgentMessage { id, text, .. } => {
+                                        latest_agent_message_ref = Some(format!(
+                                            "app-server://threads/{}/turns/{}/items/{}",
+                                            source_thread_id, turn.id, id
+                                        ));
+                                        latest_agent_message_text = Some(text.clone());
+                                    }
+                                    ThreadItem::CollabAgentToolCall { id, .. }
+                                    | ThreadItem::SubAgentActivity { id, .. } => {
+                                        let evidence_ref = format!(
+                                            "app-server://threads/{}/turns/{}/items/{}",
+                                            source_thread_id, turn.id, id
+                                        );
+                                        source_technical_evidence_refs.push(evidence_ref.clone());
+                                        technical_evidence_refs.push(evidence_ref);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        source_refs.push(MemythosThreadConsolidationSourceRef {
+                            thread_id: source_thread_id.clone(),
+                            turn_refs,
+                            items_view: items_view.to_string(),
+                            cursor,
+                            next_cursor: response.next_cursor.or(response.backwards_cursor),
+                            latest_agent_message_ref,
+                            latest_agent_message_text,
+                            technical_evidence_refs: compact_event_refs(
+                                source_technical_evidence_refs,
+                            ),
+                        });
+                    }
+                    Ok(_) => {
+                        blockers.push(format!(
+                            "thread/turns/list returned no turns payload for {}",
+                            source_thread_id
+                        ));
+                        source_refs.push(empty_consolidation_source_ref(
+                            source_thread_id,
+                            cursor,
+                            items_view,
+                        ));
+                    }
+                    Err(error) => {
+                        blockers.push(format!(
+                            "thread/turns/list failed for {}: {}",
+                            source_thread_id, error.message
+                        ));
+                        source_refs.push(empty_consolidation_source_ref(
+                            source_thread_id,
+                            cursor,
+                            items_view,
+                        ));
+                    }
+                }
+            }
+
+            let context_payload = serde_json::json!({
+                "purpose": params.purpose,
+                "authorityMode": params.authority_mode,
+                "sourceRefs": &source_refs,
+                "technicalEvidenceRefs": &technical_evidence_refs,
+                "instructions": params.instructions,
+                "humanInstruction": false,
+                "sourceMethod": "thread/turns/list",
+                "itemsView": items_view
+            });
+            let context_text = serde_json::to_string_pretty(&context_payload)
+                .unwrap_or_else(|_| "{}".to_string());
+            let prompt = build_thread_consolidation_prompt(params);
+            let mut additional_context = HashMap::new();
+            additional_context.insert(
+                "memythos.thread_consolidation".to_string(),
+                AdditionalContextEntry {
+                    value: context_text,
+                    kind: AdditionalContextKind::Application,
+                },
+            );
+            let request_id = ConnectionRequestId {
+                connection_id: ConnectionId(0),
+                request_id: RequestId::String(format!(
+                    "memythos-thread-consolidate:{}",
+                    params
+                        .client_user_message_id
+                        .clone()
+                        .unwrap_or_else(|| params.coordinator_thread_id.clone())
+                )),
+            };
+            let mut metadata = HashMap::new();
+            metadata.insert(
+                "memythos_thread_consolidation".to_string(),
+                "true".to_string(),
+            );
+            metadata.insert(
+                "memythos_purpose".to_string(),
+                format!("{:?}", params.purpose),
+            );
+            let turn_params = TurnStartParams {
+                thread_id: params.coordinator_thread_id.clone(),
+                client_user_message_id: params.client_user_message_id.clone(),
+                input: vec![UserInput::Text {
+                    text: prompt,
+                    text_elements: vec![],
+                }],
+                responsesapi_client_metadata: Some(metadata),
+                additional_context: Some(additional_context),
+                environments: None,
+                cwd: None,
+                runtime_workspace_roots: None,
+                approval_policy: None,
+                approvals_reviewer: None,
+                sandbox_policy: None,
+                permissions: None,
+                model: None,
+                service_tier: None,
+                effort: None,
+                summary: None,
+                personality: None,
+                output_schema: params.output_schema.clone(),
+                collaboration_mode: None,
+                multi_agent_mode: None,
+            };
+
+            let (consolidation_turn_id, agent_message_ref, structured_output_ref) = match self
+                .turn_processor
+                .turn_start(
+                    request_id,
+                    turn_params,
+                    Some("memythos".to_string()),
+                    None,
+                    false,
+                )
+                .await
+            {
+                Ok(Some(ClientResponsePayload::TurnStart(response))) => {
+                    let turn_id = response.turn.id;
+                    let agent_message_ref = response
+                        .turn
+                        .items
+                        .iter()
+                        .rev()
+                        .find_map(|item| match item {
+                            ThreadItem::AgentMessage { id, .. } => Some(format!(
+                                "app-server://threads/{}/turns/{}/items/{}",
+                                params.coordinator_thread_id, turn_id, id
+                            )),
+                            _ => None,
+                        });
+                    let structured_output_ref = params.output_schema.as_ref().map(|_| {
+                        format!(
+                            "app-server://threads/{}/turns/{}/output-schema",
+                            params.coordinator_thread_id, turn_id
+                        )
+                    });
+                    (Some(turn_id), agent_message_ref, structured_output_ref)
+                }
+                Ok(_) => {
+                    blockers.push(
+                        "turn/start returned no turn response for thread consolidation".to_string(),
+                    );
+                    (None, None, None)
+                }
+                Err(error) => {
+                    blockers.push(format!(
+                        "turn/start failed for thread consolidation: {}",
+                        error.message
+                    ));
+                    (None, None, None)
+                }
+            };
+
+            ThreadConsolidationAttempt {
+                consolidation_turn_id,
+                source_refs,
+                agent_message_ref,
+                structured_output_ref,
+                technical_evidence_refs: compact_event_refs(technical_evidence_refs),
+                source_method: "thread/turns/list".to_string(),
+                used_thread_turns_summary: true,
+                blockers,
+            }
+        })
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct MemythosRequestProcessor {
     state: Arc<Mutex<MemythosRuntimeState>>,
     peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
     parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
+    thread_consolidation_adapter: Arc<dyn ThreadConsolidationAdapter>,
     next_layer_id: Arc<AtomicU64>,
     next_arena_id: Arc<AtomicU64>,
     next_attachment_id: Arc<AtomicU64>,
@@ -498,6 +811,7 @@ impl MemythosRequestProcessor {
             rpc_transport,
             peer_parent_delivery_adapter,
             Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
         )
     }
 
@@ -505,6 +819,7 @@ impl MemythosRequestProcessor {
         rpc_transport: AppServerRpcTransport,
         peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
         parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
+        thread_consolidation_adapter: Arc<dyn ThreadConsolidationAdapter>,
     ) -> Self {
         let (connection_mode, transport_owner, transport_id, daemon_runtime_verified) =
             match rpc_transport {
@@ -544,6 +859,7 @@ impl MemythosRequestProcessor {
             })),
             peer_parent_delivery_adapter,
             parent_goal_snapshot_adapter,
+            thread_consolidation_adapter,
             next_layer_id: Arc::new(AtomicU64::default()),
             next_arena_id: Arc::new(AtomicU64::default()),
             next_attachment_id: Arc::new(AtomicU64::default()),
@@ -586,6 +902,7 @@ impl MemythosRequestProcessor {
                 "memythos/room/register".to_string(),
                 "memythos/room/activity/list".to_string(),
                 "memythos/room/sendInput".to_string(),
+                "memythos/thread/consolidate".to_string(),
                 "memythos/arena/state/get".to_string(),
                 "memythos/arena/phase/close".to_string(),
                 "memythos/arena/run".to_string(),
@@ -1474,6 +1791,63 @@ impl MemythosRequestProcessor {
         .into())
     }
 
+    pub(crate) async fn thread_consolidate(
+        &self,
+        params: MemythosThreadConsolidateParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        validate_thread_consolidation_request(&params)?;
+        let attempt = self
+            .thread_consolidation_adapter
+            .consolidate_threads(&params)
+            .await;
+        let consolidation_turn_id = attempt
+            .consolidation_turn_id
+            .clone()
+            .unwrap_or_else(|| "unavailable".to_string());
+        let event_ref = format!(
+            "app-server://threads/{}/turns/{}/memythos-thread-consolidation",
+            params.coordinator_thread_id, consolidation_turn_id
+        );
+        let mut state = self.state.lock().await;
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::ThreadConsolidation,
+            if attempt.used_thread_turns_summary {
+                MemythosTelemetrySource::AppServerNative
+            } else {
+                MemythosTelemetrySource::MemythosRuntimeState
+            },
+            None,
+            None,
+            Some(params.coordinator_thread_id.clone()),
+            Some(event_ref),
+            attempt.agent_message_ref.clone(),
+            if attempt.blockers.is_empty() {
+                MemythosEventChannel::HumanHighlight
+            } else {
+                MemythosEventChannel::TechnicalDetail
+            },
+            format!(
+                "Thread consolidation for coordinator {} used {} source thread(s).",
+                params.coordinator_thread_id,
+                params.source_thread_ids.len()
+            ),
+        );
+
+        Ok(MemythosThreadConsolidateResponse {
+            consolidation_turn_id,
+            coordinator_thread_id: params.coordinator_thread_id,
+            source_refs: attempt.source_refs,
+            agent_message_ref: attempt.agent_message_ref,
+            structured_output_ref: attempt.structured_output_ref,
+            technical_evidence_refs: attempt.technical_evidence_refs,
+            source_method: attempt.source_method,
+            used_thread_turns_summary: attempt.used_thread_turns_summary,
+            blockers: attempt.blockers,
+        }
+        .into())
+    }
+
     pub(crate) async fn room_activity_list(
         &self,
         params: MemythosRoomActivityListParams,
@@ -2252,6 +2626,89 @@ fn compact_summary(summary: String) -> String {
     compacted
 }
 
+fn normalize_consolidation_items_view(items_view: Option<&str>) -> &'static str {
+    match items_view {
+        Some("summary") | None => "summary",
+        Some("full") => "full",
+        Some("notLoaded") => "notLoaded",
+        Some(_) => "summary",
+    }
+}
+
+fn empty_consolidation_source_ref(
+    thread_id: &str,
+    cursor: Option<String>,
+    items_view: &str,
+) -> MemythosThreadConsolidationSourceRef {
+    MemythosThreadConsolidationSourceRef {
+        thread_id: thread_id.to_string(),
+        turn_refs: Vec::new(),
+        items_view: items_view.to_string(),
+        cursor: cursor.clone(),
+        next_cursor: cursor,
+        latest_agent_message_ref: None,
+        latest_agent_message_text: None,
+        technical_evidence_refs: Vec::new(),
+    }
+}
+
+fn build_thread_consolidation_prompt(params: &MemythosThreadConsolidateParams) -> String {
+    format!(
+        concat!(
+            "Consolida la informacion de los hilos fuente como coordinador Memythos.\n",
+            "No estas recibiendo una instruccion humana directa; estas coordinando una arena.\n",
+            "Usa el contexto de aplicacion `memythos.thread_consolidation` como evidencia.\n",
+            "No copies JSON ni logs tecnicos en la respuesta conversacional.\n",
+            "Devuelve una sintesis natural con acuerdos, disensos, definiciones faltantes y siguiente accion.\n",
+            "\n",
+            "Proposito: {purpose:?}\n",
+            "Modo de autoridad: {authority_mode:?}\n",
+            "Instrucciones: {instructions}\n"
+        ),
+        purpose = params.purpose,
+        authority_mode = params.authority_mode,
+        instructions = params.instructions
+    )
+}
+
+fn validate_thread_consolidation_request(
+    params: &MemythosThreadConsolidateParams,
+) -> Result<(), JSONRPCErrorError> {
+    if params.coordinator_thread_id.trim().is_empty() {
+        return Err(invalid_params(
+            "coordinatorThreadId is required".to_string(),
+        ));
+    }
+    if params.source_thread_ids.is_empty() {
+        return Err(invalid_params(
+            "sourceThreadIds must contain at least one thread".to_string(),
+        ));
+    }
+    if params
+        .source_thread_ids
+        .iter()
+        .any(|thread_id| thread_id.trim().is_empty())
+    {
+        return Err(invalid_params(
+            "sourceThreadIds cannot contain empty thread ids".to_string(),
+        ));
+    }
+    if params.instructions.trim().is_empty() {
+        return Err(invalid_params("instructions is required".to_string()));
+    }
+    if let Some(items_view) = params.items_view.as_deref() {
+        match items_view {
+            "summary" | "full" | "notLoaded" => {}
+            other => {
+                return Err(invalid_params(format!(
+                    "itemsView must be summary, full or notLoaded; got {other}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2328,6 +2785,57 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FakeThreadConsolidationAdapter;
+
+    impl ThreadConsolidationAdapter for FakeThreadConsolidationAdapter {
+        fn consolidate_threads<'a>(
+            &'a self,
+            params: &'a MemythosThreadConsolidateParams,
+        ) -> ThreadConsolidationFuture<'a> {
+            Box::pin(async move {
+                let source_refs = params
+                    .source_thread_ids
+                    .iter()
+                    .map(|thread_id| MemythosThreadConsolidationSourceRef {
+                        thread_id: thread_id.clone(),
+                        turn_refs: vec![format!("app-server://threads/{thread_id}/turns/turn-1")],
+                        items_view: "summary".to_string(),
+                        cursor: params.since_cursors.get(thread_id).cloned(),
+                        next_cursor: Some(format!("cursor-after-{thread_id}")),
+                        latest_agent_message_ref: Some(format!(
+                            "app-server://threads/{thread_id}/turns/turn-1/items/msg-1"
+                        )),
+                        latest_agent_message_text: Some(format!(
+                            "{thread_id} propone avanzar con una definicion concreta."
+                        )),
+                        technical_evidence_refs: vec![format!(
+                            "app-server://threads/{thread_id}/turns/turn-1/items/collab-1"
+                        )],
+                    })
+                    .collect::<Vec<_>>();
+                ThreadConsolidationAttempt {
+                    consolidation_turn_id: Some("turn-consolidation-001".to_string()),
+                    source_refs,
+                    agent_message_ref: Some(
+                        "app-server://threads/thread_concierge/turns/turn-consolidation-001/items/msg-1"
+                            .to_string(),
+                    ),
+                    structured_output_ref: Some(
+                        "app-server://threads/thread_concierge/turns/turn-consolidation-001/output-schema"
+                            .to_string(),
+                    ),
+                    technical_evidence_refs: vec![
+                        "app-server://threads/thread_a/turns/turn-1/items/collab-1".to_string(),
+                    ],
+                    source_method: "thread/turns/list".to_string(),
+                    used_thread_turns_summary: true,
+                    blockers: Vec::new(),
+                }
+            })
+        }
+    }
+
     fn room_register_params() -> MemythosRoomRegisterParams {
         MemythosRoomRegisterParams {
             room_id: "room-001".to_string(),
@@ -2372,11 +2880,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_consolidate_rejects_empty_sources() {
+        let processor = MemythosRequestProcessor::new();
+        let error = processor
+            .thread_consolidate(MemythosThreadConsolidateParams {
+                coordinator_thread_id: "thread_concierge".to_string(),
+                source_thread_ids: Vec::new(),
+                since_cursors: HashMap::new(),
+                items_view: Some("summary".to_string()),
+                purpose:
+                    codex_app_server_protocol::MemythosThreadConsolidationPurpose::ArenaRoundConsolidation,
+                authority_mode:
+                    codex_app_server_protocol::MemythosThreadConsolidationAuthorityMode::PeerCoordination,
+                instructions: "Consolidate.".to_string(),
+                per_source_limit: Some(2),
+                client_user_message_id: Some("consolidation-001".to_string()),
+                output_schema: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("sourceThreadIds must contain at least one thread"),
+            "unexpected error: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_consolidate_uses_native_summary_and_coordinator_turn() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(FakeThreadConsolidationAdapter),
+        );
+
+        let response = processor
+            .thread_consolidate(MemythosThreadConsolidateParams {
+                coordinator_thread_id: "thread_concierge".to_string(),
+                source_thread_ids: vec!["thread_a".to_string(), "thread_b".to_string()],
+                since_cursors: HashMap::from([(
+                    "thread_a".to_string(),
+                    "cursor-a".to_string(),
+                )]),
+                items_view: Some("summary".to_string()),
+                purpose:
+                    codex_app_server_protocol::MemythosThreadConsolidationPurpose::ArenaRoundConsolidation,
+                authority_mode:
+                    codex_app_server_protocol::MemythosThreadConsolidationAuthorityMode::PeerCoordination,
+                instructions: "Consolidate the round for the judge.".to_string(),
+                per_source_limit: Some(2),
+                client_user_message_id: Some("consolidation-001".to_string()),
+                output_schema: Some(serde_json::json!({"type": "object"})),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosThreadConsolidate(response) = response else {
+            panic!("expected MemythosThreadConsolidate response");
+        };
+
+        assert_eq!(response.consolidation_turn_id, "turn-consolidation-001");
+        assert_eq!(response.coordinator_thread_id, "thread_concierge");
+        assert_eq!(response.source_method, "thread/turns/list");
+        assert!(response.used_thread_turns_summary);
+        assert!(response.blockers.is_empty());
+        assert_eq!(response.source_refs.len(), 2);
+        assert_eq!(
+            response.source_refs[0].cursor.as_deref(),
+            Some("cursor-a")
+        );
+        assert!(response.agent_message_ref.is_some());
+        assert!(response.structured_output_ref.is_some());
+        assert_eq!(response.technical_evidence_refs.len(), 1);
+
+        let telemetry = processor
+            .telemetry_list(MemythosTelemetryListParams {
+                layer_id: None,
+                arena_id: None,
+                thread_id: Some("thread_concierge".to_string()),
+                limit: Some(10),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosTelemetryList(telemetry) = telemetry else {
+            panic!("expected MemythosTelemetryList response");
+        };
+        assert!(telemetry.telemetry_refs.iter().any(|telemetry_ref| {
+            telemetry_ref.kind == MemythosTelemetryRefKind::ThreadConsolidation
+                && telemetry_ref.source == MemythosTelemetrySource::AppServerNative
+        }));
+    }
+
+    #[tokio::test]
     async fn room_send_input_uses_native_loopback_delivery() {
         let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
             AppServerRpcTransport::Websocket,
             Arc::new(FakeLivePeerParentDeliveryAdapter),
             Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
         );
         let register_response = processor
             .room_register(room_register_params())
@@ -2443,6 +3047,7 @@ mod tests {
             AppServerRpcTransport::Websocket,
             Arc::new(FakeLivePeerParentDeliveryAdapter),
             Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
         );
         let mut params = room_register_params();
         params.participants.push(MemythosRoomParticipant {
@@ -2533,6 +3138,7 @@ mod tests {
             AppServerRpcTransport::Websocket,
             Arc::new(FakeLivePeerParentDeliveryAdapter),
             Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
         );
         processor
             .room_register(room_register_params())
@@ -2659,6 +3265,7 @@ mod tests {
             AppServerRpcTransport::Websocket,
             Arc::new(FakeLivePeerParentDeliveryAdapter),
             Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
         );
         processor
             .room_register(room_register_params())
@@ -3657,6 +4264,7 @@ mod tests {
             AppServerRpcTransport::Websocket,
             Arc::new(FakeLivePeerParentDeliveryAdapter),
             Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
         );
         let layer_response = processor
             .layer_create(MemythosLayerCreateParams {

@@ -41,6 +41,7 @@ use crate::request_processors::ThreadGoalParentSnapshotAdapter;
 use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
+use crate::request_processors::TurnStartThreadConsolidationAdapter;
 use crate::request_processors::TurnStartPeerParentDeliveryAdapter;
 use crate::request_processors::WindowsSandboxRequestProcessor;
 use crate::request_serialization::QueuedInitializedRequest;
@@ -524,6 +525,10 @@ impl MessageProcessor {
             )),
             Arc::new(ThreadGoalParentSnapshotAdapter::new(
                 thread_goal_processor.clone(),
+            )),
+            Arc::new(TurnStartThreadConsolidationAdapter::new(
+                thread_processor.clone(),
+                turn_processor.clone(),
             )),
         );
         *memythos_processor_holder
@@ -1287,6 +1292,11 @@ impl MessageProcessor {
             ClientRequest::MemythosRoomSendInput { params, .. } => self
                 .memythos_processor
                 .room_send_input(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosThreadConsolidate { params, .. } => self
+                .memythos_processor
+                .thread_consolidate(params)
                 .await
                 .map(Some),
             ClientRequest::MemythosTelemetryList { params, .. } => self
