@@ -35,8 +35,8 @@ use codex_app_server_protocol::MemythosArenaParticipantRegisterParams;
 use codex_app_server_protocol::MemythosArenaParticipantRegisterResponse;
 use codex_app_server_protocol::MemythosArenaPhaseCloseParams;
 use codex_app_server_protocol::MemythosArenaPhaseCloseResponse;
-use codex_app_server_protocol::MemythosArenaPhaseStartResponse;
 use codex_app_server_protocol::MemythosArenaPhaseStartParams;
+use codex_app_server_protocol::MemythosArenaPhaseStartResponse;
 use codex_app_server_protocol::MemythosArenaRunParams;
 use codex_app_server_protocol::MemythosArenaRunResponse;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
@@ -896,14 +896,15 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosArenaPhaseStartParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
-        let update = self.update_arena_phase(
-            params.arena_id,
-            params.round_id,
-            params.phase,
-            MemythosArenaLifecycleState::Running,
-            "started",
-        )
-        .await?;
+        let update = self
+            .update_arena_phase(
+                params.arena_id,
+                params.round_id,
+                params.phase,
+                MemythosArenaLifecycleState::Running,
+                "started",
+            )
+            .await?;
         Ok(MemythosArenaPhaseStartResponse {
             arena_id: update.arena_id,
             round_id: update.round_id,
@@ -1176,7 +1177,9 @@ impl MemythosRequestProcessor {
         arena.lifecycle_state = lifecycle_state;
         let layer_id = arena.layer_id.clone();
         let arena_id = arena.arena_id.clone();
-        let event_ref = format!("app-server://memythos/arenas/{arena_id}/rounds/{round_id}/phases/{phase}/{action}");
+        let event_ref = format!(
+            "app-server://memythos/arenas/{arena_id}/rounds/{round_id}/phases/{phase}/{action}"
+        );
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::ArenaState,
@@ -1202,14 +1205,15 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosArenaPhaseCloseParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
-        let update = self.update_arena_phase(
-            params.arena_id,
-            params.round_id,
-            params.phase,
-            MemythosArenaLifecycleState::ArtifactComplete,
-            "closed",
-        )
-        .await?;
+        let update = self
+            .update_arena_phase(
+                params.arena_id,
+                params.round_id,
+                params.phase,
+                MemythosArenaLifecycleState::ArtifactComplete,
+                "closed",
+            )
+            .await?;
         Ok(MemythosArenaPhaseCloseResponse {
             arena_id: update.arena_id,
             round_id: update.round_id,
@@ -1496,17 +1500,33 @@ impl MemythosRequestProcessor {
                     .map_or(true, |round_id| &delivery.round_id == round_id)
             })
             .filter(|delivery| {
-                params.phase.as_ref().map_or(true, |phase| {
-                    delivery.phase.as_deref() == Some(phase.as_str())
-                })
-            })
-            .filter(|delivery| {
                 participant_thread_ids.contains(delivery.sender_thread_id.as_str())
                     || participant_thread_ids.contains(delivery.receiver_thread_id.as_str())
             })
             .cloned()
             .collect::<Vec<_>>();
         deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
+        let mut blockers = Vec::new();
+        let since_cursor_applied = if let Some(cursor) = params.since_cursor.as_deref() {
+            if let Some(cursor_index) = deliveries
+                .iter()
+                .position(|delivery| delivery.delivery_id == cursor)
+            {
+                deliveries = deliveries.into_iter().skip(cursor_index + 1).collect();
+                true
+            } else {
+                blockers.push(format!(
+                    "unknown or stale since_cursor for room activity: {cursor}"
+                ));
+                deliveries.clear();
+                false
+            }
+        } else {
+            false
+        };
+        if let Some(phase) = params.phase.as_ref() {
+            deliveries.retain(|delivery| delivery.phase.as_deref() == Some(phase.as_str()));
+        }
         if let Some(limit) = params.limit {
             deliveries.truncate(limit);
         }
@@ -1585,9 +1605,15 @@ impl MemythosRequestProcessor {
                 room_activity_turn_from_delivery(&room, delivery, params.include_debug_refs)
             })
             .collect::<Vec<_>>();
-        let cursor = turns
+        let cursor = deliveries
             .last()
-            .map(|turn| format!("{}::{}", turn.thread_id, turn.turn_id));
+            .map(|delivery| delivery.delivery_id.clone())
+            .or(params.since_cursor);
+        let returned_activity_scope = if since_cursor_applied {
+            "delta"
+        } else {
+            "initial"
+        };
         Ok(MemythosRoomActivityListResponse {
             room_id: room.room_id,
             case_id: room.case_id,
@@ -1595,6 +1621,8 @@ impl MemythosRequestProcessor {
             arena_id: room.arena_id,
             round_id: params.round_id,
             cursor,
+            since_cursor_applied,
+            returned_activity_scope: returned_activity_scope.to_string(),
             source_method: "memythos/room/activity/list".to_string(),
             participants,
             turns,
@@ -1626,7 +1654,7 @@ impl MemythosRequestProcessor {
                 token_usage_events: token_usage_refs.len(),
                 refs: token_usage_refs,
             },
-            blockers: Vec::new(),
+            blockers,
         }
         .into())
     }
@@ -1907,6 +1935,8 @@ fn room_activity_turn_from_delivery(
         phase,
         status: status.to_string(),
         items: vec![MemythosRoomActivityItem {
+            item_id: Some(delivery.delivery_id.clone()),
+            item_type: Some("collab_call".to_string()),
             kind: "collab_call".to_string(),
             status: delivery.status.clone(),
             summary: technical_summary.clone(),
@@ -2621,6 +2651,116 @@ mod tests {
             panic!("expected MemythosRoomActivityList response");
         };
         assert!(judge_response.turns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn room_activity_list_applies_since_cursor_as_delta_boundary() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+        );
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+
+        for message_id in ["message-004", "message-005"] {
+            processor
+                .room_send_input(MemythosRoomSendInputParams {
+                    room_id: "room-001".to_string(),
+                    room_message_ref: format!("artifact://room/messages/{message_id}.json"),
+                    delivery_ref: format!("artifact://room/deliveries/{message_id}.json"),
+                    from_parent_thread_id: Some("thread_growth".to_string()),
+                    via_concierge_thread_id: None,
+                    to_parent_thread_id: "thread_risk".to_string(),
+                    source_parent_key: "case/bpm_e2e/arena/bettor/growth".to_string(),
+                    target_parent_key: "case/bpm_e2e/arena/bettor/risk".to_string(),
+                    message_kind: "peer_bet".to_string(),
+                    message_authority: "peer_debate".to_string(),
+                    human_instruction: false,
+                    response_contract: "peer_response_contract".to_string(),
+                    client_user_message_id: Some(message_id.to_string()),
+                    prompt: format!("Apuesta incremental {message_id}."),
+                    metadata: serde_json::Map::from_iter([
+                        (
+                            "memythos_round_id".to_string(),
+                            serde_json::Value::String("round-001".to_string()),
+                        ),
+                        (
+                            "memythos_phase".to_string(),
+                            serde_json::Value::String("bet".to_string()),
+                        ),
+                    ]),
+                    output_schema: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let initial_response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: Some("round-001".to_string()),
+                phase: None,
+                since_cursor: None,
+                limit: Some(1),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(initial_response) = initial_response
+        else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+        assert_eq!(initial_response.turns.len(), 1);
+        assert_eq!(initial_response.returned_activity_scope, "initial");
+        assert!(!initial_response.since_cursor_applied);
+        let cursor = initial_response.cursor.expect("initial cursor");
+
+        let delta_response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: Some("round-001".to_string()),
+                phase: None,
+                since_cursor: Some(cursor),
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(delta_response) = delta_response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+
+        assert_eq!(delta_response.turns.len(), 1);
+        assert_eq!(delta_response.returned_activity_scope, "delta");
+        assert!(delta_response.since_cursor_applied);
+        assert!(delta_response.blockers.is_empty());
+        assert_ne!(delta_response.cursor, None);
+
+        let stale_response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: Some("round-001".to_string()),
+                phase: None,
+                since_cursor: Some("missing-cursor".to_string()),
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(stale_response) = stale_response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+        assert!(stale_response.turns.is_empty());
+        assert!(!stale_response.since_cursor_applied);
+        assert!(
+            stale_response
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("unknown or stale since_cursor"))
+        );
     }
 
     #[tokio::test]

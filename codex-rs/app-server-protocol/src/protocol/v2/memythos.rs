@@ -668,6 +668,12 @@ pub struct MemythosRoomActivityParticipant {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct MemythosRoomActivityItem {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub item_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub item_type: Option<String>,
     pub kind: String,
     pub status: String,
     pub summary: String,
@@ -754,6 +760,9 @@ pub struct MemythosRoomActivityListResponse {
     pub round_id: Option<String>,
     #[ts(optional = nullable)]
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub since_cursor_applied: bool,
+    pub returned_activity_scope: String,
     pub source_method: String,
     pub participants: Vec<MemythosRoomActivityParticipant>,
     pub turns: Vec<MemythosRoomActivityTurn>,
