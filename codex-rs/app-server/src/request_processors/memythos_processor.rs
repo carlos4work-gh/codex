@@ -3640,7 +3640,7 @@ mod tests {
                 room_id: "room-001".to_string(),
                 round_id: Some("round-001".to_string()),
                 phase: None,
-                since_cursor: Some(cursor),
+                since_cursor: Some(cursor.clone()),
                 after_cursor: None,
                 limit: Some(25),
                 include_debug_refs: false,
