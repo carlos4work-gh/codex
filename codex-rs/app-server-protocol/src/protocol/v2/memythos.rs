@@ -662,6 +662,29 @@ pub struct MemythosRoomRegisterResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct MemythosRoomListParams {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub case_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub layer_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub arena_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomListResponse {
+    pub rooms: Vec<MemythosRoom>,
+    pub source_method: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct MemythosRoomActivityListParams {
     pub room_id: String,
     #[ts(optional = nullable)]
@@ -1048,10 +1071,7 @@ mod tests {
         let params = MemythosThreadConsolidateParams {
             coordinator_thread_id: "thread_concierge".to_string(),
             source_thread_ids: vec!["thread_a".to_string(), "thread_b".to_string()],
-            since_cursors: HashMap::from([(
-                "thread_a".to_string(),
-                "cursor-a".to_string(),
-            )]),
+            since_cursors: HashMap::from([("thread_a".to_string(), "cursor-a".to_string())]),
             items_view: Some("summary".to_string()),
             purpose: MemythosThreadConsolidationPurpose::ArenaRoundConsolidation,
             authority_mode: MemythosThreadConsolidationAuthorityMode::PeerCoordination,

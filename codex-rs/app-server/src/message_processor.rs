@@ -41,8 +41,8 @@ use crate::request_processors::ThreadGoalParentSnapshotAdapter;
 use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
-use crate::request_processors::TurnStartThreadConsolidationAdapter;
 use crate::request_processors::TurnStartPeerParentDeliveryAdapter;
+use crate::request_processors::TurnStartThreadConsolidationAdapter;
 use crate::request_processors::WindowsSandboxRequestProcessor;
 use crate::request_serialization::QueuedInitializedRequest;
 use crate::request_serialization::RequestSerializationQueueKey;
@@ -1284,6 +1284,9 @@ impl MessageProcessor {
                 .room_register(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosRoomList { params, .. } => {
+                self.memythos_processor.room_list(params).await.map(Some)
+            }
             ClientRequest::MemythosRoomActivityList { params, .. } => self
                 .memythos_processor
                 .room_activity_list(params)

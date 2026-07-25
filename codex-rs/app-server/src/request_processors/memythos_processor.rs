@@ -63,6 +63,8 @@ use codex_app_server_protocol::MemythosRoomActivityParticipant;
 use codex_app_server_protocol::MemythosRoomActivitySubagents;
 use codex_app_server_protocol::MemythosRoomActivityTurn;
 use codex_app_server_protocol::MemythosRoomActivityUsage;
+use codex_app_server_protocol::MemythosRoomListParams;
+use codex_app_server_protocol::MemythosRoomListResponse;
 use codex_app_server_protocol::MemythosRoomParticipant;
 use codex_app_server_protocol::MemythosRoomRegisterParams;
 use codex_app_server_protocol::MemythosRoomRegisterResponse;
@@ -80,12 +82,12 @@ use codex_app_server_protocol::MemythosTelemetryListResponse;
 use codex_app_server_protocol::MemythosTelemetryRef;
 use codex_app_server_protocol::MemythosTelemetryRefKind;
 use codex_app_server_protocol::MemythosTelemetrySource;
-use codex_app_server_protocol::MemythosThreadConsolidateParams;
-use codex_app_server_protocol::MemythosThreadConsolidateResponse;
-use codex_app_server_protocol::MemythosThreadConsolidationSourceRef;
 use codex_app_server_protocol::MemythosThreadAttachParams;
 use codex_app_server_protocol::MemythosThreadAttachResponse;
 use codex_app_server_protocol::MemythosThreadAttachment;
+use codex_app_server_protocol::MemythosThreadConsolidateParams;
+use codex_app_server_protocol::MemythosThreadConsolidateResponse;
+use codex_app_server_protocol::MemythosThreadConsolidationSourceRef;
 use codex_app_server_protocol::MemythosThreadListParams;
 use codex_app_server_protocol::MemythosThreadListResponse;
 use codex_app_server_protocol::RequestId;
@@ -657,8 +659,8 @@ impl ThreadConsolidationAdapter for TurnStartThreadConsolidationAdapter {
                 "sourceMethod": "thread/turns/list",
                 "itemsView": items_view
             });
-            let context_text = serde_json::to_string_pretty(&context_payload)
-                .unwrap_or_else(|_| "{}".to_string());
+            let context_text =
+                serde_json::to_string_pretty(&context_payload).unwrap_or_else(|_| "{}".to_string());
             let prompt = build_thread_consolidation_prompt(params);
             let mut additional_context = HashMap::new();
             additional_context.insert(
@@ -726,18 +728,19 @@ impl ThreadConsolidationAdapter for TurnStartThreadConsolidationAdapter {
             {
                 Ok(Some(ClientResponsePayload::TurnStart(response))) => {
                     let turn_id = response.turn.id;
-                    let agent_message_ref = response
-                        .turn
-                        .items
-                        .iter()
-                        .rev()
-                        .find_map(|item| match item {
-                            ThreadItem::AgentMessage { id, .. } => Some(format!(
-                                "app-server://threads/{}/turns/{}/items/{}",
-                                params.coordinator_thread_id, turn_id, id
-                            )),
-                            _ => None,
-                        });
+                    let agent_message_ref =
+                        response
+                            .turn
+                            .items
+                            .iter()
+                            .rev()
+                            .find_map(|item| match item {
+                                ThreadItem::AgentMessage { id, .. } => Some(format!(
+                                    "app-server://threads/{}/turns/{}/items/{}",
+                                    params.coordinator_thread_id, turn_id, id
+                                )),
+                                _ => None,
+                            });
                     let structured_output_ref = params.output_schema.as_ref().map(|_| {
                         format!(
                             "app-server://threads/{}/turns/{}/output-schema",
@@ -1605,6 +1608,35 @@ impl MemythosRequestProcessor {
         Ok(MemythosRoomRegisterResponse {
             room,
             event_refs: vec![event_ref],
+        }
+        .into())
+    }
+
+    pub(crate) async fn room_list(
+        &self,
+        params: MemythosRoomListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state = self.state.lock().await;
+        let mut rooms = state.rooms.values().cloned().collect::<Vec<_>>();
+        rooms.retain(|room| {
+            params
+                .case_id
+                .as_ref()
+                .map_or(true, |case_id| &room.case_id == case_id)
+                && params
+                    .layer_id
+                    .as_ref()
+                    .map_or(true, |layer_id| &room.layer_id == layer_id)
+                && params
+                    .arena_id
+                    .as_ref()
+                    .map_or(true, |arena_id| &room.arena_id == arena_id)
+        });
+        rooms.sort_by(|left, right| left.room_id.cmp(&right.room_id));
+
+        Ok(MemythosRoomListResponse {
+            rooms,
+            source_method: "memythos/room/list".to_string(),
         }
         .into())
     }
@@ -2880,6 +2912,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn room_list_returns_registered_rooms_from_native_state() {
+        let processor = MemythosRequestProcessor::new();
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+        let mut second_room = room_register_params();
+        second_room.room_id = "room-002".to_string();
+        second_room.case_id = "case-002".to_string();
+        processor.room_register(second_room).await.unwrap();
+
+        let response = processor
+            .room_list(MemythosRoomListParams {
+                case_id: Some("case-001".to_string()),
+                layer_id: None,
+                arena_id: None,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomList(response) = response else {
+            panic!("expected MemythosRoomList response");
+        };
+
+        assert_eq!(response.source_method, "memythos/room/list");
+        assert_eq!(response.rooms.len(), 1);
+        assert_eq!(response.rooms[0].room_id, "room-001");
+        assert_eq!(response.rooms[0].participants.len(), 2);
+    }
+
+    #[tokio::test]
     async fn thread_consolidate_rejects_empty_sources() {
         let processor = MemythosRequestProcessor::new();
         let error = processor
@@ -2948,10 +3010,7 @@ mod tests {
         assert!(response.used_thread_turns_summary);
         assert!(response.blockers.is_empty());
         assert_eq!(response.source_refs.len(), 2);
-        assert_eq!(
-            response.source_refs[0].cursor.as_deref(),
-            Some("cursor-a")
-        );
+        assert_eq!(response.source_refs[0].cursor.as_deref(), Some("cursor-a"));
         assert!(response.agent_message_ref.is_some());
         assert!(response.structured_output_ref.is_some());
         assert_eq!(response.technical_evidence_refs.len(), 1);

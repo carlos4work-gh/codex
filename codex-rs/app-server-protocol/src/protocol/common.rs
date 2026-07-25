@@ -671,6 +671,12 @@ client_request_definitions! {
         serialization: global("memythos"),
         response: v2::MemythosRoomRegisterResponse,
     },
+    #[experimental("memythos/room/list")]
+    MemythosRoomList => "memythos/room/list" {
+        params: v2::MemythosRoomListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosRoomListResponse,
+    },
     #[experimental("memythos/room/activity/list")]
     MemythosRoomActivityList => "memythos/room/activity/list" {
         params: v2::MemythosRoomActivityListParams,
