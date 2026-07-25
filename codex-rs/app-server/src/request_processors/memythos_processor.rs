@@ -55,6 +55,7 @@ use codex_app_server_protocol::MemythosParentPeerResponseObservation;
 use codex_app_server_protocol::MemythosParentThreadContinuity;
 use codex_app_server_protocol::MemythosRoom;
 use codex_app_server_protocol::MemythosRoomActivityCollab;
+use codex_app_server_protocol::MemythosRoomActivityEvent;
 use codex_app_server_protocol::MemythosRoomActivityItem;
 use codex_app_server_protocol::MemythosRoomActivityLifecycle;
 use codex_app_server_protocol::MemythosRoomActivityListParams;
@@ -124,6 +125,7 @@ struct MemythosRuntimeState {
     thread_attachments: HashMap<String, MemythosThreadAttachment>,
     arena_parents: HashMap<String, MemythosArenaParent>,
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
+    room_activity_events: HashMap<String, Vec<MemythosRoomActivityEvent>>,
     native_token_usage_refs: HashMap<String, String>,
     telemetry_refs: Vec<MemythosTelemetryRef>,
 }
@@ -788,6 +790,7 @@ pub(crate) struct MemythosRequestProcessor {
     next_arena_id: Arc<AtomicU64>,
     next_attachment_id: Arc<AtomicU64>,
     next_delivery_id: Arc<AtomicU64>,
+    next_room_activity_id: Arc<AtomicU64>,
     next_telemetry_ref_id: Arc<AtomicU64>,
 }
 
@@ -857,6 +860,7 @@ impl MemythosRequestProcessor {
                 thread_attachments: HashMap::new(),
                 arena_parents: HashMap::new(),
                 arena_message_deliveries: Vec::new(),
+                room_activity_events: HashMap::new(),
                 native_token_usage_refs: HashMap::new(),
                 telemetry_refs: Vec::new(),
             })),
@@ -867,6 +871,7 @@ impl MemythosRequestProcessor {
             next_arena_id: Arc::new(AtomicU64::default()),
             next_attachment_id: Arc::new(AtomicU64::default()),
             next_delivery_id: Arc::new(AtomicU64::default()),
+            next_room_activity_id: Arc::new(AtomicU64::default()),
             next_telemetry_ref_id: Arc::new(AtomicU64::default()),
         }
     }
@@ -1604,6 +1609,48 @@ impl MemythosRequestProcessor {
                 room.participants.len()
             ),
         );
+        self.push_room_activity_event(
+            &mut state,
+            room_id.clone(),
+            room.arena_id.clone(),
+            "room_concierge".to_string(),
+            None,
+            None,
+            None,
+            "room_concierge".to_string(),
+            "lifecycle",
+            "room_registered",
+            "completed",
+            format!(
+                "Room {} registered with {} independent parent participants.",
+                room_id,
+                room.participants.len()
+            ),
+            Some(event_ref.clone()),
+        );
+        for participant in &room.participants {
+            self.push_room_activity_event(
+                &mut state,
+                room_id.clone(),
+                room.arena_id.clone(),
+                participant.thread_id.clone(),
+                None,
+                None,
+                None,
+                participant.parent_role.clone(),
+                "lifecycle",
+                "participant_attached",
+                "completed",
+                format!(
+                    "Participant {} attached to room {} as {}.",
+                    participant.parent_key, room_id, participant.parent_role
+                ),
+                Some(format!(
+                    "app-server://rooms/{}/participants/{}",
+                    room_id, participant.thread_id
+                )),
+            );
+        }
 
         Ok(MemythosRoomRegisterResponse {
             room,
@@ -1806,6 +1853,27 @@ impl MemythosRequestProcessor {
                 params.room_id, message.message_id, params.to_parent_thread_id, target_turn_id
             ),
         );
+        self.push_room_activity_event(
+            &mut state,
+            params.room_id.clone(),
+            room.arena_id.clone(),
+            params.to_parent_thread_id.clone(),
+            Some(target_turn_id.clone()),
+            Some(message.round_id.clone()),
+            phase_from_message_kind(&message.message_kind),
+            target.parent_role.clone(),
+            "human_like",
+            "input_delivered",
+            "running",
+            format!(
+                "Room {} delivered {} to parent thread {} with turn {}.",
+                params.room_id, message.message_id, params.to_parent_thread_id, target_turn_id
+            ),
+            Some(format!(
+                "app-server://rooms/{}/messages/{}/delivered",
+                params.room_id, message.message_id
+            )),
+        );
 
         Ok(MemythosRoomSendInputResponse {
             delivery: MemythosRoomSendInputDelivery {
@@ -1912,29 +1980,58 @@ impl MemythosRequestProcessor {
             .cloned()
             .collect::<Vec<_>>();
         deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
+        if let Some(phase) = params.phase.as_ref() {
+            deliveries.retain(|delivery| delivery.phase.as_deref() == Some(phase.as_str()));
+        }
+        if let Some(limit) = params.limit {
+            deliveries.truncate(limit);
+        }
         let mut blockers = Vec::new();
-        let since_cursor_applied = if let Some(cursor) = params.since_cursor.as_deref() {
-            if let Some(cursor_index) = deliveries
+        let requested_cursor = params
+            .after_cursor
+            .clone()
+            .or_else(|| params.since_cursor.clone());
+        let room_activity_events = state
+            .room_activity_events
+            .get(&room.room_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut filtered_events = room_activity_events
+            .into_iter()
+            .filter(|event| {
+                params
+                    .round_id
+                    .as_ref()
+                    .map_or(true, |round_id| event.round_id.as_ref() == Some(round_id))
+            })
+            .filter(|event| {
+                params
+                    .phase
+                    .as_ref()
+                    .map_or(true, |phase| event.phase.as_ref() == Some(phase))
+            })
+            .collect::<Vec<_>>();
+        let since_cursor_applied = if let Some(cursor) = requested_cursor.as_deref() {
+            if let Some(cursor_index) = filtered_events
                 .iter()
-                .position(|delivery| delivery.delivery_id == cursor)
+                .position(|event| event.cursor == cursor)
             {
-                deliveries = deliveries.into_iter().skip(cursor_index + 1).collect();
+                filtered_events = filtered_events.into_iter().skip(cursor_index + 1).collect();
                 true
             } else {
-                blockers.push(format!(
-                    "unknown or stale since_cursor for room activity: {cursor}"
-                ));
+                blockers.push(format!("unknown or stale room activity cursor: {cursor}"));
+                filtered_events.clear();
                 deliveries.clear();
                 false
             }
         } else {
             false
         };
-        if let Some(phase) = params.phase.as_ref() {
-            deliveries.retain(|delivery| delivery.phase.as_deref() == Some(phase.as_str()));
-        }
+        let has_more = params
+            .limit
+            .map_or(false, |limit| filtered_events.len() > limit);
         if let Some(limit) = params.limit {
-            deliveries.truncate(limit);
+            filtered_events.truncate(limit);
         }
 
         let completed_turns = deliveries
@@ -2011,10 +2108,11 @@ impl MemythosRequestProcessor {
                 room_activity_turn_from_delivery(&room, delivery, params.include_debug_refs)
             })
             .collect::<Vec<_>>();
-        let cursor = deliveries
+        let cursor = filtered_events
             .last()
-            .map(|delivery| delivery.delivery_id.clone())
-            .or(params.since_cursor);
+            .map(|event| event.cursor.clone())
+            .or(requested_cursor);
+        let next_cursor = cursor.clone();
         let returned_activity_scope = if since_cursor_applied {
             "delta"
         } else {
@@ -2028,8 +2126,11 @@ impl MemythosRequestProcessor {
             round_id: params.round_id,
             cursor,
             since_cursor_applied,
+            next_cursor,
+            has_more,
             returned_activity_scope: returned_activity_scope.to_string(),
             source_method: "memythos/room/activity/list".to_string(),
+            events: filtered_events,
             participants,
             turns,
             lifecycle: MemythosRoomActivityLifecycle {
@@ -2177,14 +2278,48 @@ impl MemythosRequestProcessor {
             &mut state,
             MemythosTelemetryRefKind::ArenaMessage,
             MemythosTelemetrySource::AppServerNative,
-            Some(layer_id),
-            Some(arena_id),
+            Some(layer_id.clone()),
+            Some(arena_id.clone()),
             Some(thread_id.to_string()),
-            Some(native_event_ref),
-            detail_ref,
+            Some(native_event_ref.clone()),
+            detail_ref.clone(),
             MemythosEventChannel::StateTransition,
-            summary,
+            summary.clone(),
         );
+        let room_activity_targets = state
+            .rooms
+            .values()
+            .filter(|room| room.arena_id == arena_id)
+            .filter_map(|room| {
+                room.participants
+                    .iter()
+                    .find(|participant| participant.thread_id == thread_id)
+                    .map(|participant| {
+                        (
+                            room.room_id.clone(),
+                            room.arena_id.clone(),
+                            participant.parent_role.clone(),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (room_id, room_arena_id, participant_role) in room_activity_targets {
+            self.push_room_activity_event(
+                &mut state,
+                room_id,
+                room_arena_id,
+                thread_id.to_string(),
+                Some(turn_id.to_string()),
+                None,
+                None,
+                participant_role,
+                "lifecycle",
+                "turn_completed",
+                status,
+                summary.clone(),
+                Some(native_event_ref.clone()),
+            );
+        }
 
         matched_delivery
     }
@@ -2206,13 +2341,47 @@ impl MemythosRequestProcessor {
             MemythosTelemetryRefKind::ArenaMessage,
             MemythosTelemetrySource::AppServerNative,
             Some(layer_id),
-            Some(arena_id),
+            Some(arena_id.clone()),
             Some(thread_id.to_string()),
-            Some(native_event_ref),
+            Some(native_event_ref.clone()),
             None,
             MemythosEventChannel::StateTransition,
             format!("Native token usage observed for thread {thread_id} turn {turn_id}."),
         );
+        let room_activity_targets = state
+            .rooms
+            .values()
+            .filter(|room| room.arena_id == arena_id)
+            .filter_map(|room| {
+                room.participants
+                    .iter()
+                    .find(|participant| participant.thread_id == thread_id)
+                    .map(|participant| {
+                        (
+                            room.room_id.clone(),
+                            room.arena_id.clone(),
+                            participant.parent_role.clone(),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (room_id, room_arena_id, participant_role) in room_activity_targets {
+            self.push_room_activity_event(
+                &mut state,
+                room_id,
+                room_arena_id,
+                thread_id.to_string(),
+                Some(turn_id.to_string()),
+                None,
+                None,
+                participant_role,
+                "technical",
+                "token_usage_observed",
+                "completed",
+                format!("Native token usage observed for thread {thread_id} turn {turn_id}."),
+                Some(native_event_ref.clone()),
+            );
+        }
         true
     }
 
@@ -2242,6 +2411,47 @@ impl MemythosRequestProcessor {
             channel,
             summary: compact_summary(summary),
         });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_room_activity_event(
+        &self,
+        state: &mut MemythosRuntimeState,
+        room_id: String,
+        arena_id: String,
+        thread_id: String,
+        turn_id: Option<String>,
+        round_id: Option<String>,
+        phase: Option<String>,
+        participant_role: String,
+        channel: &str,
+        event_kind: &str,
+        status: &str,
+        summary: String,
+        source_ref: Option<String>,
+    ) -> String {
+        let cursor = self.next_id("mem_room_activity", &self.next_room_activity_id);
+        let event = MemythosRoomActivityEvent {
+            cursor: cursor.clone(),
+            room_id: room_id.clone(),
+            arena_id,
+            thread_id,
+            turn_id,
+            round_id,
+            phase,
+            participant_role,
+            channel: channel.to_string(),
+            event_kind: event_kind.to_string(),
+            status: status.to_string(),
+            summary: compact_summary(summary),
+            source_ref,
+        };
+        state
+            .room_activity_events
+            .entry(room_id)
+            .or_default()
+            .push(event);
+        cursor
     }
 
     #[cfg(test)]
@@ -3174,6 +3384,7 @@ mod tests {
                 round_id: Some("round-001".to_string()),
                 phase: None,
                 since_cursor: None,
+                after_cursor: None,
                 limit: Some(25),
                 include_debug_refs: false,
             })
@@ -3186,9 +3397,43 @@ mod tests {
         assert_eq!(response.source_method, "memythos/room/activity/list");
         assert_eq!(response.participants.len(), 2);
         assert!(response.turns.is_empty());
+        assert!(response.events.is_empty());
         assert_eq!(response.lifecycle.room_state, "round_closed");
         assert!(response.lifecycle.clean_close);
         assert_eq!(response.collab.send_input_count, 0);
+    }
+
+    #[tokio::test]
+    async fn room_activity_list_exposes_native_registration_cursor_events() {
+        let processor = MemythosRequestProcessor::new();
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+
+        let response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: None,
+                phase: None,
+                since_cursor: None,
+                after_cursor: None,
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(response) = response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+
+        assert_eq!(response.source_method, "memythos/room/activity/list");
+        assert_eq!(response.events.len(), 3);
+        assert_eq!(response.events[0].event_kind, "room_registered");
+        assert_eq!(response.events[1].event_kind, "participant_attached");
+        assert_eq!(response.events[2].event_kind, "participant_attached");
+        assert_eq!(response.next_cursor, response.cursor);
+        assert!(!response.has_more);
     }
 
     #[tokio::test]
@@ -3256,6 +3501,7 @@ mod tests {
                 round_id: Some("round-001".to_string()),
                 phase: None,
                 since_cursor: None,
+                after_cursor: None,
                 limit: Some(25),
                 include_debug_refs: false,
             })
@@ -3291,6 +3537,7 @@ mod tests {
                 round_id: Some("round-001".to_string()),
                 phase: Some("bet".to_string()),
                 since_cursor: None,
+                after_cursor: None,
                 limit: Some(25),
                 include_debug_refs: false,
             })
@@ -3307,6 +3554,7 @@ mod tests {
                 round_id: Some("round-001".to_string()),
                 phase: Some("judge".to_string()),
                 since_cursor: None,
+                after_cursor: None,
                 limit: Some(25),
                 include_debug_refs: false,
             })
@@ -3370,6 +3618,7 @@ mod tests {
                 round_id: Some("round-001".to_string()),
                 phase: None,
                 since_cursor: None,
+                after_cursor: None,
                 limit: Some(1),
                 include_debug_refs: false,
             })
@@ -3380,6 +3629,8 @@ mod tests {
             panic!("expected MemythosRoomActivityList response");
         };
         assert_eq!(initial_response.turns.len(), 1);
+        assert_eq!(initial_response.events.len(), 1);
+        assert!(initial_response.has_more);
         assert_eq!(initial_response.returned_activity_scope, "initial");
         assert!(!initial_response.since_cursor_applied);
         let cursor = initial_response.cursor.expect("initial cursor");
@@ -3390,6 +3641,7 @@ mod tests {
                 round_id: Some("round-001".to_string()),
                 phase: None,
                 since_cursor: Some(cursor),
+                after_cursor: None,
                 limit: Some(25),
                 include_debug_refs: false,
             })
@@ -3399,7 +3651,13 @@ mod tests {
             panic!("expected MemythosRoomActivityList response");
         };
 
-        assert_eq!(delta_response.turns.len(), 1);
+        assert!(!delta_response.events.is_empty());
+        assert!(
+            delta_response
+                .events
+                .iter()
+                .all(|event| event.cursor != cursor)
+        );
         assert_eq!(delta_response.returned_activity_scope, "delta");
         assert!(delta_response.since_cursor_applied);
         assert!(delta_response.blockers.is_empty());
@@ -3411,6 +3669,7 @@ mod tests {
                 round_id: Some("round-001".to_string()),
                 phase: None,
                 since_cursor: Some("missing-cursor".to_string()),
+                after_cursor: None,
                 limit: Some(25),
                 include_debug_refs: false,
             })
@@ -3420,12 +3679,13 @@ mod tests {
             panic!("expected MemythosRoomActivityList response");
         };
         assert!(stale_response.turns.is_empty());
+        assert!(stale_response.events.is_empty());
         assert!(!stale_response.since_cursor_applied);
         assert!(
             stale_response
                 .blockers
                 .iter()
-                .any(|blocker| blocker.contains("unknown or stale since_cursor"))
+                .any(|blocker| blocker.contains("unknown or stale room activity cursor"))
         );
     }
 

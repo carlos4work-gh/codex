@@ -696,6 +696,9 @@ pub struct MemythosRoomActivityListParams {
     pub since_cursor: Option<String>,
     #[serde(default)]
     #[ts(optional = nullable)]
+    pub after_cursor: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
     pub limit: Option<usize>,
     #[serde(default)]
     pub include_debug_refs: bool,
@@ -801,6 +804,29 @@ pub struct MemythosRoomActivityUsage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct MemythosRoomActivityEvent {
+    pub cursor: String,
+    pub room_id: String,
+    pub arena_id: String,
+    pub thread_id: String,
+    #[ts(optional = nullable)]
+    pub turn_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub round_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub phase: Option<String>,
+    pub participant_role: String,
+    pub channel: String,
+    pub event_kind: String,
+    pub status: String,
+    pub summary: String,
+    #[ts(optional = nullable)]
+    pub source_ref: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct MemythosRoomActivityListResponse {
     pub room_id: String,
     pub case_id: String,
@@ -812,8 +838,14 @@ pub struct MemythosRoomActivityListResponse {
     pub cursor: Option<String>,
     #[serde(default)]
     pub since_cursor_applied: bool,
+    #[ts(optional = nullable)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub has_more: bool,
     pub returned_activity_scope: String,
     pub source_method: String,
+    #[serde(default)]
+    pub events: Vec<MemythosRoomActivityEvent>,
     pub participants: Vec<MemythosRoomActivityParticipant>,
     pub turns: Vec<MemythosRoomActivityTurn>,
     pub lifecycle: MemythosRoomActivityLifecycle,
