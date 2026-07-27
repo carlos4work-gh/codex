@@ -2074,6 +2074,53 @@ impl MemythosRequestProcessor {
                     .iter()
                     .filter(|delivery| delivery.receiver_thread_id == participant.thread_id)
                     .collect::<Vec<_>>();
+                let participant_events = filtered_events
+                    .iter()
+                    .filter(|event| event.thread_id == participant.thread_id)
+                    .collect::<Vec<_>>();
+                let active_turn_count = participant_deliveries
+                    .iter()
+                    .filter(|delivery| {
+                        delivery.status == "delivered_to_live_thread"
+                            || delivery.status == "recorded"
+                            || delivery.status == "receiver_turn_running"
+                    })
+                    .count();
+                let completed_turn_count = participant_deliveries
+                    .iter()
+                    .filter(|delivery| {
+                        delivery.status == "receiver_turn_completed"
+                            || delivery.receiver_response_event_ref.is_some()
+                    })
+                    .count();
+                let failed_turn_count = participant_deliveries
+                    .iter()
+                    .filter(|delivery| {
+                        delivery.status.contains("failed")
+                            || delivery.status.contains("interrupted")
+                            || delivery.rejection_reason.is_some()
+                    })
+                    .count();
+                let last_activity_summary = participant_events
+                    .iter()
+                    .rev()
+                    .find(|event| {
+                        event.channel == "agent_activity"
+                            || event.channel == "lifecycle"
+                            || event.channel == "human_like"
+                    })
+                    .map(|event| event.summary.clone())
+                    .or_else(|| {
+                        participant_deliveries.last().map(|delivery| {
+                            compact_summary(format!(
+                                "{} {} {} from {}.",
+                                delivery.delivery_mechanism,
+                                delivery.status,
+                                delivery.message_id,
+                                delivery.sender_thread_id
+                            ))
+                        })
+                    });
                 let status = if participant_deliveries
                     .iter()
                     .any(|delivery| delivery.status.contains("failed"))
@@ -2099,6 +2146,12 @@ impl MemythosRequestProcessor {
                     stance_profile: participant.stance_profile.clone(),
                     status: status.to_string(),
                     goal_ref: participant.goal_ref.clone(),
+                    delivery_count: participant_deliveries.len(),
+                    active_turn_count,
+                    completed_turn_count,
+                    failed_turn_count,
+                    activity_event_count: participant_events.len(),
+                    last_activity_summary,
                 }
             })
             .collect::<Vec<_>>();

@@ -715,6 +715,19 @@ pub struct MemythosRoomActivityParticipant {
     pub status: String,
     #[ts(optional = nullable)]
     pub goal_ref: Option<String>,
+    #[serde(default)]
+    pub delivery_count: usize,
+    #[serde(default)]
+    pub active_turn_count: usize,
+    #[serde(default)]
+    pub completed_turn_count: usize,
+    #[serde(default)]
+    pub failed_turn_count: usize,
+    #[serde(default)]
+    pub activity_event_count: usize,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub last_activity_summary: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
