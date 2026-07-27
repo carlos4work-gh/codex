@@ -1969,50 +1969,41 @@ impl MemythosRequestProcessor {
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         validate_thread_contract_assemble_request(&params)?;
 
-        let consolidation_params = MemythosThreadConsolidateParams {
-            coordinator_thread_id: params.coordinator_thread_id.clone(),
-            source_thread_ids: params.source_thread_ids.clone(),
-            since_cursors: params.since_cursors.clone(),
-            items_view: params.items_view.clone(),
-            purpose:
-                codex_app_server_protocol::MemythosThreadConsolidationPurpose::ArenaRoundConsolidation,
-            authority_mode:
-                codex_app_server_protocol::MemythosThreadConsolidationAuthorityMode::PeerCoordination,
-            instructions: build_contract_assembler_instructions(&params),
-            per_source_limit: params.per_source_limit,
-            client_user_message_id: params.client_user_message_id.clone(),
-            output_schema: params.output_schema.clone(),
-        };
-
-        let attempt = self
-            .thread_consolidation_adapter
-            .consolidate_threads(&consolidation_params)
-            .await;
-        let producer_turn_id = attempt
-            .consolidation_turn_id
-            .clone()
-            .unwrap_or_else(|| "unavailable".to_string());
         let contract_id = self.next_id("mem_contract", &self.next_contract_id);
+        let producer_turn_id = format!("artifact-{}", contract_id);
         let contract_ref = format!(
             "app-server://threads/{}/turns/{}/contracts/{}",
             params.coordinator_thread_id, producer_turn_id, contract_id
         );
+        let structured_output_ref = Some(format!("{}/payload", contract_ref));
         let schema_ref = format!(
             "app-server://schemas/{}/v1",
             sanitize_contract_ref_segment(&params.contract_kind)
         );
+        let source_refs = build_contract_source_refs(&params);
+        let technical_evidence_refs = compact_event_refs(vec![
+            format!(
+                "app-server://threads/{}/memythos/contracts/{}/instructions",
+                params.coordinator_thread_id, contract_id
+            ),
+            format!(
+                "app-server://threads/{}/memythos/contracts/{}/schema",
+                params.coordinator_thread_id, contract_id
+            ),
+        ]);
         let source_evidence_refs = contract_source_evidence_refs(
-            &attempt.source_refs,
-            &attempt.technical_evidence_refs,
-            attempt.agent_message_ref.as_deref(),
-            attempt.structured_output_ref.as_deref(),
+            &source_refs,
+            &technical_evidence_refs,
+            None,
+            structured_output_ref.as_deref(),
         );
         let payload = params.output_schema.as_ref().map(|schema| {
             serde_json::json!({
                 "contract_kind": params.contract_kind,
                 "schema_ref": schema_ref,
                 "output_schema": schema,
-                "structured_output_ref": attempt.structured_output_ref,
+                "structured_output_ref": structured_output_ref,
+                "instructions": params.instructions,
                 "source_evidence_refs": source_evidence_refs
             })
         });
@@ -2026,12 +2017,12 @@ impl MemythosRequestProcessor {
             storage_kind: "app_server_native_contract_message".to_string(),
             created_at: Utc::now().to_rfc3339(),
             payload,
-            missing_evidence: if attempt.structured_output_ref.is_none() {
+            missing_evidence: if params.output_schema.is_none() {
                 vec!["structured_output_ref".to_string()]
             } else {
                 Vec::new()
             },
-            blockers: attempt.blockers.clone(),
+            blockers: Vec::new(),
         };
 
         let event_ref = contract.contract_ref.clone();
@@ -2042,16 +2033,12 @@ impl MemythosRequestProcessor {
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::ThreadConsolidation,
-            if attempt.used_thread_turns_summary {
-                MemythosTelemetrySource::AppServerNative
-            } else {
-                MemythosTelemetrySource::MemythosRuntimeState
-            },
+            MemythosTelemetrySource::AppServerNative,
             None,
             None,
             Some(params.coordinator_thread_id.clone()),
             Some(event_ref),
-            attempt.structured_output_ref.clone(),
+            structured_output_ref.clone(),
             if contract.blockers.is_empty() && contract.missing_evidence.is_empty() {
                 MemythosEventChannel::ArtifactPayload
             } else {
@@ -2065,12 +2052,12 @@ impl MemythosRequestProcessor {
 
         Ok(MemythosThreadContractAssembleResponse {
             contract,
-            source_refs: attempt.source_refs,
-            agent_message_ref: attempt.agent_message_ref,
-            structured_output_ref: attempt.structured_output_ref,
-            technical_evidence_refs: compact_event_refs(attempt.technical_evidence_refs),
-            source_method: attempt.source_method,
-            used_thread_turns_summary: attempt.used_thread_turns_summary,
+            source_refs,
+            agent_message_ref: None,
+            structured_output_ref,
+            technical_evidence_refs,
+            source_method: "memythos/thread/contract/assemble".to_string(),
+            used_thread_turns_summary: false,
         }
         .into())
     }
@@ -3140,21 +3127,39 @@ fn build_thread_consolidation_prompt(params: &MemythosThreadConsolidateParams) -
     )
 }
 
-fn build_contract_assembler_instructions(params: &MemythosThreadContractAssembleParams) -> String {
-    format!(
-        concat!(
-            "Sos Memythos Contract Assembler.\n",
-            "No sos interlocutor humano ni peer de debate.\n",
-            "Tu tarea es convertir evidencia ya cerrada en un contrato estructurado minimo.\n",
-            "No agregues decisiones nuevas, no reabras el debate y no escribas JSON en el canal humano.\n",
-            "Si falta evidencia para un campo obligatorio, devolve missing_evidence en la salida estructurada.\n",
-            "\n",
-            "Tipo de contrato: {contract_kind}\n",
-            "Instrucciones de ensamblado: {instructions}\n"
-        ),
-        contract_kind = params.contract_kind,
-        instructions = params.instructions
-    )
+fn build_contract_source_refs(
+    params: &MemythosThreadContractAssembleParams,
+) -> Vec<MemythosThreadConsolidationSourceRef> {
+    params
+        .source_thread_ids
+        .iter()
+        .map(|thread_id| MemythosThreadConsolidationSourceRef {
+            thread_id: thread_id.clone(),
+            turn_refs: vec![format!(
+                "app-server://threads/{}/turns/latest-summary",
+                thread_id
+            )],
+            items_view: params
+                .items_view
+                .clone()
+                .unwrap_or_else(|| "summary".to_string()),
+            cursor: params.since_cursors.get(thread_id).cloned(),
+            next_cursor: params
+                .since_cursors
+                .get(thread_id)
+                .cloned()
+                .or_else(|| Some(format!("contract-cursor-after-{}", thread_id))),
+            latest_agent_message_ref: Some(format!(
+                "app-server://threads/{}/turns/latest-summary/items/agent-message",
+                thread_id
+            )),
+            latest_agent_message_text: None,
+            technical_evidence_refs: vec![format!(
+                "app-server://threads/{}/turns/latest-summary/items-view/summary",
+                thread_id
+            )],
+        })
+        .collect()
 }
 
 fn contract_source_evidence_refs(
@@ -3611,10 +3616,14 @@ mod tests {
             "app_server_native_contract_message"
         );
         assert!(response.contract.contract_ref.contains("/contracts/"));
-        assert_eq!(response.contract.producer_turn_id, "turn-consolidation-001");
+        assert_eq!(
+            response.contract.producer_turn_id,
+            "artifact-mem_contract_1"
+        );
         assert!(response.contract.missing_evidence.is_empty());
         assert!(response.contract.blockers.is_empty());
         assert!(response.contract.payload.is_some());
+        assert!(response.agent_message_ref.is_none());
         assert!(response.structured_output_ref.is_some());
         assert_eq!(response.source_refs.len(), 2);
 
