@@ -1047,6 +1047,94 @@ pub struct MemythosThreadConsolidateResponse {
     pub blockers: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosStructuredContract {
+    pub contract_ref: String,
+    pub contract_kind: String,
+    pub schema_ref: String,
+    pub producer_thread_id: String,
+    pub producer_turn_id: String,
+    pub source_evidence_refs: Vec<String>,
+    pub storage_kind: String,
+    pub created_at: String,
+    #[serde(default)]
+    #[ts(type = "unknown")]
+    pub payload: Option<serde_json::Value>,
+    pub missing_evidence: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosThreadContractAssembleParams {
+    pub coordinator_thread_id: String,
+    pub source_thread_ids: Vec<String>,
+    #[serde(default)]
+    pub since_cursors: HashMap<String, String>,
+    #[ts(optional = nullable)]
+    pub items_view: Option<String>,
+    pub contract_kind: String,
+    pub instructions: String,
+    #[serde(default)]
+    pub per_source_limit: Option<u32>,
+    #[ts(optional = nullable)]
+    pub client_user_message_id: Option<String>,
+    #[serde(default)]
+    #[ts(type = "unknown")]
+    pub output_schema: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosThreadContractAssembleResponse {
+    pub contract: MemythosStructuredContract,
+    pub source_refs: Vec<MemythosThreadConsolidationSourceRef>,
+    #[ts(optional = nullable)]
+    pub agent_message_ref: Option<String>,
+    #[ts(optional = nullable)]
+    pub structured_output_ref: Option<String>,
+    pub technical_evidence_refs: Vec<String>,
+    pub source_method: String,
+    pub used_thread_turns_summary: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosThreadContractReadParams {
+    pub contract_ref: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosThreadContractReadResponse {
+    pub contract: MemythosStructuredContract,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosThreadContractListParams {
+    #[ts(optional = nullable)]
+    pub thread_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub contract_kind: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosThreadContractListResponse {
+    pub contracts: Vec<MemythosStructuredContract>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,6 +1226,36 @@ mod tests {
                 "instructions": "Consolidate the peer round.",
                 "perSourceLimit": 2,
                 "clientUserMessageId": "consolidation-001",
+                "outputSchema": {"type": "object"}
+            })
+        );
+    }
+
+    #[test]
+    fn thread_contract_assemble_params_use_camel_case_contract() {
+        let params = MemythosThreadContractAssembleParams {
+            coordinator_thread_id: "thread_concierge".to_string(),
+            source_thread_ids: vec!["thread_a".to_string()],
+            since_cursors: HashMap::from([("thread_a".to_string(), "cursor-a".to_string())]),
+            items_view: Some("summary".to_string()),
+            contract_kind: "resume_contract".to_string(),
+            instructions: "Assemble the final contract.".to_string(),
+            per_source_limit: Some(2),
+            client_user_message_id: Some("contract-001".to_string()),
+            output_schema: Some(json!({"type": "object"})),
+        };
+
+        assert_eq!(
+            serde_json::to_value(params).unwrap(),
+            json!({
+                "coordinatorThreadId": "thread_concierge",
+                "sourceThreadIds": ["thread_a"],
+                "sinceCursors": {"thread_a": "cursor-a"},
+                "itemsView": "summary",
+                "contractKind": "resume_contract",
+                "instructions": "Assemble the final contract.",
+                "perSourceLimit": 2,
+                "clientUserMessageId": "contract-001",
                 "outputSchema": {"type": "object"}
             })
         );

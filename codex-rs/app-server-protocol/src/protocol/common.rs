@@ -695,6 +695,24 @@ client_request_definitions! {
         serialization: global("memythos"),
         response: v2::MemythosThreadConsolidateResponse,
     },
+    #[experimental("memythos/thread/contract/assemble")]
+    MemythosThreadContractAssemble => "memythos/thread/contract/assemble" {
+        params: v2::MemythosThreadContractAssembleParams,
+        serialization: global("memythos"),
+        response: v2::MemythosThreadContractAssembleResponse,
+    },
+    #[experimental("memythos/thread/contract/read")]
+    MemythosThreadContractRead => "memythos/thread/contract/read" {
+        params: v2::MemythosThreadContractReadParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosThreadContractReadResponse,
+    },
+    #[experimental("memythos/thread/contract/list")]
+    MemythosThreadContractList => "memythos/thread/contract/list" {
+        params: v2::MemythosThreadContractListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosThreadContractListResponse,
+    },
     #[experimental("memythos/telemetry/list")]
     MemythosTelemetryList => "memythos/telemetry/list" {
         params: v2::MemythosTelemetryListParams,

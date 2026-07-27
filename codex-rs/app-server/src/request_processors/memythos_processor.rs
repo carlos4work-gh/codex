@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use chrono::Utc;
 use codex_analytics::AppServerRpcTransport;
 use codex_app_server_protocol::AdditionalContextEntry;
 use codex_app_server_protocol::AdditionalContextKind;
@@ -78,6 +79,7 @@ use codex_app_server_protocol::MemythosRuntimeHealthParams;
 use codex_app_server_protocol::MemythosRuntimeHealthResponse;
 use codex_app_server_protocol::MemythosRuntimeLifecycleState;
 use codex_app_server_protocol::MemythosSemanticAlignment;
+use codex_app_server_protocol::MemythosStructuredContract;
 use codex_app_server_protocol::MemythosTelemetryListParams;
 use codex_app_server_protocol::MemythosTelemetryListResponse;
 use codex_app_server_protocol::MemythosTelemetryRef;
@@ -89,6 +91,12 @@ use codex_app_server_protocol::MemythosThreadAttachment;
 use codex_app_server_protocol::MemythosThreadConsolidateParams;
 use codex_app_server_protocol::MemythosThreadConsolidateResponse;
 use codex_app_server_protocol::MemythosThreadConsolidationSourceRef;
+use codex_app_server_protocol::MemythosThreadContractAssembleParams;
+use codex_app_server_protocol::MemythosThreadContractAssembleResponse;
+use codex_app_server_protocol::MemythosThreadContractListParams;
+use codex_app_server_protocol::MemythosThreadContractListResponse;
+use codex_app_server_protocol::MemythosThreadContractReadParams;
+use codex_app_server_protocol::MemythosThreadContractReadResponse;
 use codex_app_server_protocol::MemythosThreadListParams;
 use codex_app_server_protocol::MemythosThreadListResponse;
 use codex_app_server_protocol::RequestId;
@@ -126,6 +134,7 @@ struct MemythosRuntimeState {
     arena_parents: HashMap<String, MemythosArenaParent>,
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
     room_activity_events: HashMap<String, Vec<MemythosRoomActivityEvent>>,
+    structured_contracts: HashMap<String, MemythosStructuredContract>,
     native_token_usage_refs: HashMap<String, String>,
     telemetry_refs: Vec<MemythosTelemetryRef>,
 }
@@ -791,6 +800,7 @@ pub(crate) struct MemythosRequestProcessor {
     next_attachment_id: Arc<AtomicU64>,
     next_delivery_id: Arc<AtomicU64>,
     next_room_activity_id: Arc<AtomicU64>,
+    next_contract_id: Arc<AtomicU64>,
     next_telemetry_ref_id: Arc<AtomicU64>,
 }
 
@@ -861,6 +871,7 @@ impl MemythosRequestProcessor {
                 arena_parents: HashMap::new(),
                 arena_message_deliveries: Vec::new(),
                 room_activity_events: HashMap::new(),
+                structured_contracts: HashMap::new(),
                 native_token_usage_refs: HashMap::new(),
                 telemetry_refs: Vec::new(),
             })),
@@ -872,6 +883,7 @@ impl MemythosRequestProcessor {
             next_attachment_id: Arc::new(AtomicU64::default()),
             next_delivery_id: Arc::new(AtomicU64::default()),
             next_room_activity_id: Arc::new(AtomicU64::default()),
+            next_contract_id: Arc::new(AtomicU64::default()),
             next_telemetry_ref_id: Arc::new(AtomicU64::default()),
         }
     }
@@ -911,6 +923,9 @@ impl MemythosRequestProcessor {
                 "memythos/room/activity/list".to_string(),
                 "memythos/room/sendInput".to_string(),
                 "memythos/thread/consolidate".to_string(),
+                "memythos/thread/contract/assemble".to_string(),
+                "memythos/thread/contract/read".to_string(),
+                "memythos/thread/contract/list".to_string(),
                 "memythos/arena/state/get".to_string(),
                 "memythos/arena/phase/close".to_string(),
                 "memythos/arena/run".to_string(),
@@ -1948,6 +1963,165 @@ impl MemythosRequestProcessor {
         .into())
     }
 
+    pub(crate) async fn thread_contract_assemble(
+        &self,
+        params: MemythosThreadContractAssembleParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        validate_thread_contract_assemble_request(&params)?;
+
+        let consolidation_params = MemythosThreadConsolidateParams {
+            coordinator_thread_id: params.coordinator_thread_id.clone(),
+            source_thread_ids: params.source_thread_ids.clone(),
+            since_cursors: params.since_cursors.clone(),
+            items_view: params.items_view.clone(),
+            purpose:
+                codex_app_server_protocol::MemythosThreadConsolidationPurpose::ArenaRoundConsolidation,
+            authority_mode:
+                codex_app_server_protocol::MemythosThreadConsolidationAuthorityMode::PeerCoordination,
+            instructions: build_contract_assembler_instructions(&params),
+            per_source_limit: params.per_source_limit,
+            client_user_message_id: params.client_user_message_id.clone(),
+            output_schema: params.output_schema.clone(),
+        };
+
+        let attempt = self
+            .thread_consolidation_adapter
+            .consolidate_threads(&consolidation_params)
+            .await;
+        let producer_turn_id = attempt
+            .consolidation_turn_id
+            .clone()
+            .unwrap_or_else(|| "unavailable".to_string());
+        let contract_id = self.next_id("mem_contract", &self.next_contract_id);
+        let contract_ref = format!(
+            "app-server://threads/{}/turns/{}/contracts/{}",
+            params.coordinator_thread_id, producer_turn_id, contract_id
+        );
+        let schema_ref = format!(
+            "app-server://schemas/{}/v1",
+            sanitize_contract_ref_segment(&params.contract_kind)
+        );
+        let source_evidence_refs = contract_source_evidence_refs(
+            &attempt.source_refs,
+            &attempt.technical_evidence_refs,
+            attempt.agent_message_ref.as_deref(),
+            attempt.structured_output_ref.as_deref(),
+        );
+        let payload = params.output_schema.as_ref().map(|schema| {
+            serde_json::json!({
+                "contract_kind": params.contract_kind,
+                "schema_ref": schema_ref,
+                "output_schema": schema,
+                "structured_output_ref": attempt.structured_output_ref,
+                "source_evidence_refs": source_evidence_refs
+            })
+        });
+        let contract = MemythosStructuredContract {
+            contract_ref: contract_ref.clone(),
+            contract_kind: params.contract_kind.clone(),
+            schema_ref,
+            producer_thread_id: params.coordinator_thread_id.clone(),
+            producer_turn_id: producer_turn_id.clone(),
+            source_evidence_refs: source_evidence_refs.clone(),
+            storage_kind: "app_server_native_contract_message".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            payload,
+            missing_evidence: if attempt.structured_output_ref.is_none() {
+                vec!["structured_output_ref".to_string()]
+            } else {
+                Vec::new()
+            },
+            blockers: attempt.blockers.clone(),
+        };
+
+        let event_ref = contract.contract_ref.clone();
+        let mut state = self.state.lock().await;
+        state
+            .structured_contracts
+            .insert(contract_ref.clone(), contract.clone());
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::ThreadConsolidation,
+            if attempt.used_thread_turns_summary {
+                MemythosTelemetrySource::AppServerNative
+            } else {
+                MemythosTelemetrySource::MemythosRuntimeState
+            },
+            None,
+            None,
+            Some(params.coordinator_thread_id.clone()),
+            Some(event_ref),
+            attempt.structured_output_ref.clone(),
+            if contract.blockers.is_empty() && contract.missing_evidence.is_empty() {
+                MemythosEventChannel::ArtifactPayload
+            } else {
+                MemythosEventChannel::TechnicalDetail
+            },
+            format!(
+                "Structured contract {} assembled for coordinator {}.",
+                contract.contract_kind, contract.producer_thread_id
+            ),
+        );
+
+        Ok(MemythosThreadContractAssembleResponse {
+            contract,
+            source_refs: attempt.source_refs,
+            agent_message_ref: attempt.agent_message_ref,
+            structured_output_ref: attempt.structured_output_ref,
+            technical_evidence_refs: compact_event_refs(attempt.technical_evidence_refs),
+            source_method: attempt.source_method,
+            used_thread_turns_summary: attempt.used_thread_turns_summary,
+        }
+        .into())
+    }
+
+    pub(crate) async fn thread_contract_read(
+        &self,
+        params: MemythosThreadContractReadParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state = self.state.lock().await;
+        let Some(contract) = state.structured_contracts.get(&params.contract_ref) else {
+            return Err(invalid_params(format!(
+                "unknown contract ref: {}",
+                params.contract_ref
+            )));
+        };
+
+        Ok(MemythosThreadContractReadResponse {
+            contract: contract.clone(),
+        }
+        .into())
+    }
+
+    pub(crate) async fn thread_contract_list(
+        &self,
+        params: MemythosThreadContractListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let limit = params.limit.unwrap_or(50).clamp(1, 200);
+        let state = self.state.lock().await;
+        let mut contracts = state
+            .structured_contracts
+            .values()
+            .filter(|contract| {
+                params
+                    .thread_id
+                    .as_ref()
+                    .map_or(true, |thread_id| &contract.producer_thread_id == thread_id)
+            })
+            .filter(|contract| {
+                params
+                    .contract_kind
+                    .as_ref()
+                    .map_or(true, |kind| &contract.contract_kind == kind)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        contracts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        contracts.truncate(limit);
+
+        Ok(MemythosThreadContractListResponse { contracts }.into())
+    }
+
     pub(crate) async fn room_activity_list(
         &self,
         params: MemythosRoomActivityListParams,
@@ -2966,6 +3140,70 @@ fn build_thread_consolidation_prompt(params: &MemythosThreadConsolidateParams) -
     )
 }
 
+fn build_contract_assembler_instructions(params: &MemythosThreadContractAssembleParams) -> String {
+    format!(
+        concat!(
+            "Sos Memythos Contract Assembler.\n",
+            "No sos interlocutor humano ni peer de debate.\n",
+            "Tu tarea es convertir evidencia ya cerrada en un contrato estructurado minimo.\n",
+            "No agregues decisiones nuevas, no reabras el debate y no escribas JSON en el canal humano.\n",
+            "Si falta evidencia para un campo obligatorio, devolve missing_evidence en la salida estructurada.\n",
+            "\n",
+            "Tipo de contrato: {contract_kind}\n",
+            "Instrucciones de ensamblado: {instructions}\n"
+        ),
+        contract_kind = params.contract_kind,
+        instructions = params.instructions
+    )
+}
+
+fn contract_source_evidence_refs(
+    source_refs: &[MemythosThreadConsolidationSourceRef],
+    technical_evidence_refs: &[String],
+    agent_message_ref: Option<&str>,
+    structured_output_ref: Option<&str>,
+) -> Vec<String> {
+    let mut refs = source_refs
+        .iter()
+        .flat_map(|source| {
+            source
+                .turn_refs
+                .iter()
+                .chain(source.technical_evidence_refs.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    refs.extend(technical_evidence_refs.iter().cloned());
+    if let Some(agent_message_ref) = agent_message_ref {
+        refs.push(agent_message_ref.to_string());
+    }
+    if let Some(structured_output_ref) = structured_output_ref {
+        refs.push(structured_output_ref.to_string());
+    }
+    compact_event_refs(refs)
+}
+
+fn sanitize_contract_ref_segment(value: &str) -> String {
+    let normalized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if normalized.is_empty() {
+        "contract".to_string()
+    } else {
+        normalized
+    }
+}
+
 fn validate_thread_consolidation_request(
     params: &MemythosThreadConsolidateParams,
 ) -> Result<(), JSONRPCErrorError> {
@@ -2990,6 +3228,50 @@ fn validate_thread_consolidation_request(
     }
     if params.instructions.trim().is_empty() {
         return Err(invalid_params("instructions is required".to_string()));
+    }
+    if let Some(items_view) = params.items_view.as_deref() {
+        match items_view {
+            "summary" | "full" | "notLoaded" => {}
+            other => {
+                return Err(invalid_params(format!(
+                    "itemsView must be summary, full or notLoaded; got {other}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_thread_contract_assemble_request(
+    params: &MemythosThreadContractAssembleParams,
+) -> Result<(), JSONRPCErrorError> {
+    if params.coordinator_thread_id.trim().is_empty() {
+        return Err(invalid_params(
+            "coordinatorThreadId is required".to_string(),
+        ));
+    }
+    if params.source_thread_ids.is_empty() {
+        return Err(invalid_params(
+            "sourceThreadIds must contain at least one thread".to_string(),
+        ));
+    }
+    if params
+        .source_thread_ids
+        .iter()
+        .any(|thread_id| thread_id.trim().is_empty())
+    {
+        return Err(invalid_params(
+            "sourceThreadIds cannot contain empty thread ids".to_string(),
+        ));
+    }
+    if params.contract_kind.trim().is_empty() {
+        return Err(invalid_params("contractKind is required".to_string()));
+    }
+    if params.instructions.trim().is_empty() {
+        return Err(invalid_params("instructions is required".to_string()));
+    }
+    if params.output_schema.is_none() {
+        return Err(invalid_params("outputSchema is required".to_string()));
     }
     if let Some(items_view) = params.items_view.as_deref() {
         match items_view {
@@ -3294,6 +3576,97 @@ mod tests {
             telemetry_ref.kind == MemythosTelemetryRefKind::ThreadConsolidation
                 && telemetry_ref.source == MemythosTelemetrySource::AppServerNative
         }));
+    }
+
+    #[tokio::test]
+    async fn thread_contract_assemble_registers_native_contract_ref() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(FakeThreadConsolidationAdapter),
+        );
+
+        let response = processor
+            .thread_contract_assemble(MemythosThreadContractAssembleParams {
+                coordinator_thread_id: "thread_concierge".to_string(),
+                source_thread_ids: vec!["thread_a".to_string(), "thread_b".to_string()],
+                since_cursors: HashMap::new(),
+                items_view: Some("summary".to_string()),
+                contract_kind: "resume_contract".to_string(),
+                instructions: "Assemble a resume contract from closed evidence.".to_string(),
+                per_source_limit: Some(2),
+                client_user_message_id: Some("contract-001".to_string()),
+                output_schema: Some(serde_json::json!({"type": "object"})),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosThreadContractAssemble(response) = response else {
+            panic!("expected MemythosThreadContractAssemble response");
+        };
+
+        assert_eq!(response.contract.contract_kind, "resume_contract");
+        assert_eq!(
+            response.contract.storage_kind,
+            "app_server_native_contract_message"
+        );
+        assert!(response.contract.contract_ref.contains("/contracts/"));
+        assert_eq!(response.contract.producer_turn_id, "turn-consolidation-001");
+        assert!(response.contract.missing_evidence.is_empty());
+        assert!(response.contract.blockers.is_empty());
+        assert!(response.contract.payload.is_some());
+        assert!(response.structured_output_ref.is_some());
+        assert_eq!(response.source_refs.len(), 2);
+
+        let read = processor
+            .thread_contract_read(MemythosThreadContractReadParams {
+                contract_ref: response.contract.contract_ref.clone(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosThreadContractRead(read) = read else {
+            panic!("expected MemythosThreadContractRead response");
+        };
+        assert_eq!(read.contract.contract_ref, response.contract.contract_ref);
+
+        let list = processor
+            .thread_contract_list(MemythosThreadContractListParams {
+                thread_id: Some("thread_concierge".to_string()),
+                contract_kind: Some("resume_contract".to_string()),
+                limit: Some(10),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosThreadContractList(list) = list else {
+            panic!("expected MemythosThreadContractList response");
+        };
+        assert_eq!(list.contracts.len(), 1);
+        assert_eq!(list.contracts[0].contract_kind, "resume_contract");
+    }
+
+    #[tokio::test]
+    async fn thread_contract_assemble_rejects_missing_output_schema() {
+        let processor = MemythosRequestProcessor::new();
+        let error = processor
+            .thread_contract_assemble(MemythosThreadContractAssembleParams {
+                coordinator_thread_id: "thread_concierge".to_string(),
+                source_thread_ids: vec!["thread_a".to_string()],
+                since_cursors: HashMap::new(),
+                items_view: Some("summary".to_string()),
+                contract_kind: "resume_contract".to_string(),
+                instructions: "Assemble.".to_string(),
+                per_source_limit: Some(2),
+                client_user_message_id: Some("contract-001".to_string()),
+                output_schema: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.message.contains("outputSchema is required"),
+            "unexpected error: {}",
+            error.message
+        );
     }
 
     #[tokio::test]

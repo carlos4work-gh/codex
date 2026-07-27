@@ -1302,6 +1302,21 @@ impl MessageProcessor {
                 .thread_consolidate(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosThreadContractAssemble { params, .. } => self
+                .memythos_processor
+                .thread_contract_assemble(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosThreadContractRead { params, .. } => self
+                .memythos_processor
+                .thread_contract_read(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosThreadContractList { params, .. } => self
+                .memythos_processor
+                .thread_contract_list(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosTelemetryList { params, .. } => self
                 .memythos_processor
                 .telemetry_list(params)
