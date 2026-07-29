@@ -53,6 +53,8 @@ use codex_app_server_protocol::MemythosParentContinuityListResponse;
 use codex_app_server_protocol::MemythosParentContinuityStatus;
 use codex_app_server_protocol::MemythosParentPeerResponseKind;
 use codex_app_server_protocol::MemythosParentPeerResponseObservation;
+use codex_app_server_protocol::MemythosParentRole;
+use codex_app_server_protocol::MemythosParentStance;
 use codex_app_server_protocol::MemythosParentThreadContinuity;
 use codex_app_server_protocol::MemythosRoom;
 use codex_app_server_protocol::MemythosRoomActivityCollab;
@@ -3065,6 +3067,11 @@ fn validate_room_registration(
                 participant.parent_key
             )));
         }
+        validate_parent_role_and_stance(
+            &participant.parent_key,
+            &participant.parent_role,
+            &participant.stance_profile,
+        )?;
         if !seen_threads.insert(participant.thread_id.clone()) {
             return Err(invalid_params(format!(
                 "duplicate room participant thread: {}",
@@ -3077,6 +3084,44 @@ fn validate_room_registration(
                 participant.parent_key
             )));
         }
+    }
+
+    Ok(())
+}
+
+fn validate_parent_role_and_stance(
+    parent_key: &str,
+    parent_role: &str,
+    stance_profile: &str,
+) -> Result<(), JSONRPCErrorError> {
+    if parent_role == "observer" && stance_profile == "room_concierge" {
+        return Err(invalid_params(format!(
+            "room participant {parent_key} uses legacy observer + room_concierge encoding; use parent_role=room_concierge and stance_profile=coordination"
+        )));
+    }
+    let role = MemythosParentRole::from_wire(parent_role).ok_or_else(|| {
+        invalid_params(format!(
+            "room participant {parent_key} has unsupported parent_role: {parent_role}"
+        ))
+    })?;
+    let stance = MemythosParentStance::from_wire(stance_profile).ok_or_else(|| {
+        invalid_params(format!(
+            "room participant {parent_key} has unsupported stance_profile: {stance_profile}"
+        ))
+    })?;
+
+    if role == MemythosParentRole::RoomConcierge
+        && !matches!(
+            stance,
+            MemythosParentStance::Coordination
+                | MemythosParentStance::Routing
+                | MemythosParentStance::Synthesis
+                | MemythosParentStance::EscalationControl
+        )
+    {
+        return Err(invalid_params(format!(
+            "room participant {parent_key} has invalid room_concierge stance_profile: {stance_profile}"
+        )));
     }
 
     Ok(())
@@ -3492,6 +3537,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn room_registration_rejects_legacy_observer_concierge_encoding() {
+        let processor = MemythosRequestProcessor::new();
+        let mut params = room_register_params();
+        params.participants.push(MemythosRoomParticipant {
+            parent_key: "case/bpm_e2e/arena/observer/room_concierge".to_string(),
+            thread_id: "thread_concierge".to_string(),
+            parent_role: "observer".to_string(),
+            stance_profile: "room_concierge".to_string(),
+            goal_ref: Some("app-server://threads/thread_concierge/goals/current".to_string()),
+            authority_scope: vec!["room_coordination".to_string()],
+        });
+
+        let error = processor.room_register(params).await.unwrap_err();
+
+        assert!(
+            error
+                .message
+                .contains("legacy observer + room_concierge encoding"),
+            "unexpected error: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
     async fn room_list_returns_registered_rooms_from_native_state() {
         let processor = MemythosRequestProcessor::new();
         processor
@@ -3785,10 +3854,10 @@ mod tests {
         );
         let mut params = room_register_params();
         params.participants.push(MemythosRoomParticipant {
-            parent_key: "case/bpm_e2e/arena/observer/room_concierge".to_string(),
+            parent_key: "case/bpm_e2e/arena/room_concierge/coordination".to_string(),
             thread_id: "thread_concierge".to_string(),
-            parent_role: "observer".to_string(),
-            stance_profile: "room_concierge".to_string(),
+            parent_role: "room_concierge".to_string(),
+            stance_profile: "coordination".to_string(),
             goal_ref: Some("app-server://threads/thread_concierge/goals/current".to_string()),
             authority_scope: vec!["room_coordination".to_string()],
         });
@@ -3802,7 +3871,7 @@ mod tests {
                 from_parent_thread_id: Some("thread_growth".to_string()),
                 via_concierge_thread_id: Some("thread_concierge".to_string()),
                 to_parent_thread_id: "thread_risk".to_string(),
-                source_parent_key: "case/bpm_e2e/arena/observer/room_concierge".to_string(),
+                source_parent_key: "case/bpm_e2e/arena/room_concierge/coordination".to_string(),
                 target_parent_key: "case/bpm_e2e/arena/bettor/risk".to_string(),
                 message_kind: "peer_proposal".to_string(),
                 message_authority: "peer_debate".to_string(),
@@ -3843,7 +3912,10 @@ mod tests {
             Arc::new(FakeParentGoalSnapshotAdapter),
             Arc::new(RecordOnlyThreadConsolidationAdapter),
         );
-        processor.room_register(room_register_params()).await.unwrap();
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
 
         let response = processor
             .room_send(MemythosRoomSendInputParams {

@@ -146,6 +146,125 @@ pub enum MemythosThreadConsolidationAuthorityMode {
     ChildLayerResume,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosParentRole {
+    RoomConcierge,
+    ScrumMaster,
+    Judge,
+    Bettor,
+    Coordinator,
+    Observer,
+    Peer,
+}
+
+impl MemythosParentRole {
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "room_concierge" => Some(Self::RoomConcierge),
+            "scrum_master" => Some(Self::ScrumMaster),
+            "judge" => Some(Self::Judge),
+            "bettor" => Some(Self::Bettor),
+            "coordinator" => Some(Self::Coordinator),
+            "observer" => Some(Self::Observer),
+            "peer" => Some(Self::Peer),
+            _ => None,
+        }
+    }
+
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::RoomConcierge => "room_concierge",
+            Self::ScrumMaster => "scrum_master",
+            Self::Judge => "judge",
+            Self::Bettor => "bettor",
+            Self::Coordinator => "coordinator",
+            Self::Observer => "observer",
+            Self::Peer => "peer",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosParentStance {
+    Coordination,
+    Routing,
+    Synthesis,
+    EscalationControl,
+    EndToEndIntegrity,
+    BusinessFitness,
+    CustomerFlow,
+    ImplementationPid,
+    RealityFit,
+    SalesforceDelivery,
+    Growth,
+    Risk,
+}
+
+impl MemythosParentStance {
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "coordination" => Some(Self::Coordination),
+            "routing" => Some(Self::Routing),
+            "synthesis" => Some(Self::Synthesis),
+            "escalation_control" => Some(Self::EscalationControl),
+            "end_to_end_integrity" => Some(Self::EndToEndIntegrity),
+            "business_fitness" => Some(Self::BusinessFitness),
+            "customer_flow" => Some(Self::CustomerFlow),
+            "implementation_pid" => Some(Self::ImplementationPid),
+            "reality_fit" => Some(Self::RealityFit),
+            "salesforce_delivery" => Some(Self::SalesforceDelivery),
+            "growth" => Some(Self::Growth),
+            "risk" => Some(Self::Risk),
+            _ => None,
+        }
+    }
+
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Coordination => "coordination",
+            Self::Routing => "routing",
+            Self::Synthesis => "synthesis",
+            Self::EscalationControl => "escalation_control",
+            Self::EndToEndIntegrity => "end_to_end_integrity",
+            Self::BusinessFitness => "business_fitness",
+            Self::CustomerFlow => "customer_flow",
+            Self::ImplementationPid => "implementation_pid",
+            Self::RealityFit => "reality_fit",
+            Self::SalesforceDelivery => "salesforce_delivery",
+            Self::Growth => "growth",
+            Self::Risk => "risk",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosPromptOrigin {
+    HumanPromptInjection,
+    AgentToAgentPrompt,
+    MemythosToolInjection,
+    MemythosRuntimeSetup,
+    AppServerCodexAgentic,
+    AppServerProtocol,
+    Mixed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosPromptLineagePart {
+    pub origin: MemythosPromptOrigin,
+    pub summary: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub source_ref: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
