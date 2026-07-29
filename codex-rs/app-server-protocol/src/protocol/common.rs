@@ -671,6 +671,13 @@ client_request_definitions! {
         serialization: global("memythos"),
         response: v2::MemythosRoomRegisterResponse,
     },
+    #[experimental("memythos/room/create")]
+    MemythosRoomCreate => "memythos/room/create" {
+        params: v2::MemythosRoomRegisterParams,
+        serialization: global("memythos"),
+        manual_payload_conversion: manual,
+        response: v2::MemythosRoomRegisterResponse,
+    },
     #[experimental("memythos/room/list")]
     MemythosRoomList => "memythos/room/list" {
         params: v2::MemythosRoomListParams,
@@ -683,10 +690,24 @@ client_request_definitions! {
         serialization: global_shared_read("memythos"),
         response: v2::MemythosRoomActivityListResponse,
     },
+    #[experimental("memythos/room/timeline/get")]
+    MemythosRoomTimelineGet => "memythos/room/timeline/get" {
+        params: v2::MemythosRoomActivityListParams,
+        serialization: global_shared_read("memythos"),
+        manual_payload_conversion: manual,
+        response: v2::MemythosRoomActivityListResponse,
+    },
     #[experimental("memythos/room/sendInput")]
     MemythosRoomSendInput => "memythos/room/sendInput" {
         params: v2::MemythosRoomSendInputParams,
         serialization: global("memythos"),
+        response: v2::MemythosRoomSendInputResponse,
+    },
+    #[experimental("memythos/room/send")]
+    MemythosRoomSend => "memythos/room/send" {
+        params: v2::MemythosRoomSendInputParams,
+        serialization: global("memythos"),
+        manual_payload_conversion: manual,
         response: v2::MemythosRoomSendInputResponse,
     },
     #[experimental("memythos/thread/consolidate")]
@@ -701,10 +722,24 @@ client_request_definitions! {
         serialization: global("memythos"),
         response: v2::MemythosThreadContractAssembleResponse,
     },
+    #[experimental("memythos/room/contract/emit")]
+    MemythosRoomContractEmit => "memythos/room/contract/emit" {
+        params: v2::MemythosThreadContractAssembleParams,
+        serialization: global("memythos"),
+        manual_payload_conversion: manual,
+        response: v2::MemythosThreadContractAssembleResponse,
+    },
     #[experimental("memythos/thread/contract/read")]
     MemythosThreadContractRead => "memythos/thread/contract/read" {
         params: v2::MemythosThreadContractReadParams,
         serialization: global_shared_read("memythos"),
+        response: v2::MemythosThreadContractReadResponse,
+    },
+    #[experimental("memythos/room/contract/get")]
+    MemythosRoomContractGet => "memythos/room/contract/get" {
+        params: v2::MemythosThreadContractReadParams,
+        serialization: global_shared_read("memythos"),
+        manual_payload_conversion: manual,
         response: v2::MemythosThreadContractReadResponse,
     },
     #[experimental("memythos/thread/contract/list")]

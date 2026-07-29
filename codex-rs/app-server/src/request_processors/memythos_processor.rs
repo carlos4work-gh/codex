@@ -920,11 +920,17 @@ impl MemythosRequestProcessor {
                 "memythos/arena/message/list".to_string(),
                 "memythos/arena/message/observe".to_string(),
                 "memythos/room/register".to_string(),
+                "memythos/room/create".to_string(),
+                "memythos/room/list".to_string(),
                 "memythos/room/activity/list".to_string(),
+                "memythos/room/timeline/get".to_string(),
                 "memythos/room/sendInput".to_string(),
+                "memythos/room/send".to_string(),
                 "memythos/thread/consolidate".to_string(),
                 "memythos/thread/contract/assemble".to_string(),
+                "memythos/room/contract/emit".to_string(),
                 "memythos/thread/contract/read".to_string(),
+                "memythos/room/contract/get".to_string(),
                 "memythos/thread/contract/list".to_string(),
                 "memythos/arena/state/get".to_string(),
                 "memythos/arena/phase/close".to_string(),
@@ -1906,6 +1912,18 @@ impl MemythosRequestProcessor {
         .into())
     }
 
+    pub(crate) async fn room_send(
+        &self,
+        params: MemythosRoomSendInputParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let payload = self.room_send_input(params).await?;
+        let ClientResponsePayload::MemythosRoomSendInput(mut response) = payload else {
+            return Ok(payload);
+        };
+        response.delivery.delivery_mechanism = "room_loopback_send".to_string();
+        Ok(ClientResponsePayload::MemythosRoomSendInput(response))
+    }
+
     pub(crate) async fn thread_consolidate(
         &self,
         params: MemythosThreadConsolidateParams,
@@ -2378,6 +2396,18 @@ impl MemythosRequestProcessor {
             blockers,
         }
         .into())
+    }
+
+    pub(crate) async fn room_timeline_get(
+        &self,
+        params: MemythosRoomActivityListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let payload = self.room_activity_list(params).await?;
+        let ClientResponsePayload::MemythosRoomActivityList(mut response) = payload else {
+            return Ok(payload);
+        };
+        response.source_method = "memythos/room/timeline/get".to_string();
+        Ok(ClientResponsePayload::MemythosRoomActivityList(response))
     }
 
     pub(crate) async fn telemetry_list(
@@ -3806,6 +3836,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn room_send_reports_final_native_delivery_mechanism() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+        );
+        processor.room_register(room_register_params()).await.unwrap();
+
+        let response = processor
+            .room_send(MemythosRoomSendInputParams {
+                room_id: "room-001".to_string(),
+                room_message_ref: "app-server://rooms/room-001/messages/message-003".to_string(),
+                delivery_ref: "app-server://rooms/room-001/deliveries/delivery-003".to_string(),
+                from_parent_thread_id: Some("thread_growth".to_string()),
+                via_concierge_thread_id: None,
+                to_parent_thread_id: "thread_risk".to_string(),
+                source_parent_key: "case/bpm_e2e/arena/bettor/growth".to_string(),
+                target_parent_key: "case/bpm_e2e/arena/bettor/risk".to_string(),
+                message_kind: "peer_objection".to_string(),
+                message_authority: "peer_debate".to_string(),
+                human_instruction: false,
+                response_contract: "peer_response_contract".to_string(),
+                client_user_message_id: Some("message-003".to_string()),
+                prompt: "No soy humano; soy peer de arena. Objeta mi propuesta.".to_string(),
+                metadata: serde_json::Map::new(),
+                output_schema: None,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomSendInput(response) = response else {
+            panic!("expected MemythosRoomSendInput response");
+        };
+
+        assert_eq!(response.delivery.delivery_mechanism, "room_loopback_send");
+    }
+
+    #[tokio::test]
     async fn room_activity_list_returns_compact_initial_view() {
         let processor = MemythosRequestProcessor::new();
         processor
@@ -3836,6 +3904,33 @@ mod tests {
         assert_eq!(response.lifecycle.room_state, "round_closed");
         assert!(response.lifecycle.clean_close);
         assert_eq!(response.collab.send_input_count, 0);
+    }
+
+    #[tokio::test]
+    async fn room_timeline_get_reports_final_native_source_method() {
+        let processor = MemythosRequestProcessor::new();
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+
+        let response = processor
+            .room_timeline_get(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: None,
+                phase: None,
+                since_cursor: None,
+                after_cursor: None,
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(response) = response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+
+        assert_eq!(response.source_method, "memythos/room/timeline/get");
     }
 
     #[tokio::test]
@@ -4204,6 +4299,21 @@ mod tests {
                 .capabilities
                 .contains(&"memythos/thread/attach".to_string())
         );
+        for capability in [
+            "memythos/room/create",
+            "memythos/room/list",
+            "memythos/room/send",
+            "memythos/room/timeline/get",
+            "memythos/room/contract/emit",
+            "memythos/room/contract/get",
+        ] {
+            assert!(
+                health_response
+                    .capabilities
+                    .contains(&capability.to_string()),
+                "missing Memythos room capability: {capability}"
+            );
+        }
 
         let close_response = processor
             .runtime_close(MemythosRuntimeCloseParams {

@@ -4014,3 +4014,76 @@ fn realtime_append_text_defaults_role_to_user() {
         }
     );
 }
+
+#[test]
+fn memythos_room_native_alias_methods_deserialize() {
+    let create = serde_json::from_value::<crate::ClientRequest>(json!({
+        "method": "memythos/room/create",
+        "id": 1,
+        "params": {
+            "roomId": "room-001",
+            "caseId": "case-001",
+            "layerId": "layer-001",
+            "arenaId": "arena-001",
+            "topology": "room_concierge",
+            "participants": []
+        }
+    }))
+    .expect("room/create should deserialize");
+    assert_eq!(create.method(), "memythos/room/create");
+
+    let timeline = serde_json::from_value::<crate::ClientRequest>(json!({
+        "method": "memythos/room/timeline/get",
+        "id": 2,
+        "params": {
+            "roomId": "room-001",
+            "limit": 20,
+            "includeDebugRefs": false
+        }
+    }))
+    .expect("room/timeline/get should deserialize");
+    assert_eq!(timeline.method(), "memythos/room/timeline/get");
+
+    let send = serde_json::from_value::<crate::ClientRequest>(json!({
+        "method": "memythos/room/send",
+        "id": 3,
+        "params": {
+            "roomId": "room-001",
+            "roomMessageRef": "app-server://rooms/room-001/messages/message-001",
+            "deliveryRef": "app-server://rooms/room-001/deliveries/delivery-001",
+            "fromParentThreadId": "thread-a",
+            "viaConciergeThreadId": "thread-concierge",
+            "toParentThreadId": "thread-b",
+            "sourceParentKey": "parent-a",
+            "targetParentKey": "parent-b",
+            "messageKind": "ask_position",
+            "messageAuthority": "peer_debate",
+            "humanInstruction": false,
+            "responseContract": "natural_parent_closure",
+            "clientUserMessageId": "message-001",
+            "prompt": "No soy humano; soy peer de arena. Responde desde tu postura.",
+            "metadata": {},
+            "outputSchema": null
+        }
+    }))
+    .expect("room/send should deserialize");
+    assert_eq!(send.method(), "memythos/room/send");
+
+    let contract_emit = serde_json::from_value::<crate::ClientRequest>(json!({
+        "method": "memythos/room/contract/emit",
+        "id": 4,
+        "params": {
+            "coordinatorThreadId": "thread-concierge",
+            "sourceThreadIds": ["thread-a"],
+            "sinceCursors": {},
+            "itemsView": "summary",
+            "contractKind": "room_round_contract",
+            "instructions": "Assemble closed room contract.",
+            "perSourceLimit": 2,
+            "clientUserMessageId": "contract-001",
+            "outputSchema": {"type": "object"}
+        }
+    }))
+    .expect("room/contract/emit should deserialize");
+    assert_eq!(contract_emit.method(), "memythos/room/contract/emit");
+}

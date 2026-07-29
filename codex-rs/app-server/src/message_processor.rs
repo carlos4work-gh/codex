@@ -1284,6 +1284,11 @@ impl MessageProcessor {
                 .room_register(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosRoomCreate { params, .. } => self
+                .memythos_processor
+                .room_register(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosRoomList { params, .. } => {
                 self.memythos_processor.room_list(params).await.map(Some)
             }
@@ -1292,9 +1297,19 @@ impl MessageProcessor {
                 .room_activity_list(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosRoomTimelineGet { params, .. } => self
+                .memythos_processor
+                .room_timeline_get(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosRoomSendInput { params, .. } => self
                 .memythos_processor
                 .room_send_input(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomSend { params, .. } => self
+                .memythos_processor
+                .room_send(params)
                 .await
                 .map(Some),
             ClientRequest::MemythosThreadConsolidate { params, .. } => self
@@ -1307,7 +1322,17 @@ impl MessageProcessor {
                 .thread_contract_assemble(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosRoomContractEmit { params, .. } => self
+                .memythos_processor
+                .thread_contract_assemble(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosThreadContractRead { params, .. } => self
+                .memythos_processor
+                .thread_contract_read(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomContractGet { params, .. } => self
                 .memythos_processor
                 .thread_contract_read(params)
                 .await
