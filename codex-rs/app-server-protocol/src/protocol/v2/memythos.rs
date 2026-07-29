@@ -268,6 +268,59 @@ pub struct MemythosPromptLineagePart {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct MemythosParentSetup {
+    pub thread_id: String,
+    pub room_id: String,
+    pub arena_id: String,
+    pub role: MemythosParentRole,
+    pub stance: MemythosParentStance,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub goal_ref: Option<String>,
+    pub setup_prompt: String,
+    pub prompt_origin: MemythosPromptOrigin,
+    #[serde(default)]
+    pub prompt_lineage: Vec<MemythosPromptLineagePart>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosRoomActorKind {
+    AppServer,
+    Human,
+    ParentThread,
+    RoomConcierge,
+    MemythosRuntime,
+    Subagent,
+    Tool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosRoomActorRef {
+    pub kind: MemythosRoomActorKind,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub parent_key: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub role: Option<MemythosParentRole>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub stance: Option<MemythosParentStance>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub label: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct MemythosLayer {
     pub layer_id: String,
     pub name: String,
@@ -938,6 +991,8 @@ pub struct MemythosRoomActivityUsage {
 #[ts(export_to = "v2/")]
 pub struct MemythosRoomActivityEvent {
     pub cursor: String,
+    pub iteration: u64,
+    pub sequence: u64,
     pub room_id: String,
     pub arena_id: String,
     pub thread_id: String,
@@ -951,6 +1006,12 @@ pub struct MemythosRoomActivityEvent {
     pub channel: String,
     pub event_kind: String,
     pub status: String,
+    pub sender: MemythosRoomActorRef,
+    pub recipient: MemythosRoomActorRef,
+    pub authority: String,
+    pub prompt_origin: MemythosPromptOrigin,
+    #[serde(default)]
+    pub prompt_lineage: Vec<MemythosPromptLineagePart>,
     pub summary: String,
     #[ts(optional = nullable)]
     pub source_ref: Option<String>,
@@ -978,6 +1039,8 @@ pub struct MemythosRoomActivityListResponse {
     pub source_method: String,
     #[serde(default)]
     pub events: Vec<MemythosRoomActivityEvent>,
+    #[serde(default)]
+    pub parent_setups: Vec<MemythosParentSetup>,
     pub participants: Vec<MemythosRoomActivityParticipant>,
     pub turns: Vec<MemythosRoomActivityTurn>,
     pub lifecycle: MemythosRoomActivityLifecycle,
