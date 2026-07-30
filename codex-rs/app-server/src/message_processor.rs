@@ -40,6 +40,7 @@ use crate::request_processors::SearchRequestProcessor;
 use crate::request_processors::ThreadGoalParentSnapshotAdapter;
 use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
+use crate::request_processors::ThreadTurnsParentResponseAdapter;
 use crate::request_processors::TurnRequestProcessor;
 use crate::request_processors::TurnStartPeerParentDeliveryAdapter;
 use crate::request_processors::TurnStartThreadConsolidationAdapter;
@@ -529,6 +530,9 @@ impl MessageProcessor {
             Arc::new(TurnStartThreadConsolidationAdapter::new(
                 thread_processor.clone(),
                 turn_processor.clone(),
+            )),
+            Arc::new(ThreadTurnsParentResponseAdapter::new(
+                thread_processor.clone(),
             )),
         );
         *memythos_processor_holder
@@ -1307,11 +1311,9 @@ impl MessageProcessor {
                 .room_send_input(params)
                 .await
                 .map(Some),
-            ClientRequest::MemythosRoomSend { params, .. } => self
-                .memythos_processor
-                .room_send(params)
-                .await
-                .map(Some),
+            ClientRequest::MemythosRoomSend { params, .. } => {
+                self.memythos_processor.room_send(params).await.map(Some)
+            }
             ClientRequest::MemythosThreadConsolidate { params, .. } => self
                 .memythos_processor
                 .thread_consolidate(params)

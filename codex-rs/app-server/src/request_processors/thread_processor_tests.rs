@@ -1,3 +1,56 @@
+use super::MEMYTHOS_ROOM_TOOL_NAMESPACE;
+use super::with_memythos_room_tools;
+use codex_app_server_protocol::DynamicToolSpec;
+use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
+
+#[test]
+fn memythos_room_tools_are_registered_once() {
+    let tools = with_memythos_room_tools(None);
+    let namespace = tools
+        .iter()
+        .find_map(|tool| match tool {
+            DynamicToolSpec::Namespace(namespace)
+                if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE =>
+            {
+                Some(namespace)
+            }
+            _ => None,
+        })
+        .expect("Memythos room namespace should be registered");
+
+    assert_eq!(namespace.tools.len(), 2);
+    assert_eq!(
+        with_memythos_room_tools(Some(tools))
+            .iter()
+            .filter(|tool| {
+                matches!(
+                    tool,
+                    DynamicToolSpec::Namespace(namespace)
+                        if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE
+                )
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn existing_memythos_room_namespace_is_preserved() {
+    let existing = DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: MEMYTHOS_ROOM_TOOL_NAMESPACE.to_string(),
+        description: "custom room tools".to_string(),
+        tools: Vec::new(),
+    });
+
+    let tools = with_memythos_room_tools(Some(vec![existing]));
+
+    let DynamicToolSpec::Namespace(namespace) = &tools[0] else {
+        panic!("expected namespace");
+    };
+    assert_eq!(namespace.description, "custom room tools");
+    assert!(namespace.tools.is_empty());
+}
+
 mod thread_list_cwd_filter_tests {
     use super::super::normalize_thread_list_cwd_filters;
     use codex_app_server_protocol::ThreadListCwdFilter;

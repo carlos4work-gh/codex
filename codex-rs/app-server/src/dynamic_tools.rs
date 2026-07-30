@@ -9,6 +9,8 @@ use tokio::sync::oneshot;
 use tracing::error;
 
 use crate::outgoing_message::ClientRequestResult;
+use crate::request_processors::MemythosRequestProcessor;
+use crate::request_processors::MemythosRoomToolSendMessageArgs;
 use crate::server_request_error::is_turn_transition_server_request_error;
 
 pub(crate) async fn on_call_response(
@@ -30,10 +32,67 @@ pub(crate) async fn on_call_response(
         }
     };
 
+    submit_response(call_id, response, conversation).await;
+}
+
+pub(crate) async fn on_memythos_room_call(
+    call_id: String,
+    current_thread_id: String,
+    tool: String,
+    arguments: serde_json::Value,
+    processor: MemythosRequestProcessor,
+    conversation: Arc<CodexThread>,
+) {
+    let result = match tool.as_str() {
+        "list_participants" => processor
+            .room_tool_list_participants(&current_thread_id)
+            .await
+            .and_then(|participants| {
+                serde_json::to_string(&participants)
+                    .map_err(|error| crate::error_code::invalid_params(error.to_string()))
+            }),
+        "send_message" => {
+            match serde_json::from_value::<MemythosRoomToolSendMessageArgs>(arguments) {
+                Ok(args) => processor
+                    .room_tool_send_message(&current_thread_id, args)
+                    .await
+                    .and_then(|response| {
+                        serde_json::to_string(&response)
+                            .map_err(|error| crate::error_code::invalid_params(error.to_string()))
+                    }),
+                Err(error) => Err(crate::error_code::invalid_params(format!(
+                    "invalid memythos_room.send_message arguments: {error}"
+                ))),
+            }
+        }
+        _ => Err(crate::error_code::invalid_params(format!(
+            "unknown memythos_room tool: {tool}"
+        ))),
+    };
+    let response = match result {
+        Ok(text) => DynamicToolCallResponse {
+            content_items: vec![DynamicToolCallOutputContentItem::InputText { text }],
+            success: true,
+        },
+        Err(error) => DynamicToolCallResponse {
+            content_items: vec![DynamicToolCallOutputContentItem::InputText {
+                text: error.message,
+            }],
+            success: false,
+        },
+    };
+    submit_response(call_id, response, conversation).await;
+}
+
+async fn submit_response(
+    call_id: String,
+    response: DynamicToolCallResponse,
+    conversation: Arc<CodexThread>,
+) {
     let DynamicToolCallResponse {
         content_items,
         success,
-    } = response.clone();
+    } = response;
     let core_response = CoreDynamicToolResponse {
         content_items: content_items
             .into_iter()

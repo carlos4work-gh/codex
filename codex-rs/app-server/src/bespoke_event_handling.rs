@@ -833,6 +833,26 @@ pub(crate) async fn apply_bespoke_event_handling(
             outgoing
                 .send_server_notification(ServerNotification::ItemStarted(notification))
                 .await;
+            if namespace.as_deref() == Some("memythos_room")
+                && let Some(processor) = memythos_processor
+                    .lock()
+                    .ok()
+                    .and_then(|processor| processor.clone())
+            {
+                let current_thread_id = conversation_id.to_string();
+                tokio::spawn(async move {
+                    crate::dynamic_tools::on_memythos_room_call(
+                        call_id,
+                        current_thread_id,
+                        tool,
+                        arguments,
+                        processor,
+                        conversation,
+                    )
+                    .await;
+                });
+                return;
+            }
             let params = DynamicToolCallParams {
                 thread_id: conversation_id.to_string(),
                 turn_id: turn_id.clone(),

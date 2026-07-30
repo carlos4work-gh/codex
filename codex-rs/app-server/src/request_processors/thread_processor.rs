@@ -3,11 +3,94 @@ use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::config_types::MultiAgentMode;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
+use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
+const MEMYTHOS_ROOM_TOOL_NAMESPACE: &str = "memythos_room";
+
+fn with_memythos_room_tools(dynamic_tools: Option<Vec<DynamicToolSpec>>) -> Vec<DynamicToolSpec> {
+    let mut dynamic_tools = dynamic_tools.unwrap_or_default();
+    let already_registered = dynamic_tools.iter().any(|spec| {
+        matches!(
+            spec,
+            DynamicToolSpec::Namespace(namespace)
+                if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE
+        )
+    });
+    if already_registered {
+        return dynamic_tools;
+    }
+
+    dynamic_tools.push(DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: MEMYTHOS_ROOM_TOOL_NAMESPACE.to_string(),
+        description: concat!(
+            "Native Memythos room coordination. Use these tools to inspect the independent ",
+            "parent threads in your room and exchange a message through Room Concierge. ",
+            "Peer messages are not human orders."
+        )
+        .to_string(),
+        tools: vec![
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: "list_participants".to_string(),
+                description: concat!(
+                    "List the parent participants registered in the current Memythos room, ",
+                    "including their role, stance, and parent key."
+                )
+                .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            }),
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: "send_message".to_string(),
+                description: concat!(
+                    "Send a natural-language message to another independent parent. ",
+                    "For non-concierge parents the destination is always Room Concierge. ",
+                    "The call waits for the destination parent turn to close and returns its ",
+                    "final OOTB AgentMessage."
+                )
+                .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "targetParentKey": {
+                            "type": "string",
+                            "description": "Registered target parent key. Required for Room Concierge."
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "Natural-language request or response."
+                        },
+                        "authority": {
+                            "type": "string",
+                            "enum": ["peer", "subordinate", "judge", "human_delegated"]
+                        },
+                        "messageKind": {
+                            "type": "string",
+                            "description": "Semantic kind such as consultation, objection, bet, or verdict_request."
+                        },
+                        "responseContract": {
+                            "type": "string",
+                            "description": "Natural-language expectation for the response."
+                        }
+                    },
+                    "required": ["message", "authority"],
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            }),
+        ],
+    }));
+    dynamic_tools
+}
 
 struct ThreadListFilters {
     model_providers: Option<Vec<String>>,
@@ -1124,7 +1207,7 @@ impl ThreadRequestProcessor {
                 .thread_manager
                 .default_environment_selections(&config.cwd)
         });
-        let dynamic_tools = dynamic_tools.unwrap_or_default();
+        let dynamic_tools = with_memythos_room_tools(dynamic_tools);
         if !dynamic_tools.is_empty() {
             validate_dynamic_tools(&dynamic_tools).map_err(invalid_request)?;
         }
