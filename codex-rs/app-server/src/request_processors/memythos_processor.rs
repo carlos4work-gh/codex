@@ -338,11 +338,22 @@ impl PeerParentDeliveryAdapter for TurnStartPeerParentDeliveryAdapter {
             );
             metadata.insert("memythos_arena_id".to_string(), message.arena_id.clone());
             metadata.insert("memythos_round_id".to_string(), message.round_id.clone());
-            metadata.insert("memythos_peer_parent".to_string(), "true".to_string());
-            metadata.insert("human_instruction".to_string(), "false".to_string());
+            let human_instruction = message.from_parent_role == "human";
+            metadata.insert(
+                "memythos_peer_parent".to_string(),
+                (!human_instruction).to_string(),
+            );
+            metadata.insert(
+                "human_instruction".to_string(),
+                human_instruction.to_string(),
+            );
             let mut additional_context = HashMap::new();
             additional_context.insert(
-                "memythos.peer_parent".to_string(),
+                if human_instruction {
+                    "memythos.human_intake".to_string()
+                } else {
+                    "memythos.peer_parent".to_string()
+                },
                 AdditionalContextEntry {
                     value: envelope.clone(),
                     kind: AdditionalContextKind::Application,
@@ -392,7 +403,7 @@ impl PeerParentDeliveryAdapter for TurnStartPeerParentDeliveryAdapter {
                         delivery_mechanism: "turn_start".to_string(),
                         receiver_turn_id: Some(turn_id.clone()),
                         receiver_response_event_ref: None,
-                        delivered_as_human_instruction: false,
+                        delivered_as_human_instruction: human_instruction,
                         memory_replay_required: false,
                         event_refs: vec![
                             format!(
@@ -453,6 +464,42 @@ fn failed_live_delivery_attempt(
 }
 
 fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> String {
+    if message.from_parent_role == "human" {
+        return format!(
+            concat!(
+                "MEMYTHOS_HUMAN_INTAKE\n",
+                "source: human\n",
+                "human_instruction: true\n",
+                "case_id: {case_id}\n",
+                "arena_id: {arena_id}\n",
+                "round_id: {round_id}\n",
+                "to_parent_role: {to_parent_role}\n",
+                "message_kind: {message_kind}\n",
+                "\n",
+                "Trata este mensaje como pedido humano inicial o reingreso humano de la arena.\n",
+                "Usa tu memoria, rol, objetivo y herramientas OOTB del thread.\n",
+                "Si el pedido no alcanza, pregunta o formula el rollup minimo antes de bajar ejecucion.\n",
+                "No inventes contexto fuera del pedido y de los adjuntos/contexto nativo disponibles.\n",
+                "\n",
+                "Pedido humano:\n",
+                "{human_summary}\n",
+                "\n",
+                "Contexto:\n",
+                "{context_packet_ref}\n",
+                "\n",
+                "Contrato de respuesta:\n",
+                "{response_contract}\n"
+            ),
+            case_id = message.case_id,
+            arena_id = message.arena_id,
+            round_id = message.round_id,
+            to_parent_role = message.to_parent_role,
+            message_kind = message.message_kind,
+            human_summary = message.human_summary,
+            context_packet_ref = message.context_packet_ref,
+            response_contract = message.response_contract.as_deref().unwrap_or("none")
+        );
+    }
     format!(
         concat!(
             "MEMYTHOS_PEER_PARENT_MESSAGE\n",
@@ -1738,11 +1785,6 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosRoomSendInputParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
-        if params.human_instruction {
-            return Err(invalid_params(
-                "memythos/room/sendInput requires humanInstruction=false".to_string(),
-            ));
-        }
         let room = {
             let state = self.state.lock().await;
             state
@@ -1769,7 +1811,8 @@ impl MemythosRequestProcessor {
                     .unwrap_or_else(|| "room_concierge".to_string())
             });
         let source = room_participant_by_thread(&room, &source_thread_id);
-        if source.is_none()
+        if !params.human_instruction
+            && source.is_none()
             && params
                 .via_concierge_thread_id
                 .as_deref()
@@ -1810,11 +1853,19 @@ impl MemythosRequestProcessor {
                 .and_then(|value| value.as_str())
                 .unwrap_or("room_loopback")
                 .to_string(),
-            from_parent_thread_id: source_thread_id.clone(),
-            from_parent_role: source
-                .as_ref()
-                .map(|participant| participant.parent_role.clone())
-                .unwrap_or_else(|| "room_concierge".to_string()),
+            from_parent_thread_id: if params.human_instruction {
+                "human".to_string()
+            } else {
+                source_thread_id.clone()
+            },
+            from_parent_role: if params.human_instruction {
+                "human".to_string()
+            } else {
+                source
+                    .as_ref()
+                    .map(|participant| participant.parent_role.clone())
+                    .unwrap_or_else(|| "room_concierge".to_string())
+            },
             to_parent_thread_id: params.to_parent_thread_id.clone(),
             to_parent_role: target.parent_role.clone(),
             message_kind: params.message_kind.clone(),
@@ -1878,7 +1929,7 @@ impl MemythosRequestProcessor {
             delivery_mechanism: "room_loopback_send_input".to_string(),
             receiver_turn_id: Some(target_turn_id.clone()),
             receiver_response_event_ref: None,
-            delivered_as_human_instruction: false,
+            delivered_as_human_instruction: params.human_instruction,
             memory_replay_required: false,
             event_refs: event_refs.clone(),
             rejection_reason: None,
@@ -1909,23 +1960,46 @@ impl MemythosRequestProcessor {
             Some(message.round_id.clone()),
             delivery_phase,
             target.parent_role.clone(),
-            source
-                .as_ref()
-                .map(|participant| room_actor_ref_for_participant(participant))
-                .unwrap_or_else(runtime_room_concierge_actor_ref),
+            if params.human_instruction {
+                human_actor_ref()
+            } else {
+                source
+                    .as_ref()
+                    .map(|participant| room_actor_ref_for_participant(participant))
+                    .unwrap_or_else(runtime_room_concierge_actor_ref)
+            },
             room_actor_ref_for_participant(target),
             params.message_authority.clone(),
-            MemythosPromptOrigin::AgentToAgentPrompt,
+            if params.human_instruction {
+                MemythosPromptOrigin::HumanPromptInjection
+            } else {
+                MemythosPromptOrigin::AgentToAgentPrompt
+            },
             vec![MemythosPromptLineagePart {
-                origin: MemythosPromptOrigin::AgentToAgentPrompt,
-                summary: format!(
-                    "Room delivered {} from {} to {}",
-                    message.message_kind, message.from_parent_role, message.to_parent_role
-                ),
+                origin: if params.human_instruction {
+                    MemythosPromptOrigin::HumanPromptInjection
+                } else {
+                    MemythosPromptOrigin::AgentToAgentPrompt
+                },
+                summary: if params.human_instruction {
+                    format!(
+                        "Human intake delivered {} to {}",
+                        message.message_kind, message.to_parent_role
+                    )
+                } else {
+                    format!(
+                        "Room delivered {} from {} to {}",
+                        message.message_kind, message.from_parent_role, message.to_parent_role
+                    )
+                },
                 source_ref: Some(params.room_message_ref.clone()),
             }],
             "human_like",
-            "input_delivered",
+            if params.human_instruction {
+                "human_intake_delivered"
+            } else {
+                "input_delivered"
+            },
             "running",
             format!(
                 "Room {} delivered {} to parent thread {} with turn {}.",
@@ -1946,7 +2020,7 @@ impl MemythosRequestProcessor {
                 room_message_ref: params.room_message_ref,
                 delivery_ref: params.delivery_ref,
                 delivery_mechanism: "room_loopback_send_input".to_string(),
-                human_instruction: false,
+                human_instruction: params.human_instruction,
                 message_authority: params.message_authority,
             },
         }
@@ -3237,6 +3311,17 @@ fn runtime_room_concierge_actor_ref() -> MemythosRoomActorRef {
     }
 }
 
+fn human_actor_ref() -> MemythosRoomActorRef {
+    MemythosRoomActorRef {
+        kind: MemythosRoomActorKind::Human,
+        thread_id: None,
+        parent_key: None,
+        role: None,
+        stance: None,
+        label: Some("human".to_string()),
+    }
+}
+
 fn room_actor_ref_for_participant(participant: &MemythosRoomParticipant) -> MemythosRoomActorRef {
     let role = MemythosParentRole::from_wire(&participant.parent_role)
         .expect("room participant role must be validated before actor ref creation");
@@ -4115,6 +4200,93 @@ mod tests {
             MemythosPromptOrigin::AgentToAgentPrompt
         );
         assert_eq!(delivered.prompt_lineage.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn room_send_input_accepts_human_intake_without_registered_source_parent() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+        );
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+
+        let send_response = processor
+            .room_send_input(MemythosRoomSendInputParams {
+                room_id: "room-001".to_string(),
+                room_message_ref: "app-server://rooms/room-001/messages/human-intake-001"
+                    .to_string(),
+                delivery_ref: "app-server://rooms/room-001/deliveries/human-intake-001".to_string(),
+                from_parent_thread_id: None,
+                via_concierge_thread_id: None,
+                to_parent_thread_id: "thread_growth".to_string(),
+                source_parent_key: "human".to_string(),
+                target_parent_key: "case/bpm_e2e/arena/bettor/growth".to_string(),
+                message_kind: "initial_human_request".to_string(),
+                message_authority: "human_intake".to_string(),
+                human_instruction: true,
+                response_contract: "respond conversationally and ask for missing context if needed"
+                    .to_string(),
+                client_user_message_id: Some("human-intake-001".to_string()),
+                prompt: "Evaluar si el nodo BPM puede bajarse a PID tactico sin reabrir negocio."
+                    .to_string(),
+                metadata: serde_json::Map::from_iter([
+                    (
+                        "memythos_round_id".to_string(),
+                        serde_json::Value::String("round-human-001".to_string()),
+                    ),
+                    (
+                        "memythos_phase".to_string(),
+                        serde_json::Value::String("intake".to_string()),
+                    ),
+                ]),
+                output_schema: None,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomSendInput(send_response) = send_response else {
+            panic!("expected MemythosRoomSendInput response");
+        };
+        assert!(send_response.delivery.human_instruction);
+        assert_eq!(send_response.delivery.thread_id, "thread_growth");
+
+        let timeline = processor
+            .room_timeline_get(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: Some("round-human-001".to_string()),
+                phase: Some("intake".to_string()),
+                since_cursor: None,
+                after_cursor: None,
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(timeline) = timeline else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+        let delivered = timeline
+            .events
+            .iter()
+            .find(|event| event.event_kind == "human_intake_delivered")
+            .expect("expected human intake delivery event");
+        assert_eq!(delivered.sender.kind, MemythosRoomActorKind::Human);
+        assert_eq!(delivered.sender.label.as_deref(), Some("human"));
+        assert_eq!(delivered.recipient.role, Some(MemythosParentRole::Bettor));
+        assert_eq!(delivered.authority, "human_intake");
+        assert_eq!(
+            delivered.prompt_origin,
+            MemythosPromptOrigin::HumanPromptInjection
+        );
+        assert_eq!(delivered.prompt_lineage.len(), 1);
+        assert_eq!(
+            delivered.prompt_lineage[0].origin,
+            MemythosPromptOrigin::HumanPromptInjection
+        );
     }
 
     #[tokio::test]
