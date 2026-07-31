@@ -1073,6 +1073,7 @@ pub struct MemythosRoomSendInputParams {
     pub response_contract: String,
     #[ts(optional = nullable)]
     pub client_user_message_id: Option<String>,
+    pub human_summary: String,
     pub prompt: String,
     #[serde(default)]
     #[ts(type = "Record<string, unknown>")]

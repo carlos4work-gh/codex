@@ -8672,6 +8672,1482 @@
       ],
       "type": "object"
     },
+    "MemythosArena": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/MemythosArenaKind"
+        },
+        "layerId": {
+          "type": "string"
+        },
+        "lifecycleState": {
+          "$ref": "#/definitions/MemythosArenaLifecycleState"
+        },
+        "name": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "participantIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "arenaId",
+        "kind",
+        "layerId",
+        "lifecycleState",
+        "name",
+        "objective"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaKind": {
+      "enum": [
+        "discovery",
+        "debate",
+        "parentRollup",
+        "humanDiscovery",
+        "settlement",
+        "implementation"
+      ],
+      "type": "string"
+    },
+    "MemythosArenaLifecycleState": {
+      "enum": [
+        "draft",
+        "running",
+        "awaitingParent",
+        "awaitingHuman",
+        "artifactComplete",
+        "closeRequested",
+        "closedCleanly",
+        "closedDegraded"
+      ],
+      "type": "string"
+    },
+    "MemythosArenaMessage": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "artifactRefs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "caseId": {
+          "type": "string"
+        },
+        "contextPacketRef": {
+          "type": "string"
+        },
+        "fromParentRole": {
+          "type": "string"
+        },
+        "fromParentThreadId": {
+          "type": "string"
+        },
+        "humanSummary": {
+          "type": "string"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "messageKind": {
+          "type": "string"
+        },
+        "requiresResponse": {
+          "type": "boolean"
+        },
+        "responseContract": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "toParentRole": {
+          "type": "string"
+        },
+        "toParentThreadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arenaId",
+        "caseId",
+        "contextPacketRef",
+        "fromParentRole",
+        "fromParentThreadId",
+        "humanSummary",
+        "messageId",
+        "messageKind",
+        "requiresResponse",
+        "roundId",
+        "toParentRole",
+        "toParentThreadId"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaMessageDelivery": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "deliveredAsHumanInstruction": {
+          "type": "boolean"
+        },
+        "deliveryId": {
+          "type": "string"
+        },
+        "deliveryMechanism": {
+          "type": "string"
+        },
+        "eventRefs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "humanSummary": {
+          "description": "Semantic message shown in room timelines. The execution prompt may wrap this with transport context, but that envelope is not conversational content.",
+          "type": "string"
+        },
+        "memoryReplayRequired": {
+          "type": "boolean"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "phase": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "receiverResponseEventRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "receiverThreadId": {
+          "type": "string"
+        },
+        "receiverTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rejectionReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "senderThreadId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arenaId",
+        "deliveredAsHumanInstruction",
+        "deliveryId",
+        "deliveryMechanism",
+        "eventRefs",
+        "humanSummary",
+        "memoryReplayRequired",
+        "messageId",
+        "receiverThreadId",
+        "roundId",
+        "senderThreadId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaParent": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "authorityScope": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "lifecycleState": {
+          "$ref": "#/definitions/MemythosArenaLifecycleState"
+        },
+        "parentRole": {
+          "type": "string"
+        },
+        "stanceProfile": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arenaId",
+        "authorityScope",
+        "lifecycleState",
+        "parentRole",
+        "stanceProfile",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "MemythosEventChannel": {
+      "enum": [
+        "humanHighlight",
+        "technicalDetail",
+        "artifactPayload",
+        "stateTransition"
+      ],
+      "type": "string"
+    },
+    "MemythosLayer": {
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/MemythosLayerKind"
+        },
+        "layerId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "parentLayerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "layerId",
+        "name",
+        "objective"
+      ],
+      "type": "object"
+    },
+    "MemythosLayerKind": {
+      "enum": [
+        "strategic",
+        "bpmEndToEnd",
+        "tacticalOperational",
+        "implementationReality",
+        "humanSettlement"
+      ],
+      "type": "string"
+    },
+    "MemythosParentContinuityStatus": {
+      "enum": [
+        "noTurns",
+        "singleTurnObserved",
+        "turnContinuityObserved",
+        "verified",
+        "degraded"
+      ],
+      "type": "string"
+    },
+    "MemythosParentPeerResponseKind": {
+      "enum": [
+        "pendingResponse",
+        "ack",
+        "question",
+        "objection",
+        "bet",
+        "rollupRequest",
+        "offTopic",
+        "noResponse"
+      ],
+      "type": "string"
+    },
+    "MemythosParentPeerResponseObservation": {
+      "properties": {
+        "actionableNextStep": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidenceRefs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "observationId": {
+          "type": "string"
+        },
+        "observedResponseKind": {
+          "$ref": "#/definitions/MemythosParentPeerResponseKind"
+        },
+        "receiverThreadId": {
+          "type": "string"
+        },
+        "receiverTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "responseEventRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rolePreserved": {
+          "type": "boolean"
+        },
+        "semanticAlignment": {
+          "$ref": "#/definitions/MemythosSemanticAlignment"
+        },
+        "treatedAsHumanInstruction": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "evidenceRefs",
+        "messageId",
+        "observationId",
+        "observedResponseKind",
+        "receiverThreadId",
+        "rolePreserved",
+        "semanticAlignment",
+        "treatedAsHumanInstruction"
+      ],
+      "type": "object"
+    },
+    "MemythosParentRole": {
+      "enum": [
+        "room_concierge",
+        "scrum_master",
+        "judge",
+        "bettor",
+        "coordinator",
+        "observer",
+        "peer"
+      ],
+      "type": "string"
+    },
+    "MemythosParentSetup": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "goalRef": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promptLineage": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MemythosPromptLineagePart"
+          },
+          "type": "array"
+        },
+        "promptOrigin": {
+          "$ref": "#/definitions/MemythosPromptOrigin"
+        },
+        "role": {
+          "$ref": "#/definitions/MemythosParentRole"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "setupPrompt": {
+          "type": "string"
+        },
+        "stance": {
+          "$ref": "#/definitions/MemythosParentStance"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arenaId",
+        "promptOrigin",
+        "role",
+        "roomId",
+        "setupPrompt",
+        "stance",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "MemythosParentStance": {
+      "enum": [
+        "coordination",
+        "routing",
+        "synthesis",
+        "escalation_control",
+        "end_to_end_integrity",
+        "business_fitness",
+        "customer_flow",
+        "implementation_pid",
+        "reality_fit",
+        "salesforce_delivery",
+        "growth",
+        "risk"
+      ],
+      "type": "string"
+    },
+    "MemythosParentThreadContinuity": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "budgetStateRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "continuityStatus": {
+          "$ref": "#/definitions/MemythosParentContinuityStatus"
+        },
+        "degradedReasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "evidenceRefs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "firstTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "goalSnapshotAvailable": {
+          "type": "boolean"
+        },
+        "goalSnapshotRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "goalStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadGoalStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latestTurnCompletedRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latestTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memoryReplayRequired": {
+          "type": "boolean"
+        },
+        "observedTurnCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "parentRole": {
+          "type": "string"
+        },
+        "stanceProfile": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "timeUsedSeconds": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tokenBudget": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tokenUsageRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokensUsed": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "arenaId",
+        "continuityStatus",
+        "degradedReasons",
+        "evidenceRefs",
+        "goalSnapshotAvailable",
+        "memoryReplayRequired",
+        "observedTurnCount",
+        "parentRole",
+        "stanceProfile",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "MemythosPromptLineagePart": {
+      "properties": {
+        "origin": {
+          "$ref": "#/definitions/MemythosPromptOrigin"
+        },
+        "sourceRef": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "MemythosPromptOrigin": {
+      "enum": [
+        "human_prompt_injection",
+        "agent_to_agent_prompt",
+        "memythos_tool_injection",
+        "memythos_runtime_setup",
+        "app_server_codex_agentic",
+        "app_server_protocol",
+        "mixed"
+      ],
+      "type": "string"
+    },
+    "MemythosRoom": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "caseId": {
+          "type": "string"
+        },
+        "layerId": {
+          "type": "string"
+        },
+        "participants": {
+          "items": {
+            "$ref": "#/definitions/MemythosRoomParticipant"
+          },
+          "type": "array"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "topology": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arenaId",
+        "caseId",
+        "layerId",
+        "participants",
+        "roomId",
+        "topology"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomActivityCollab": {
+      "properties": {
+        "completedSendInputCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "failedSendInputCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sendInputCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "waitCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "completedSendInputCount",
+        "failedSendInputCount",
+        "sendInputCount",
+        "waitCount"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomActivityEvent": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "authority": {
+          "type": "string"
+        },
+        "channel": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "eventKind": {
+          "type": "string"
+        },
+        "iteration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "participantRole": {
+          "type": "string"
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "promptLineage": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MemythosPromptLineagePart"
+          },
+          "type": "array"
+        },
+        "promptOrigin": {
+          "$ref": "#/definitions/MemythosPromptOrigin"
+        },
+        "recipient": {
+          "$ref": "#/definitions/MemythosRoomActorRef"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "roundId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sender": {
+          "$ref": "#/definitions/MemythosRoomActorRef"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sourceRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "arenaId",
+        "authority",
+        "channel",
+        "cursor",
+        "eventKind",
+        "iteration",
+        "participantRole",
+        "promptOrigin",
+        "recipient",
+        "roomId",
+        "sender",
+        "sequence",
+        "status",
+        "summary",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomActivityItem": {
+      "properties": {
+        "artifactRef": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eventRef": {
+          "type": "string"
+        },
+        "humanHighlight": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemType": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "refs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "technicalSummary": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "eventRef",
+        "kind",
+        "status",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomActivityLifecycle": {
+      "properties": {
+        "activeTurns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "cleanClose": {
+          "type": "boolean"
+        },
+        "completedTurns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "failedTurns": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "forceClosed": {
+          "type": "boolean"
+        },
+        "roomState": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "activeTurns",
+        "cleanClose",
+        "completedTurns",
+        "failedTurns",
+        "forceClosed",
+        "roomState"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomActivityParticipant": {
+      "properties": {
+        "activeTurnCount": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "activityEventCount": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "completedTurnCount": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "deliveryCount": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "failedTurnCount": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "goalRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lastActivitySummary": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentKey": {
+          "type": "string"
+        },
+        "parentRole": {
+          "type": "string"
+        },
+        "stanceProfile": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "parentKey",
+        "parentRole",
+        "stanceProfile",
+        "status",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomActivitySubagents": {
+      "properties": {
+        "activityCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "interactedCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "interruptedCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "startedCount": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "activityCount",
+        "interactedCount",
+        "interruptedCount",
+        "startedCount"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomActivityTurn": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/MemythosRoomActivityItem"
+          },
+          "type": "array"
+        },
+        "parentKey": {
+          "type": "string"
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roundId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items",
+        "parentKey",
+        "status",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomActivityUsage": {
+      "properties": {
+        "refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tokenUsageEvents": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "refs",
+        "tokenUsageEvents"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomActorKind": {
+      "enum": [
+        "app_server",
+        "human",
+        "parent_thread",
+        "room_concierge",
+        "memythos_runtime",
+        "subagent",
+        "tool"
+      ],
+      "type": "string"
+    },
+    "MemythosRoomActorRef": {
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/MemythosRoomActorKind"
+        },
+        "label": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentKey": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MemythosParentRole"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "stance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MemythosParentStance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "threadId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomParticipant": {
+      "properties": {
+        "authorityScope": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "goalRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentKey": {
+          "type": "string"
+        },
+        "parentRole": {
+          "type": "string"
+        },
+        "stanceProfile": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "parentKey",
+        "parentRole",
+        "stanceProfile",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "MemythosRoomSendInputDelivery": {
+      "properties": {
+        "deliveryMechanism": {
+          "type": "string"
+        },
+        "deliveryRef": {
+          "type": "string"
+        },
+        "eventRefs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "humanInstruction": {
+          "type": "boolean"
+        },
+        "messageAuthority": {
+          "type": "string"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "roomMessageRef": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "deliveryMechanism",
+        "deliveryRef",
+        "eventRefs",
+        "humanInstruction",
+        "messageAuthority",
+        "roomId",
+        "roomMessageRef",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "MemythosRuntimeLifecycleState": {
+      "enum": [
+        "ready",
+        "draining",
+        "closedCleanly",
+        "closedDegraded"
+      ],
+      "type": "string"
+    },
+    "MemythosSemanticAlignment": {
+      "enum": [
+        "pending",
+        "acceptable",
+        "strong",
+        "weak",
+        "invalid"
+      ],
+      "type": "string"
+    },
+    "MemythosStructuredContract": {
+      "properties": {
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "contractKind": {
+          "type": "string"
+        },
+        "contractRef": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "missingEvidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "default": null
+        },
+        "producerThreadId": {
+          "type": "string"
+        },
+        "producerTurnId": {
+          "type": "string"
+        },
+        "schemaRef": {
+          "type": "string"
+        },
+        "sourceEvidenceRefs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "storageKind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "blockers",
+        "contractKind",
+        "contractRef",
+        "createdAt",
+        "missingEvidence",
+        "producerThreadId",
+        "producerTurnId",
+        "schemaRef",
+        "sourceEvidenceRefs",
+        "storageKind"
+      ],
+      "type": "object"
+    },
+    "MemythosTelemetryRef": {
+      "properties": {
+        "arenaId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "channel": {
+          "$ref": "#/definitions/MemythosEventChannel"
+        },
+        "detailRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/MemythosTelemetryRefKind"
+        },
+        "layerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nativeEventRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/definitions/MemythosTelemetrySource"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "telemetryRefId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "channel",
+        "kind",
+        "source",
+        "summary",
+        "telemetryRefId"
+      ],
+      "type": "object"
+    },
+    "MemythosTelemetryRefKind": {
+      "enum": [
+        "runtimeState",
+        "layerState",
+        "arenaState",
+        "threadAttachment",
+        "arenaParent",
+        "arenaMessage",
+        "threadConsolidation"
+      ],
+      "type": "string"
+    },
+    "MemythosTelemetrySource": {
+      "enum": [
+        "appServerNative",
+        "memythosRuntimeState",
+        "syntheticFixture"
+      ],
+      "type": "string"
+    },
+    "MemythosThreadAttachment": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "attachmentId": {
+          "type": "string"
+        },
+        "contractRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lifecycleState": {
+          "$ref": "#/definitions/MemythosArenaLifecycleState"
+        },
+        "objective": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roleId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stanceId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arenaId",
+        "attachmentId",
+        "lifecycleState",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "MemythosThreadConsolidationAuthorityMode": {
+      "enum": [
+        "peerCoordination",
+        "parentRollup",
+        "judgeBriefing",
+        "scrumMasterBriefing",
+        "humanInterlocutor",
+        "childLayerResume"
+      ],
+      "type": "string"
+    },
+    "MemythosThreadConsolidationPurpose": {
+      "enum": [
+        "arenaRoundConsolidation",
+        "parentRollup",
+        "judgeBriefing",
+        "scrumMasterBriefing",
+        "humanInterlocutor",
+        "childLayerResume"
+      ],
+      "type": "string"
+    },
+    "MemythosThreadConsolidationSourceRef": {
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemsView": {
+          "type": "string"
+        },
+        "latestAgentMessageRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latestAgentMessageText": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "technicalEvidenceRefs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnRefs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "itemsView",
+        "technicalEvidenceRefs",
+        "threadId",
+        "turnRefs"
+      ],
+      "type": "object"
+    },
     "MergeStrategy": {
       "enum": [
         "replace",
@@ -14442,7 +15918,7 @@
           ]
         },
         "agentRole": {
-          "description": "Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.",
+          "description": "Optional named role applied to this thread. Root threads can select it at `thread/start`; spawned agents inherit it from AgentControl.",
           "type": [
             "string",
             "null"
@@ -16823,6 +18299,13 @@
     "ThreadStartParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
+        "agentRole": {
+          "description": "Named agent role applied to this root thread using the same role configuration mechanism used by spawned agents. This does not create a parent-child relationship.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "approvalPolicy": {
           "anyOf": [
             {

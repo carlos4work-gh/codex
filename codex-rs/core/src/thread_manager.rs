@@ -180,6 +180,8 @@ pub struct ThreadManager {
 
 pub struct StartThreadOptions {
     pub config: Config,
+    /// Named role for a root thread. It does not imply a subagent relationship.
+    pub agent_role: Option<String>,
     pub initial_history: InitialHistory,
     pub session_source: Option<SessionSource>,
     pub thread_source: Option<ThreadSource>,
@@ -604,6 +606,7 @@ impl ThreadManager {
         );
         Box::pin(self.start_thread_with_options(StartThreadOptions {
             config,
+            agent_role: None,
             initial_history: InitialHistory::New,
             session_source: None,
             thread_source: None,
@@ -628,9 +631,14 @@ impl ThreadManager {
 
     async fn start_thread_with_options_and_fork_source(
         &self,
-        options: StartThreadOptions,
+        mut options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
     ) -> CodexResult<NewThread> {
+        if let Some(agent_role) = options.agent_role.as_deref() {
+            crate::agent::role::apply_role_to_config(&mut options.config, Some(agent_role))
+                .await
+                .map_err(CodexErr::InvalidRequest)?;
+        }
         let agent_control = self.agent_control_for_config(&options.config);
         let (resumed_session_source, resumed_thread_source) = options
             .initial_history
@@ -640,6 +648,7 @@ impl ThreadManager {
         let thread_source = options.thread_source.or(resumed_thread_source);
         Box::pin(self.state.spawn_thread_with_source(
             options.config,
+            options.agent_role,
             options.initial_history,
             Arc::clone(&self.state.auth_manager),
             agent_control,
@@ -720,12 +729,18 @@ impl ThreadManager {
     #[instrument(level = "trace", skip_all)]
     pub async fn resume_thread_with_history(
         &self,
-        config: Config,
+        mut config: Config,
         initial_history: InitialHistory,
         auth_manager: Arc<AuthManager>,
         parent_trace: Option<W3cTraceContext>,
         supports_openai_form_elicitation: bool,
     ) -> CodexResult<NewThread> {
+        let agent_role = initial_history.get_resumed_agent_role();
+        if let Some(agent_role) = agent_role.as_deref() {
+            crate::agent::role::apply_role_to_config(&mut config, Some(agent_role))
+                .await
+                .map_err(CodexErr::InvalidRequest)?;
+        }
         let agent_control = self.agent_control_for_config(&config);
         let environments = default_thread_environment_selections(
             self.state.environment_manager.as_ref(),
@@ -737,6 +752,7 @@ impl ThreadManager {
         let initial_multi_agent_mode = initial_history.get_latest_effective_multi_agent_mode();
         Box::pin(self.state.spawn_thread_with_source(
             config,
+            agent_role,
             initial_history,
             auth_manager,
             agent_control,
@@ -791,14 +807,20 @@ impl ThreadManager {
 
     pub(crate) async fn resume_thread_from_rollout_with_user_shell_override_for_tests(
         &self,
-        config: Config,
+        mut config: Config,
         rollout_path: PathBuf,
         auth_manager: Arc<AuthManager>,
         user_shell_override: crate::shell::Shell,
         supports_openai_form_elicitation: bool,
     ) -> CodexResult<NewThread> {
-        let agent_control = self.agent_control_for_config(&config);
         let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
+        let agent_role = initial_history.get_resumed_agent_role();
+        if let Some(agent_role) = agent_role.as_deref() {
+            crate::agent::role::apply_role_to_config(&mut config, Some(agent_role))
+                .await
+                .map_err(CodexErr::InvalidRequest)?;
+        }
+        let agent_control = self.agent_control_for_config(&config);
         let environments = default_thread_environment_selections(
             self.state.environment_manager.as_ref(),
             &config.cwd,
@@ -809,6 +831,7 @@ impl ThreadManager {
         let initial_multi_agent_mode = initial_history.get_latest_effective_multi_agent_mode();
         Box::pin(self.state.spawn_thread_with_source(
             config,
+            agent_role,
             initial_history,
             auth_manager,
             agent_control,
@@ -1262,6 +1285,7 @@ impl ThreadManagerState {
         });
         Box::pin(self.spawn_thread_with_source(
             config,
+            None,
             InitialHistory::New,
             Arc::clone(&self.auth_manager),
             agent_control,
@@ -1299,9 +1323,11 @@ impl ThreadManagerState {
         let environments =
             default_thread_environment_selections(self.environment_manager.as_ref(), &config.cwd);
         let thread_source = initial_history.get_resumed_thread_source();
+        let agent_role = initial_history.get_resumed_agent_role();
         let initial_multi_agent_mode = initial_history.get_latest_effective_multi_agent_mode();
         Box::pin(self.spawn_thread_with_source(
             config,
+            agent_role,
             initial_history,
             Arc::clone(&self.auth_manager),
             agent_control,
@@ -1343,6 +1369,7 @@ impl ThreadManagerState {
         });
         Box::pin(self.spawn_thread_with_source(
             config,
+            None,
             initial_history,
             Arc::clone(&self.auth_manager),
             agent_control,
@@ -1386,6 +1413,7 @@ impl ThreadManagerState {
     ) -> CodexResult<NewThread> {
         Box::pin(self.spawn_thread_with_source(
             config,
+            None,
             initial_history,
             auth_manager,
             agent_control,
@@ -1411,6 +1439,7 @@ impl ThreadManagerState {
     pub(crate) async fn spawn_thread_with_source(
         &self,
         config: Config,
+        agent_role: Option<String>,
         initial_history: InitialHistory,
         auth_manager: Arc<AuthManager>,
         agent_control: AgentControl,
@@ -1429,6 +1458,9 @@ impl ThreadManagerState {
         supports_openai_form_elicitation: bool,
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
+        // Root threads select a role explicitly at thread/start. Spawned agents keep
+        // deriving the same role from their native SubAgent session source.
+        let agent_role = agent_role.or_else(|| session_source.get_agent_role());
         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
         if let InitialHistory::Resumed(resumed) = &initial_history {
             let mut threads = self.threads.write().await;
@@ -1470,6 +1502,7 @@ impl ThreadManagerState {
             codex, thread_id, ..
         } = Box::pin(Codex::spawn(CodexSpawnArgs {
             config,
+            agent_role,
             user_instructions,
             installation_id: self.installation_id.clone(),
             auth_manager,

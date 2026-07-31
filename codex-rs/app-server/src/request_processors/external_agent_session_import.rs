@@ -205,6 +205,7 @@ impl ExternalAgentSessionImporter {
             forked_from_id: None,
             parent_thread_id: None,
             source: source.clone(),
+            agent_role: source.get_agent_role(),
             thread_source: None,
             base_instructions: BaseInstructions {
                 text: config

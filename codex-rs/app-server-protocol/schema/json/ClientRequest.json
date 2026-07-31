@@ -1648,6 +1648,153 @@
       ],
       "type": "object"
     },
+    "MemythosArenaKind": {
+      "enum": [
+        "discovery",
+        "debate",
+        "parentRollup",
+        "humanDiscovery",
+        "settlement",
+        "implementation"
+      ],
+      "type": "string"
+    },
+    "MemythosArenaMessage": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "artifactRefs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "caseId": {
+          "type": "string"
+        },
+        "contextPacketRef": {
+          "type": "string"
+        },
+        "fromParentRole": {
+          "type": "string"
+        },
+        "fromParentThreadId": {
+          "type": "string"
+        },
+        "humanSummary": {
+          "type": "string"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "messageKind": {
+          "type": "string"
+        },
+        "requiresResponse": {
+          "type": "boolean"
+        },
+        "responseContract": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "toParentRole": {
+          "type": "string"
+        },
+        "toParentThreadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arenaId",
+        "caseId",
+        "contextPacketRef",
+        "fromParentRole",
+        "fromParentThreadId",
+        "humanSummary",
+        "messageId",
+        "messageKind",
+        "requiresResponse",
+        "roundId",
+        "toParentRole",
+        "toParentThreadId"
+      ],
+      "type": "object"
+    },
+    "MemythosLayerKind": {
+      "enum": [
+        "strategic",
+        "bpmEndToEnd",
+        "tacticalOperational",
+        "implementationReality",
+        "humanSettlement"
+      ],
+      "type": "string"
+    },
+    "MemythosRoomParticipant": {
+      "properties": {
+        "authorityScope": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "goalRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentKey": {
+          "type": "string"
+        },
+        "parentRole": {
+          "type": "string"
+        },
+        "stanceProfile": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "parentKey",
+        "parentRole",
+        "stanceProfile",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "MemythosThreadConsolidationAuthorityMode": {
+      "enum": [
+        "peerCoordination",
+        "parentRollup",
+        "judgeBriefing",
+        "scrumMasterBriefing",
+        "humanInterlocutor",
+        "childLayerResume"
+      ],
+      "type": "string"
+    },
+    "MemythosThreadConsolidationPurpose": {
+      "enum": [
+        "arenaRoundConsolidation",
+        "parentRollup",
+        "judgeBriefing",
+        "scrumMasterBriefing",
+        "humanInterlocutor",
+        "childLayerResume"
+      ],
+      "type": "string"
+    },
     "MergeStrategy": {
       "enum": [
         "replace",
@@ -4240,6 +4387,13 @@
     },
     "ThreadStartParams": {
       "properties": {
+        "agentRole": {
+          "description": "Named agent role applied to this root thread using the same role configuration mechanism used by spawned agents. This does not create a parent-child relationship.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "approvalPolicy": {
           "anyOf": [
             {

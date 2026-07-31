@@ -436,6 +436,7 @@ async fn loads_user_instructions_without_a_primary_environment() -> Result<()> {
         .thread_manager
         .start_thread_with_options(StartThreadOptions {
             config: test.config.clone(),
+            agent_role: None,
             initial_history: InitialHistory::New,
             session_source: None,
             thread_source: None,
@@ -644,6 +645,7 @@ async fn multi_environment_thread_loads_every_project_and_keeps_creation_snapsho
         .thread_manager
         .start_thread_with_options(StartThreadOptions {
             config: test.config.clone(),
+            agent_role: None,
             initial_history: InitialHistory::New,
             session_source: None,
             thread_source: None,

@@ -36,6 +36,7 @@ pub(super) async fn create_thread(
             params.base_instructions,
             params.dynamic_tools,
         )
+        .with_agent_role(params.agent_role.clone())
         .with_multi_agent_version(params.multi_agent_version),
     )
     .await

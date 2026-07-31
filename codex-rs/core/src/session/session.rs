@@ -48,6 +48,8 @@ pub(crate) struct Session {
 
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
+    /// Named role selected for this thread independently of its session source.
+    pub(super) agent_role: Option<String>,
     /// Provider identifier ("openai", "openrouter", ...).
     pub(super) provider: ModelProviderInfo,
 
@@ -178,6 +180,7 @@ impl SessionConfiguration {
 
     pub(super) fn thread_config_snapshot(&self) -> ThreadConfigSnapshot {
         ThreadConfigSnapshot {
+            agent_role: self.agent_role.clone(),
             model: self.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
             service_tier: self.service_tier.clone(),
@@ -551,6 +554,7 @@ impl Session {
                             forked_from_id,
                             parent_thread_id,
                             source: session_source,
+                            agent_role: session_configuration.agent_role.clone(),
                             thread_source: session_configuration.thread_source.clone(),
                             base_instructions: BaseInstructions {
                                 text: session_configuration.base_instructions.clone(),
@@ -667,7 +671,7 @@ impl Session {
                 agent_path: trace_agent_path.to_string(),
                 task_name: trace_task_name,
                 nickname: session_configuration.session_source.get_nickname(),
-                agent_role: session_configuration.session_source.get_agent_role(),
+                agent_role: session_configuration.agent_role.clone(),
                 session_source: session_configuration.session_source.clone(),
                 cwd: session_configuration.cwd().to_path_buf(),
                 rollout_path: rollout_path.clone(),

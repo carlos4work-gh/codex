@@ -2258,6 +2258,7 @@ impl MemythosRequestProcessor {
                 human_instruction: false,
                 response_contract: args.response_contract,
                 client_user_message_id: Some(message_id),
+                human_summary: args.message.clone(),
                 prompt: args.message,
                 metadata,
                 output_schema: None,
@@ -2406,6 +2407,7 @@ impl MemythosRequestProcessor {
                 human_instruction: false,
                 response_contract: args.response_contract,
                 client_user_message_id: Some(message_id),
+                human_summary: args.message.clone(),
                 prompt: args.message,
                 metadata,
                 output_schema: None,
@@ -2650,7 +2652,7 @@ impl MemythosRequestProcessor {
             to_parent_thread_id: params.to_parent_thread_id.clone(),
             to_parent_role: target.parent_role.clone(),
             message_kind: params.message_kind.clone(),
-            human_summary: params.prompt.clone(),
+            human_summary: params.human_summary.clone(),
             context_packet_ref: params.room_message_ref.clone(),
             artifact_refs: vec![params.delivery_ref.clone()],
             requires_response: true,
@@ -5458,7 +5460,9 @@ mod tests {
                 human_instruction: false,
                 response_contract: "peer_response_contract".to_string(),
                 client_user_message_id: Some("message-001".to_string()),
-                prompt: "No soy humano; soy peer de arena. Objeta mi propuesta.".to_string(),
+                human_summary: "Challenge my proposal as an arena peer.".to_string(),
+                prompt: "I am not a human; I am an arena peer. Challenge my proposal."
+                    .to_string(),
                 metadata: serde_json::Map::from_iter([
                     (
                         "memythos_round_id".to_string(),
@@ -5524,7 +5528,9 @@ mod tests {
                 human_instruction: true,
                 response_contract: "coordinate the room and respond conversationally".to_string(),
                 client_user_message_id: Some("human-intake-setup".to_string()),
-                prompt: "Determina con la arena si este contrato puede avanzar.".to_string(),
+                human_summary: "Determine with the arena whether this contract can proceed."
+                    .to_string(),
+                prompt: "Determine with the arena whether this contract can proceed.".to_string(),
                 metadata: serde_json::Map::new(),
                 output_schema: None,
             })
@@ -5623,7 +5629,8 @@ mod tests {
                 human_instruction: false,
                 response_contract: "peer_response_contract".to_string(),
                 client_user_message_id: Some("message-002".to_string()),
-                prompt: "Concierge entrega un mensaje entre peers.".to_string(),
+                human_summary: "The concierge delivers a message between peers.".to_string(),
+                prompt: "The concierge delivers a message between peers.".to_string(),
                 metadata: serde_json::Map::from_iter([
                     (
                         "memythos_round_id".to_string(),
@@ -5715,8 +5722,12 @@ mod tests {
                 response_contract: "respond conversationally and ask for missing context if needed"
                     .to_string(),
                 client_user_message_id: Some("human-intake-001".to_string()),
-                prompt: "Evaluar si el nodo BPM puede bajarse a PID tactico sin reabrir negocio."
-                    .to_string(),
+                human_summary:
+                    "Assess whether the BPM node can become a tactical PID without reopening business decisions."
+                        .to_string(),
+                prompt:
+                    "Assess whether the BPM node can become a tactical PID without reopening business decisions."
+                        .to_string(),
                 metadata: serde_json::Map::from_iter([
                     (
                         "memythos_round_id".to_string(),
@@ -5800,7 +5811,9 @@ mod tests {
                 human_instruction: false,
                 response_contract: "peer_response_contract".to_string(),
                 client_user_message_id: Some("message-003".to_string()),
-                prompt: "No soy humano; soy peer de arena. Objeta mi propuesta.".to_string(),
+                human_summary: "Challenge my proposal as an arena peer.".to_string(),
+                prompt: "I am not a human; I am an arena peer. Challenge my proposal."
+                    .to_string(),
                 metadata: serde_json::Map::new(),
                 output_schema: None,
             })
@@ -5969,7 +5982,8 @@ mod tests {
                 human_instruction: false,
                 response_contract: "peer_response_contract".to_string(),
                 client_user_message_id: Some("message-003".to_string()),
-                prompt: "Apuesta y declara condiciones de ejecucion.".to_string(),
+                human_summary: "Place a bet and state execution conditions.".to_string(),
+                prompt: "Place a bet and state execution conditions.".to_string(),
                 metadata: serde_json::Map::from_iter([
                     (
                         "memythos_round_id".to_string(),
@@ -6147,7 +6161,8 @@ mod tests {
                 human_instruction: false,
                 response_contract: "peer_response_contract".to_string(),
                 client_user_message_id: Some("message-missing".to_string()),
-                prompt: "Responde con tu cierre conversacional.".to_string(),
+                human_summary: "Respond with your conversational close.".to_string(),
+                prompt: "Respond with your conversational close.".to_string(),
                 metadata: serde_json::Map::new(),
                 output_schema: None,
             })
@@ -6223,7 +6238,8 @@ mod tests {
                     human_instruction: false,
                     response_contract: "peer_response_contract".to_string(),
                     client_user_message_id: Some(message_id.to_string()),
-                    prompt: format!("Apuesta incremental {message_id}."),
+                    human_summary: format!("Incremental bet {message_id}."),
+                    prompt: format!("Incremental bet {message_id}."),
                     metadata: serde_json::Map::from_iter([
                         (
                             "memythos_round_id".to_string(),

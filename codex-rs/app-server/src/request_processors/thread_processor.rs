@@ -1016,6 +1016,7 @@ impl ThreadRequestProcessor {
         request_context: RequestContext,
     ) -> Result<(), JSONRPCErrorError> {
         let ThreadStartParams {
+            agent_role,
             model,
             model_provider,
             service_tier,
@@ -1089,6 +1090,7 @@ impl ThreadRequestProcessor {
                 supports_openai_form_elicitation,
                 config,
                 typesafe_overrides,
+                agent_role,
                 multi_agent_mode,
                 dynamic_tools,
                 selected_capability_roots.unwrap_or_default(),
@@ -1164,6 +1166,7 @@ impl ThreadRequestProcessor {
         supports_openai_form_elicitation: bool,
         config_overrides: Option<HashMap<String, serde_json::Value>>,
         typesafe_overrides: ConfigOverrides,
+        agent_role: Option<String>,
         multi_agent_mode: Option<MultiAgentMode>,
         dynamic_tools: Option<Vec<DynamicToolSpec>>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
@@ -1278,6 +1281,7 @@ impl ThreadRequestProcessor {
             .thread_manager
             .start_thread_with_options(StartThreadOptions {
                 config,
+                agent_role,
                 initial_history: match session_start_source
                     .unwrap_or(codex_app_server_protocol::ThreadStartSource::Startup)
                 {
@@ -4514,7 +4518,7 @@ fn build_thread_from_snapshot(
         cwd: config_snapshot.cwd().clone(),
         cli_version: env!("CARGO_PKG_VERSION").to_string(),
         agent_nickname: config_snapshot.session_source.get_nickname(),
-        agent_role: config_snapshot.session_source.get_agent_role(),
+        agent_role: config_snapshot.agent_role.clone(),
         source: config_snapshot.session_source.clone().into(),
         thread_source: config_snapshot.thread_source.clone().map(Into::into),
         git_info: None,

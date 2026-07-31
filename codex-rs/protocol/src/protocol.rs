@@ -2591,6 +2591,11 @@ impl InitialHistory {
             .and_then(|meta| meta.parent_thread_id)
     }
 
+    pub fn get_resumed_agent_role(&self) -> Option<String> {
+        self.get_resumed_session_meta()
+            .and_then(|meta| meta.agent_role.clone())
+    }
+
     fn get_resumed_session_meta(&self) -> Option<&SessionMeta> {
         match self {
             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
