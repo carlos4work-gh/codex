@@ -627,6 +627,8 @@ pub(crate) struct ParentTurnResponse {
 
 pub(crate) type ParentTurnResponseFuture<'a> =
     Pin<Box<dyn Future<Output = ParentTurnResponse> + Send + 'a>>;
+pub(crate) type ParentTurnResponsesFuture<'a> =
+    Pin<Box<dyn Future<Output = HashMap<(String, String), ParentTurnResponse>> + Send + 'a>>;
 
 pub(crate) trait ParentTurnResponseAdapter: Send + Sync {
     fn read_response<'a>(
@@ -634,6 +636,17 @@ pub(crate) trait ParentTurnResponseAdapter: Send + Sync {
         thread_id: &'a str,
         turn_id: &'a str,
     ) -> ParentTurnResponseFuture<'a>;
+
+    fn read_responses<'a>(&'a self, turns: Vec<(String, String)>) -> ParentTurnResponsesFuture<'a> {
+        Box::pin(async move {
+            let mut responses = HashMap::new();
+            for (thread_id, turn_id) in turns {
+                let response = self.read_response(&thread_id, &turn_id).await;
+                responses.insert((thread_id, turn_id), response);
+            }
+            responses
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -718,6 +731,77 @@ impl ParentTurnResponseAdapter for ThreadTurnsParentResponseAdapter {
                     item_ref: None,
                     text: None,
                 })
+        })
+    }
+
+    fn read_responses<'a>(&'a self, turns: Vec<(String, String)>) -> ParentTurnResponsesFuture<'a> {
+        Box::pin(async move {
+            let mut requested_by_thread = HashMap::<String, HashSet<String>>::new();
+            for (thread_id, turn_id) in turns {
+                requested_by_thread
+                    .entry(thread_id)
+                    .or_default()
+                    .insert(turn_id);
+            }
+
+            let mut responses = HashMap::new();
+            for (thread_id, mut requested_turn_ids) in requested_by_thread {
+                let mut cursor = None;
+                while !requested_turn_ids.is_empty() {
+                    let response = self
+                        .thread_processor
+                        .thread_turns_list(ThreadTurnsListParams {
+                            thread_id: thread_id.clone(),
+                            cursor: cursor.clone(),
+                            limit: Some(100),
+                            sort_direction: Some(SortDirection::Desc),
+                            items_view: Some(TurnItemsView::Full),
+                        })
+                        .await;
+                    let Ok(Some(ClientResponsePayload::ThreadTurnsList(page))) = response else {
+                        break;
+                    };
+
+                    for turn in page.data {
+                        if !requested_turn_ids.remove(&turn.id) {
+                            continue;
+                        }
+                        let status = turn.status.clone();
+                        let response = turn
+                            .items
+                            .iter()
+                            .rev()
+                            .find_map(|item| match item {
+                                ThreadItem::AgentMessage { id, text, .. } => {
+                                    Some(ParentTurnResponse {
+                                        status: Some(status.clone()),
+                                        item_ref: Some(format!(
+                                            "app-server://threads/{thread_id}/turns/{}/items/{id}",
+                                            turn.id
+                                        )),
+                                        text: Some(text.clone()),
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(ParentTurnResponse {
+                                status: Some(status),
+                                item_ref: None,
+                                text: None,
+                            });
+                        responses.insert((thread_id.clone(), turn.id), response);
+                    }
+
+                    let Some(next_cursor) = page.next_cursor else {
+                        break;
+                    };
+                    if cursor.as_deref() == Some(next_cursor.as_str()) {
+                        break;
+                    }
+                    cursor = Some(next_cursor);
+                }
+            }
+            responses
         })
     }
 }
@@ -2711,33 +2795,50 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosRoomActivityListParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
-        let state = self.state.lock().await;
-        let room = state
-            .rooms
-            .get(&params.room_id)
-            .cloned()
-            .ok_or_else(|| invalid_params(format!("unknown room id: {}", params.room_id)))?;
-        let participant_thread_ids = room
-            .participants
-            .iter()
-            .map(|participant| participant.thread_id.as_str())
-            .collect::<HashSet<_>>();
-        let mut deliveries = state
-            .arena_message_deliveries
-            .iter()
-            .filter(|delivery| delivery.arena_id == room.arena_id)
-            .filter(|delivery| {
-                params
-                    .round_id
-                    .as_ref()
-                    .map_or(true, |round_id| &delivery.round_id == round_id)
-            })
-            .filter(|delivery| {
-                participant_thread_ids.contains(delivery.sender_thread_id.as_str())
-                    || participant_thread_ids.contains(delivery.receiver_thread_id.as_str())
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        let (room, mut deliveries, room_activity_events, token_usage_refs) = {
+            let state = self.state.lock().await;
+            let room =
+                state.rooms.get(&params.room_id).cloned().ok_or_else(|| {
+                    invalid_params(format!("unknown room id: {}", params.room_id))
+                })?;
+            let participant_thread_ids = room
+                .participants
+                .iter()
+                .map(|participant| participant.thread_id.as_str())
+                .collect::<HashSet<_>>();
+            let deliveries = state
+                .arena_message_deliveries
+                .iter()
+                .filter(|delivery| delivery.arena_id == room.arena_id)
+                .filter(|delivery| {
+                    params
+                        .round_id
+                        .as_ref()
+                        .map_or(true, |round_id| &delivery.round_id == round_id)
+                })
+                .filter(|delivery| {
+                    participant_thread_ids.contains(delivery.sender_thread_id.as_str())
+                        || participant_thread_ids.contains(delivery.receiver_thread_id.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let room_activity_events = state
+                .room_activity_events
+                .get(&room.room_id)
+                .cloned()
+                .unwrap_or_default();
+            let token_usage_refs = state
+                .native_token_usage_refs
+                .iter()
+                .filter(|(key, _)| {
+                    participant_thread_ids
+                        .iter()
+                        .any(|thread_id| key.starts_with(&format!("{thread_id}::")))
+                })
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<_>>();
+            (room, deliveries, room_activity_events, token_usage_refs)
+        };
         deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
         if let Some(phase) = params.phase.as_ref() {
             deliveries.retain(|delivery| delivery.phase.as_deref() == Some(phase.as_str()));
@@ -2750,11 +2851,6 @@ impl MemythosRequestProcessor {
             .after_cursor
             .clone()
             .or_else(|| params.since_cursor.clone());
-        let room_activity_events = state
-            .room_activity_events
-            .get(&room.room_id)
-            .cloned()
-            .unwrap_or_default();
         let mut filtered_events = room_activity_events
             .into_iter()
             .filter(|event| {
@@ -2815,16 +2911,6 @@ impl MemythosRequestProcessor {
             })
             .count();
         let clean_close = active_turns == 0 && failed_turns == 0;
-        let token_usage_refs = state
-            .native_token_usage_refs
-            .iter()
-            .filter(|(key, _)| {
-                participant_thread_ids
-                    .iter()
-                    .any(|thread_id| key.starts_with(&format!("{thread_id}::")))
-            })
-            .map(|(_, value)| value.clone())
-            .collect::<Vec<_>>();
         let participants = room
             .participants
             .iter()
@@ -2919,10 +3005,43 @@ impl MemythosRequestProcessor {
             .iter()
             .map(|participant| parent_setup_for_participant(&room, participant))
             .collect::<Vec<_>>();
+        let requested_turns = deliveries
+            .iter()
+            .filter_map(|delivery| {
+                delivery
+                    .receiver_turn_id
+                    .as_ref()
+                    .map(|turn_id| (delivery.receiver_thread_id.clone(), turn_id.clone()))
+            })
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let native_turn_responses = self
+            .parent_turn_response_adapter
+            .read_responses(requested_turns)
+            .await;
         let turns = deliveries
             .iter()
             .filter_map(|delivery| {
-                room_activity_turn_from_delivery(&room, delivery, params.include_debug_refs)
+                let native_response = delivery.receiver_turn_id.as_ref().and_then(|turn_id| {
+                    native_turn_responses
+                        .get(&(delivery.receiver_thread_id.clone(), turn_id.clone()))
+                });
+                if delivery.status == "receiver_turn_completed"
+                    && native_response.and_then(|response| response.text.as_ref()).is_none()
+                {
+                    blockers.push(format!(
+                        "completed parent turn {} for thread {} has no readable native AgentMessage",
+                        delivery.receiver_turn_id.as_deref().unwrap_or("unknown"),
+                        delivery.receiver_thread_id
+                    ));
+                }
+                room_activity_turn_from_delivery(
+                    &room,
+                    delivery,
+                    native_response,
+                    params.include_debug_refs,
+                )
             })
             .collect::<Vec<_>>();
         let cursor = filtered_events
@@ -3354,6 +3473,7 @@ impl MemythosRequestProcessor {
 fn room_activity_turn_from_delivery(
     room: &MemythosRoom,
     delivery: &MemythosArenaMessageDelivery,
+    native_response: Option<&ParentTurnResponse>,
     include_debug_refs: bool,
 ) -> Option<MemythosRoomActivityTurn> {
     let turn_id = delivery.receiver_turn_id.clone()?;
@@ -3377,15 +3497,6 @@ fn room_activity_turn_from_delivery(
     if include_debug_refs {
         refs.extend(delivery.event_refs.clone());
     }
-    let event_ref = delivery
-        .receiver_response_event_ref
-        .clone()
-        .unwrap_or_else(|| {
-            format!(
-                "app-server://threads/{}/turns/{}",
-                delivery.receiver_thread_id, turn_id
-            )
-        });
     let parent_key = room
         .participants
         .iter()
@@ -3393,12 +3504,6 @@ fn room_activity_turn_from_delivery(
         .map(|participant| participant.parent_key.clone())
         .unwrap_or_else(|| arena_parent_key(&delivery.arena_id, &delivery.receiver_thread_id));
     let phase = delivery.phase.clone();
-    let human_highlight = phase.as_ref().map(|phase| {
-        compact_summary(format!(
-            "{} received {} for phase {phase}.",
-            parent_key, delivery.message_id
-        ))
-    });
     let technical_summary = compact_summary(format!(
         "{} delivered {} from {} to {} as {}",
         delivery.delivery_mechanism,
@@ -3407,6 +3512,47 @@ fn room_activity_turn_from_delivery(
         delivery.receiver_thread_id,
         delivery.status
     ));
+    let delivery_ref = format!(
+        "app-server://rooms/{}/deliveries/{}",
+        delivery.arena_id, delivery.delivery_id
+    );
+    let mut items = vec![MemythosRoomActivityItem {
+        item_id: Some(delivery.delivery_id.clone()),
+        item_type: Some("collab_call".to_string()),
+        kind: "collab_call".to_string(),
+        status: delivery.status.clone(),
+        summary: technical_summary.clone(),
+        text: None,
+        human_highlight: None,
+        technical_summary: Some(technical_summary),
+        artifact_ref: Some(delivery.message_id.clone()),
+        event_ref: delivery_ref,
+        refs: compact_event_refs(refs.clone()),
+    }];
+    if let Some(ParentTurnResponse {
+        item_ref: Some(item_ref),
+        text: Some(text),
+        ..
+    }) = native_response
+    {
+        let mut response_refs = refs;
+        if !response_refs.contains(item_ref) {
+            response_refs.push(item_ref.clone());
+        }
+        items.push(MemythosRoomActivityItem {
+            item_id: item_ref.rsplit('/').next().map(str::to_string),
+            item_type: Some("agentMessage".to_string()),
+            kind: "agent_message".to_string(),
+            status: "completed".to_string(),
+            summary: format!("Native AgentMessage response for turn {turn_id}."),
+            text: Some(text.clone()),
+            human_highlight: Some(text.clone()),
+            technical_summary: None,
+            artifact_ref: None,
+            event_ref: item_ref.clone(),
+            refs: compact_event_refs(response_refs),
+        });
+    }
     Some(MemythosRoomActivityTurn {
         parent_key,
         thread_id: delivery.receiver_thread_id.clone(),
@@ -3414,19 +3560,7 @@ fn room_activity_turn_from_delivery(
         round_id: Some(delivery.round_id.clone()),
         phase,
         status: status.to_string(),
-        items: vec![MemythosRoomActivityItem {
-            item_id: Some(delivery.delivery_id.clone()),
-            item_type: Some("collab_call".to_string()),
-            kind: "collab_call".to_string(),
-            status: delivery.status.clone(),
-            summary: technical_summary.clone(),
-            text: human_highlight.clone(),
-            human_highlight,
-            technical_summary: Some(technical_summary),
-            artifact_ref: Some(delivery.message_id.clone()),
-            event_ref,
-            refs: compact_event_refs(refs),
-        }],
+        items,
     })
 }
 
@@ -5273,7 +5407,6 @@ mod tests {
             .room_register(room_register_params())
             .await
             .unwrap();
-
         let response = processor
             .room_send(MemythosRoomSendInputParams {
                 room_id: "room-001".to_string(),
@@ -5437,7 +5570,7 @@ mod tests {
             Arc::new(FakeLivePeerParentDeliveryAdapter),
             Arc::new(FakeParentGoalSnapshotAdapter),
             Arc::new(RecordOnlyThreadConsolidationAdapter),
-            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(FakeParentTurnResponseAdapter),
         );
         processor
             .room_register(room_register_params())
@@ -5519,8 +5652,35 @@ mod tests {
         assert!(response.lifecycle.clean_close);
         assert_eq!(response.collab.completed_send_input_count, 1);
         assert_eq!(response.usage.token_usage_events, 1);
+        assert!(response.blockers.is_empty());
+        assert_eq!(response.turns[0].items.len(), 2);
+        let delivery_item = &response.turns[0].items[0];
+        assert_eq!(delivery_item.kind, "collab_call");
+        assert!(delivery_item.text.is_none());
+        assert!(delivery_item.human_highlight.is_none());
+        let response_item = &response.turns[0].items[1];
+        assert_eq!(response_item.kind, "agent_message");
+        assert_eq!(response_item.item_type.as_deref(), Some("agentMessage"));
+        assert_eq!(
+            response_item.text.as_deref(),
+            Some(
+                "Cierre conversacional OOTB de thread_risk para turn_for_thread_risk_message-003."
+            )
+        );
+        assert_eq!(response_item.human_highlight, response_item.text);
+        assert_eq!(
+            response_item.event_ref,
+            "app-server://threads/thread_risk/turns/turn_for_thread_risk_message-003/items/final-agent-message"
+        );
         assert!(
-            response.turns[0].items[0]
+            !response_item
+                .text
+                .as_deref()
+                .unwrap()
+                .contains(" received ")
+        );
+        assert!(
+            delivery_item
                 .refs
                 .iter()
                 .all(|event_ref| { !event_ref.contains("/events/") })
@@ -5559,6 +5719,81 @@ mod tests {
             panic!("expected MemythosRoomActivityList response");
         };
         assert!(judge_response.turns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn room_activity_list_blocks_completed_turn_without_native_agent_message() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+        );
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+        processor
+            .room_send_input(MemythosRoomSendInputParams {
+                room_id: "room-001".to_string(),
+                room_message_ref: "app-server://rooms/room-001/messages/message-missing"
+                    .to_string(),
+                delivery_ref: "app-server://rooms/room-001/deliveries/delivery-missing".to_string(),
+                from_parent_thread_id: Some("thread_growth".to_string()),
+                via_concierge_thread_id: None,
+                to_parent_thread_id: "thread_risk".to_string(),
+                source_parent_key: "case/bpm_e2e/arena/bettor/growth".to_string(),
+                target_parent_key: "case/bpm_e2e/arena/bettor/risk".to_string(),
+                message_kind: "peer_bet".to_string(),
+                message_authority: "peer_debate".to_string(),
+                human_instruction: false,
+                response_contract: "peer_response_contract".to_string(),
+                client_user_message_id: Some("message-missing".to_string()),
+                prompt: "Responde con tu cierre conversacional.".to_string(),
+                metadata: serde_json::Map::new(),
+                output_schema: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            processor
+                .record_native_turn_completed(
+                    "thread_risk",
+                    "turn_for_thread_risk_message-missing",
+                    "completed",
+                    None,
+                    None,
+                )
+                .await
+        );
+
+        let response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: None,
+                phase: None,
+                since_cursor: None,
+                after_cursor: None,
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(response) = response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+
+        assert_eq!(response.turns.len(), 1);
+        assert_eq!(response.turns[0].items.len(), 1);
+        assert_eq!(response.turns[0].items[0].kind, "collab_call");
+        assert!(response.turns[0].items[0].human_highlight.is_none());
+        assert!(
+            response
+                .blockers
+                .iter()
+                .any(|blocker| { blocker.contains("has no readable native AgentMessage") })
+        );
     }
 
     #[tokio::test]
