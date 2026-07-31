@@ -116,6 +116,7 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
@@ -619,6 +620,7 @@ pub(crate) trait ThreadConsolidationAdapter: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ParentTurnResponse {
+    pub(crate) status: Option<TurnStatus>,
     pub(crate) item_ref: Option<String>,
     pub(crate) text: Option<String>,
 }
@@ -647,6 +649,7 @@ impl ParentTurnResponseAdapter for RecordOnlyParentTurnResponseAdapter {
     ) -> ParentTurnResponseFuture<'a> {
         Box::pin(async {
             ParentTurnResponse {
+                status: None,
                 item_ref: None,
                 text: None,
             }
@@ -684,21 +687,25 @@ impl ParentTurnResponseAdapter for ThreadTurnsParentResponseAdapter {
                 .await;
             let Ok(Some(ClientResponsePayload::ThreadTurnsList(response))) = response else {
                 return ParentTurnResponse {
+                    status: None,
                     item_ref: None,
                     text: None,
                 };
             };
             let Some(turn) = response.data.iter().find(|turn| turn.id == turn_id) else {
                 return ParentTurnResponse {
+                    status: None,
                     item_ref: None,
                     text: None,
                 };
             };
+            let status = turn.status.clone();
             turn.items
                 .iter()
                 .rev()
                 .find_map(|item| match item {
                     ThreadItem::AgentMessage { id, text, .. } => Some(ParentTurnResponse {
+                        status: Some(status.clone()),
                         item_ref: Some(format!(
                             "app-server://threads/{thread_id}/turns/{turn_id}/items/{id}"
                         )),
@@ -707,6 +714,7 @@ impl ParentTurnResponseAdapter for ThreadTurnsParentResponseAdapter {
                     _ => None,
                 })
                 .unwrap_or(ParentTurnResponse {
+                    status: Some(status),
                     item_ref: None,
                     text: None,
                 })
@@ -1990,7 +1998,7 @@ impl MemythosRequestProcessor {
             )));
         }
 
-        let (room, source, target) = {
+        let (room, source, target, inherited_round_id, inherited_phase) = {
             let state = self.state.lock().await;
             let room = state
                 .rooms
@@ -2043,7 +2051,18 @@ impl MemythosRequestProcessor {
                         ))
                     })?
             };
-            (room, source, target)
+            let inherited_context = state
+                .arena_message_deliveries
+                .iter()
+                .rev()
+                .find(|delivery| {
+                    delivery.arena_id == room.arena_id
+                        && delivery.receiver_thread_id == current_thread_id
+                })
+                .map(|delivery| (delivery.round_id.clone(), delivery.phase.clone()));
+            let (inherited_round_id, inherited_phase) =
+                inherited_context.unwrap_or_else(|| ("agentic_room_turn".to_string(), None));
+            (room, source, target, inherited_round_id, inherited_phase)
         };
         if target.thread_id == current_thread_id {
             return Err(invalid_params(
@@ -2057,8 +2076,14 @@ impl MemythosRequestProcessor {
         let mut metadata = serde_json::Map::new();
         metadata.insert(
             "memythos_round_id".to_string(),
-            serde_json::Value::String("agentic_room_turn".to_string()),
+            serde_json::Value::String(inherited_round_id),
         );
+        if let Some(phase) = inherited_phase {
+            metadata.insert(
+                "memythos_phase".to_string(),
+                serde_json::Value::String(phase),
+            );
+        }
         metadata.insert(
             "memythos_source".to_string(),
             serde_json::Value::String("native_room_tool".to_string()),
@@ -2110,40 +2135,106 @@ impl MemythosRequestProcessor {
         target_turn_id: &str,
     ) -> Result<(String, String, Vec<String>), JSONRPCErrorError> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+        let mut completed_without_message_since = None;
+        let mut inferred_terminal_since = None;
         let mut event_refs = Vec::new();
         loop {
-            let completed = {
+            let mut native_delivery_status = None;
+            {
                 let state = self.state.lock().await;
-                state
-                    .arena_message_deliveries
-                    .iter()
-                    .find(|delivery| {
-                        delivery.receiver_thread_id == target_thread_id
-                            && delivery.receiver_turn_id.as_deref() == Some(target_turn_id)
-                    })
-                    .map(|delivery| {
-                        event_refs = delivery.event_refs.clone();
-                        delivery.status == "receiver_turn_completed"
-                    })
-                    .unwrap_or(false)
-            };
-            if completed {
-                for _ in 0..20 {
-                    let response = self
-                        .parent_turn_response_adapter
-                        .read_response(target_thread_id, target_turn_id)
-                        .await;
+                if let Some(delivery) = state.arena_message_deliveries.iter().find(|delivery| {
+                    delivery.receiver_thread_id == target_thread_id
+                        && delivery.receiver_turn_id.as_deref() == Some(target_turn_id)
+                }) {
+                    event_refs = delivery.event_refs.clone();
+                    native_delivery_status = Some(delivery.status.clone());
+                }
+            }
+
+            match native_delivery_status.as_deref() {
+                Some("receiver_turn_failed") => {
+                    return Err(invalid_params(format!(
+                        "parent turn {target_turn_id} failed"
+                    )));
+                }
+                Some("receiver_turn_interrupted") => {
+                    return Err(invalid_params(format!(
+                        "parent turn {target_turn_id} was interrupted"
+                    )));
+                }
+                _ => {}
+            }
+
+            let response = self
+                .parent_turn_response_adapter
+                .read_response(target_thread_id, target_turn_id)
+                .await;
+            match response.status {
+                Some(TurnStatus::Completed) => {
+                    inferred_terminal_since = None;
+                    let completed_ref = format!(
+                        "app-server://threads/{target_thread_id}/turns/{target_turn_id}/completed"
+                    );
+                    if !event_refs.contains(&completed_ref) {
+                        event_refs.push(completed_ref.clone());
+                    }
                     if let (Some(item_ref), Some(text)) = (response.item_ref, response.text) {
                         if !event_refs.contains(&item_ref) {
                             event_refs.push(item_ref.clone());
                         }
+                        let mut state = self.state.lock().await;
+                        if let Some(delivery) =
+                            state.arena_message_deliveries.iter_mut().find(|delivery| {
+                                delivery.receiver_thread_id == target_thread_id
+                                    && delivery.receiver_turn_id.as_deref() == Some(target_turn_id)
+                            })
+                        {
+                            delivery.status = "receiver_turn_completed".to_string();
+                            delivery.receiver_response_event_ref = Some(item_ref.clone());
+                            for event_ref in &event_refs {
+                                if !delivery.event_refs.contains(event_ref) {
+                                    delivery.event_refs.push(event_ref.clone());
+                                }
+                            }
+                        }
                         return Ok((item_ref, text, compact_event_refs(event_refs)));
                     }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let completed_since = completed_without_message_since
+                        .get_or_insert_with(tokio::time::Instant::now);
+                    if completed_since.elapsed() >= Duration::from_secs(2) {
+                        return Err(invalid_params(format!(
+                            "parent turn {target_turn_id} completed without a readable AgentMessage"
+                        )));
+                    }
                 }
-                return Err(invalid_params(format!(
-                    "parent turn {target_turn_id} completed without a readable AgentMessage"
-                )));
+                Some(TurnStatus::Failed) => {
+                    let inferred_since =
+                        inferred_terminal_since.get_or_insert_with(tokio::time::Instant::now);
+                    if inferred_since.elapsed() >= Duration::from_secs(2) {
+                        return Err(invalid_params(format!(
+                            "parent turn {target_turn_id} failed"
+                        )));
+                    }
+                }
+                Some(TurnStatus::Interrupted) => {
+                    // thread/turns/list rebuilds turns from persisted rollout plus the
+                    // active in-memory snapshot. Immediately after turn/start, the
+                    // persisted user input can be visible before TurnStarted marks the
+                    // thread active, so an in-progress turn can briefly be reconstructed
+                    // as interrupted. Native TurnAborted remains authoritative; only use
+                    // the reconstructed status after it stays stable.
+                    let inferred_since =
+                        inferred_terminal_since.get_or_insert_with(tokio::time::Instant::now);
+                    if inferred_since.elapsed() >= Duration::from_secs(2) {
+                        return Err(invalid_params(format!(
+                            "parent turn {target_turn_id} was interrupted"
+                        )));
+                    }
+                }
+                Some(TurnStatus::InProgress) | None => {
+                    completed_without_message_since = None;
+                    inferred_terminal_since = None;
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(invalid_params(format!(
@@ -3758,14 +3849,14 @@ fn setup_prompt_for_participant(
 ) -> String {
     if role == MemythosParentRole::RoomConcierge {
         return format!(
-            "Sos Room Concierge tecnico de la arena {} en el room {}. Tu stance es {}. Coordinas la conversacion entre padres, preservas linaje de pedidos y respuestas, no decidis negocio salvo autoridad explicita, y cuando un peer o concierge te habla no lo tratas como orden humana absoluta. Cuando el pedido requiere perspectivas de otros padres, usa las herramientas nativas memythos_room para descubrir participantes y consultar los roles pertinentes; integra sus cierres OOTB antes de responder.",
+            "Sos Room Concierge tecnico de la arena {} en el room {}. Tu stance es {}. Coordinas la conversacion entre padres, preservas linaje de pedidos y respuestas, no decidis negocio salvo autoridad explicita, y cuando un peer o concierge te habla no lo tratas como orden humana absoluta. Ante todo pedido humano que requiera una decision multirol, primero usa memythos_room.list_participants, despues consulta mediante memythos_room.send_message al menos un peer pertinente y al judge registrado, e integra sus cierres OOTB antes de responder. No reemplaces esas consultas con una respuesta individual ni afirmes consenso sin evidencia de los turnos de esos padres.",
             room.arena_id,
             room.room_id,
             stance.as_wire()
         );
     }
     format!(
-        "Sos un hilo padre de la arena {} en el room {}. Tu rol es {} y tu stance es {}. Vas a conversar por Room Concierge, no directo con otros padres. Si el mensaje viene de un peer o concierge, deliberas desde tu rol y devuelves tesis, limites, tradeoffs y necesidad de rollup si aplica.",
+        "Sos un hilo padre de la arena {} en el room {}. Tu rol es {} y tu stance es {}. Vas a conversar por Room Concierge, no directo con otros padres. Si el mensaje viene de un peer o concierge y abrio este turno, delibera desde tu rol y responde cerrando este mismo turno con tu AgentMessage final: app-server devuelve ese cierre automaticamente al caller. No invoques memythos_room.send_message para responder el pedido que abrio el turno actual, porque crearia una llamada reentrante. Usa memythos_room.send_message solamente para iniciar una consulta independiente adicional. Tu cierre debe incluir tesis, limites, tradeoffs y necesidad de rollup si aplica.",
         room.arena_id,
         room.room_id,
         participant.parent_role,
@@ -4010,6 +4101,8 @@ mod tests {
     use codex_app_server_protocol::MemythosArenaMessage;
     use codex_app_server_protocol::MemythosLayerKind;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     #[derive(Debug)]
     struct FakeLivePeerParentDeliveryAdapter;
@@ -4121,6 +4214,40 @@ mod tests {
         ) -> ParentTurnResponseFuture<'a> {
             Box::pin(async move {
                 ParentTurnResponse {
+                    status: Some(TurnStatus::Completed),
+                    item_ref: Some(format!(
+                        "app-server://threads/{thread_id}/turns/{turn_id}/items/final-agent-message"
+                    )),
+                    text: Some(format!(
+                        "Cierre conversacional OOTB de {thread_id} para {turn_id}."
+                    )),
+                }
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TransientInterruptedParentTurnResponseAdapter {
+        reads: AtomicUsize,
+    }
+
+    impl ParentTurnResponseAdapter for TransientInterruptedParentTurnResponseAdapter {
+        fn read_response<'a>(
+            &'a self,
+            thread_id: &'a str,
+            turn_id: &'a str,
+        ) -> ParentTurnResponseFuture<'a> {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if read == 0 {
+                    return ParentTurnResponse {
+                        status: Some(TurnStatus::Interrupted),
+                        item_ref: None,
+                        text: None,
+                    };
+                }
+                ParentTurnResponse {
+                    status: Some(TurnStatus::Completed),
                     item_ref: Some(format!(
                         "app-server://threads/{thread_id}/turns/{turn_id}/items/final-agent-message"
                     )),
@@ -4310,6 +4437,149 @@ mod tests {
         assert_eq!(participants[0].parent_role, "bettor");
         assert!(participants[0].is_current_parent);
         assert_eq!(participants[2].parent_role, "room_concierge");
+    }
+
+    #[tokio::test]
+    async fn room_tool_reconciles_parent_completion_that_precedes_delivery_registration() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(FakeParentTurnResponseAdapter),
+        );
+        processor
+            .room_register(room_register_params_with_concierge())
+            .await
+            .unwrap();
+
+        let response = processor
+            .room_tool_send_message(
+                "thread_concierge",
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: Some("case/bpm_e2e/arena/bettor/risk".to_string()),
+                    message: "Evalua esta alternativa desde riesgo.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "consultation".to_string(),
+                    response_contract: "Devuelve tesis, limites y proximo paso.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.target_thread_id, "thread_risk");
+        assert!(
+            response
+                .response_text
+                .contains("Cierre conversacional OOTB de thread_risk")
+        );
+        let state = processor.state.lock().await;
+        let delivery = state
+            .arena_message_deliveries
+            .last()
+            .expect("room tool should retain its native delivery");
+        assert_eq!(delivery.status, "receiver_turn_completed");
+        assert!(
+            delivery
+                .receiver_response_event_ref
+                .as_deref()
+                .is_some_and(|value| value.ends_with("/items/final-agent-message"))
+        );
+    }
+
+    #[tokio::test]
+    async fn room_tool_ignores_transient_interrupted_status_before_native_turn_starts() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(TransientInterruptedParentTurnResponseAdapter::default()),
+        );
+        processor
+            .room_register(room_register_params_with_concierge())
+            .await
+            .unwrap();
+
+        let response = processor
+            .room_tool_send_message(
+                "thread_concierge",
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: Some("case/bpm_e2e/arena/bettor/risk".to_string()),
+                    message: "Evalua esta alternativa desde riesgo.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "consultation".to_string(),
+                    response_contract: "Devuelve tesis, limites y proximo paso.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.target_thread_id, "thread_risk");
+        assert!(
+            response
+                .response_text
+                .contains("Cierre conversacional OOTB de thread_risk")
+        );
+    }
+
+    #[tokio::test]
+    async fn room_tool_inherits_round_and_phase_from_parent_inbound_delivery() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(FakeParentTurnResponseAdapter),
+        );
+        processor
+            .room_register(room_register_params_with_concierge())
+            .await
+            .unwrap();
+        {
+            let mut state = processor.state.lock().await;
+            state
+                .arena_message_deliveries
+                .push(MemythosArenaMessageDelivery {
+                    delivery_id: "human-intake-delivery".to_string(),
+                    message_id: "human-intake-message".to_string(),
+                    status: "receiver_turn_completed".to_string(),
+                    sender_thread_id: "human".to_string(),
+                    receiver_thread_id: "thread_concierge".to_string(),
+                    arena_id: "arena-room-001".to_string(),
+                    round_id: "intake-001".to_string(),
+                    phase: Some("human_intake".to_string()),
+                    delivery_mechanism: "room_loopback_send_input".to_string(),
+                    receiver_turn_id: Some("human-intake-turn".to_string()),
+                    receiver_response_event_ref: None,
+                    delivered_as_human_instruction: true,
+                    memory_replay_required: false,
+                    event_refs: Vec::new(),
+                    rejection_reason: None,
+                });
+        }
+
+        processor
+            .room_tool_send_message(
+                "thread_concierge",
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: Some("case/bpm_e2e/arena/bettor/risk".to_string()),
+                    message: "Evalua esta alternativa desde riesgo.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "consultation".to_string(),
+                    response_contract: "Devuelve tesis, limites y proximo paso.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let state = processor.state.lock().await;
+        let delivery = state
+            .arena_message_deliveries
+            .last()
+            .expect("room tool should retain its native delivery");
+        assert_eq!(delivery.round_id, "intake-001");
+        assert_eq!(delivery.phase.as_deref(), Some("human_intake"));
     }
 
     #[tokio::test]
@@ -4761,7 +5031,49 @@ mod tests {
         assert_eq!(setup.stance, MemythosParentStance::Coordination);
         assert!(setup.goal_ref.is_some());
         assert!(setup.setup_prompt.contains("Sos Room Concierge tecnico"));
-        assert!(setup.setup_prompt.contains("memythos_room"));
+        assert!(
+            setup
+                .setup_prompt
+                .contains("memythos_room.list_participants")
+        );
+        assert!(setup.setup_prompt.contains("memythos_room.send_message"));
+        assert!(
+            setup
+                .setup_prompt
+                .contains("al menos un peer pertinente y al judge")
+        );
+    }
+
+    #[test]
+    fn peer_parent_setup_closes_the_inbound_turn_without_recursive_room_call() {
+        let room = MemythosRoom {
+            room_id: "room-001".to_string(),
+            arena_id: "arena-001".to_string(),
+            case_id: "case-001".to_string(),
+            layer_id: "layer-001".to_string(),
+            topology: "cross_parent_room".to_string(),
+            participants: Vec::new(),
+        };
+        let participant = MemythosRoomParticipant {
+            parent_key: "case/arena/bettor/customer_flow".to_string(),
+            thread_id: "thread_bettor".to_string(),
+            parent_role: "bettor".to_string(),
+            stance_profile: "customer_flow".to_string(),
+            goal_ref: None,
+            authority_scope: Vec::new(),
+        };
+
+        let prompt = setup_prompt_for_participant(
+            MemythosParentRole::Bettor,
+            MemythosParentStance::CustomerFlow,
+            &room,
+            &participant,
+        );
+
+        assert!(prompt.contains("responde cerrando este mismo turno"));
+        assert!(prompt.contains("app-server devuelve ese cierre automaticamente"));
+        assert!(prompt.contains("No invoques memythos_room.send_message para responder el pedido"));
+        assert!(prompt.contains("solamente para iniciar una consulta independiente adicional"));
     }
 
     #[tokio::test]

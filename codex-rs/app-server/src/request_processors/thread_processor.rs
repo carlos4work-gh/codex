@@ -52,10 +52,12 @@ fn with_memythos_room_tools(dynamic_tools: Option<Vec<DynamicToolSpec>>) -> Vec<
             DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
                 name: "send_message".to_string(),
                 description: concat!(
-                    "Send a natural-language message to another independent parent. ",
+                    "Initiate a separate natural-language room act with another independent parent. ",
                     "For non-concierge parents the destination is always Room Concierge. ",
                     "The call waits for the destination parent turn to close and returns its ",
-                    "final OOTB AgentMessage."
+                    "final OOTB AgentMessage. Do not call this tool to answer the room message ",
+                    "that opened your current turn: complete the current turn with your final ",
+                    "AgentMessage, which app-server returns automatically to that caller."
                 )
                 .to_string(),
                 input_schema: serde_json::json!({

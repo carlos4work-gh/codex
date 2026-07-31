@@ -1,5 +1,6 @@
 use super::MEMYTHOS_ROOM_TOOL_NAMESPACE;
 use super::with_memythos_room_tools;
+use codex_app_server_protocol::DynamicToolNamespaceTool;
 use codex_app_server_protocol::DynamicToolSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
 
@@ -49,6 +50,44 @@ fn existing_memythos_room_namespace_is_preserved() {
     };
     assert_eq!(namespace.description, "custom room tools");
     assert!(namespace.tools.is_empty());
+}
+
+#[test]
+fn memythos_room_send_message_is_not_a_reply_transport() {
+    let tools = with_memythos_room_tools(None);
+    let namespace = tools
+        .iter()
+        .find_map(|tool| match tool {
+            DynamicToolSpec::Namespace(namespace)
+                if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE =>
+            {
+                Some(namespace)
+            }
+            _ => None,
+        })
+        .expect("Memythos room namespace should be registered");
+    let send_message = namespace
+        .tools
+        .iter()
+        .find_map(|tool| match tool {
+            DynamicToolNamespaceTool::Function(function) if function.name == "send_message" => {
+                Some(function)
+            }
+            _ => None,
+        })
+        .expect("send_message tool should be registered");
+
+    assert!(send_message.description.contains("Initiate a separate"));
+    assert!(
+        send_message
+            .description
+            .contains("Do not call this tool to answer")
+    );
+    assert!(
+        send_message
+            .description
+            .contains("app-server returns automatically")
+    );
 }
 
 mod thread_list_cwd_filter_tests {
