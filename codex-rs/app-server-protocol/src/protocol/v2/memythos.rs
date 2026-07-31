@@ -678,6 +678,9 @@ pub struct MemythosArenaMessage {
 pub struct MemythosArenaMessageDelivery {
     pub delivery_id: String,
     pub message_id: String,
+    /// Semantic message shown in room timelines. The execution prompt may wrap this
+    /// with transport context, but that envelope is not conversational content.
+    pub human_summary: String,
     pub status: String,
     pub sender_thread_id: String,
     pub receiver_thread_id: String,

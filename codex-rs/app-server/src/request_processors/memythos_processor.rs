@@ -1652,6 +1652,7 @@ impl MemythosRequestProcessor {
         let delivery = MemythosArenaMessageDelivery {
             delivery_id,
             message_id: params.message.message_id.clone(),
+            human_summary: params.message.human_summary.clone(),
             status: delivery_attempt.status,
             sender_thread_id: params.message.from_parent_thread_id,
             receiver_thread_id: params.message.to_parent_thread_id,
@@ -2153,7 +2154,9 @@ impl MemythosRequestProcessor {
         args: MemythosRoomToolSendToRoomArgs,
     ) -> Result<MemythosRoomToolResponse, JSONRPCErrorError> {
         if args.message.trim().is_empty() {
-            return Err(invalid_params("cross-room message must not be empty".to_string()));
+            return Err(invalid_params(
+                "cross-room message must not be empty".to_string(),
+            ));
         }
         if !matches!(
             args.authority.as_str(),
@@ -2189,7 +2192,9 @@ impl MemythosRequestProcessor {
                 .rooms
                 .get(&args.target_room_id)
                 .cloned()
-                .ok_or_else(|| invalid_params(format!("unknown target room: {}", args.target_room_id)))?;
+                .ok_or_else(|| {
+                    invalid_params(format!("unknown target room: {}", args.target_room_id))
+                })?;
             if source_room.room_id == target_room.room_id {
                 return Err(invalid_params(
                     "send_to_room requires a different target room; use send_message inside a room"
@@ -2697,6 +2702,7 @@ impl MemythosRequestProcessor {
         let delivery = MemythosArenaMessageDelivery {
             delivery_id,
             message_id: message.message_id.clone(),
+            human_summary: message.human_summary.clone(),
             status: "delivered_to_live_thread".to_string(),
             sender_thread_id: source_thread_id,
             receiver_thread_id: params.to_parent_thread_id.clone(),
@@ -3759,7 +3765,7 @@ fn room_activity_turn_from_delivery(
     }];
     if let Some(ParentTurnResponse {
         request_item_ref: Some(item_ref),
-        request_text: Some(text),
+        request_text: Some(_),
         ..
     }) = native_response
     {
@@ -3773,8 +3779,8 @@ fn room_activity_turn_from_delivery(
             kind: "user_message".to_string(),
             status: "completed".to_string(),
             summary: format!("Native UserMessage request for turn {turn_id}."),
-            text: Some(text.clone()),
-            human_highlight: Some(text.clone()),
+            text: Some(delivery.human_summary.clone()),
+            human_highlight: Some(delivery.human_summary.clone()),
             technical_summary: None,
             artifact_ref: None,
             event_ref: item_ref.clone(),
@@ -4934,7 +4940,10 @@ mod tests {
             .filter(|delivery| delivery.receiver_thread_id == "thread_tactical_concierge")
             .collect::<Vec<_>>();
         assert_eq!(cross_room_deliveries.len(), 2);
-        assert_eq!(cross_room_deliveries[0].phase.as_deref(), Some("delegate_to_tactical"));
+        assert_eq!(
+            cross_room_deliveries[0].phase.as_deref(),
+            Some("delegate_to_tactical")
+        );
         assert_eq!(
             cross_room_deliveries[1].phase.as_deref(),
             Some("resume_tactical_after_rollup")
@@ -5045,6 +5054,7 @@ mod tests {
                 .push(MemythosArenaMessageDelivery {
                     delivery_id: "human-intake-delivery".to_string(),
                     message_id: "human-intake-message".to_string(),
+                    human_summary: "Evalua el pedido humano de la arena.".to_string(),
                     status: "receiver_turn_completed".to_string(),
                     sender_thread_id: "human".to_string(),
                     receiver_thread_id: "thread_concierge".to_string(),
@@ -6031,11 +6041,16 @@ mod tests {
         assert_eq!(request_item.item_type.as_deref(), Some("userMessage"));
         assert_eq!(
             request_item.text.as_deref(),
-            Some(
-                "Pedido conversacional OOTB para thread_risk en turn_for_thread_risk_message-003."
-            )
+            Some("Apuesta y declara condiciones de ejecucion.")
         );
         assert_eq!(request_item.human_highlight, request_item.text);
+        assert!(
+            !request_item
+                .human_highlight
+                .as_deref()
+                .unwrap_or_default()
+                .contains("MEMYTHOS_PEER_PARENT_MESSAGE")
+        );
         assert_eq!(
             request_item.event_ref,
             "app-server://threads/thread_risk/turns/turn_for_thread_risk_message-003/items/user-message"
