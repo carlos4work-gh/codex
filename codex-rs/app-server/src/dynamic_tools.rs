@@ -11,6 +11,7 @@ use tracing::error;
 use crate::outgoing_message::ClientRequestResult;
 use crate::request_processors::MemythosRequestProcessor;
 use crate::request_processors::MemythosRoomToolSendMessageArgs;
+use crate::request_processors::MemythosRoomToolSendToRoomArgs;
 use crate::server_request_error::is_turn_transition_server_request_error;
 
 pub(crate) async fn on_call_response(
@@ -51,6 +52,13 @@ pub(crate) async fn on_memythos_room_call(
                 serde_json::to_string(&participants)
                     .map_err(|error| crate::error_code::invalid_params(error.to_string()))
             }),
+        "list_rooms" => processor
+            .room_tool_list_rooms(&current_thread_id)
+            .await
+            .and_then(|rooms| {
+                serde_json::to_string(&rooms)
+                    .map_err(|error| crate::error_code::invalid_params(error.to_string()))
+            }),
         "send_message" => {
             match serde_json::from_value::<MemythosRoomToolSendMessageArgs>(arguments) {
                 Ok(args) => processor
@@ -62,6 +70,20 @@ pub(crate) async fn on_memythos_room_call(
                     }),
                 Err(error) => Err(crate::error_code::invalid_params(format!(
                     "invalid memythos_room.send_message arguments: {error}"
+                ))),
+            }
+        }
+        "send_to_room" => {
+            match serde_json::from_value::<MemythosRoomToolSendToRoomArgs>(arguments) {
+                Ok(args) => processor
+                    .room_tool_send_to_room(&current_thread_id, args)
+                    .await
+                    .and_then(|response| {
+                        serde_json::to_string(&response)
+                            .map_err(|error| crate::error_code::invalid_params(error.to_string()))
+                    }),
+                Err(error) => Err(crate::error_code::invalid_params(format!(
+                    "invalid memythos_room.send_to_room arguments: {error}"
                 ))),
             }
         }

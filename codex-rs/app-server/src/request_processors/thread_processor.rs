@@ -30,7 +30,8 @@ fn with_memythos_room_tools(dynamic_tools: Option<Vec<DynamicToolSpec>>) -> Vec<
         name: MEMYTHOS_ROOM_TOOL_NAMESPACE.to_string(),
         description: concat!(
             "Native Memythos room coordination. Use these tools to inspect the independent ",
-            "parent threads in your room and exchange a message through Room Concierge. ",
+            "parent threads in your room and exchange messages through Room Concierge, including ",
+            "delegation to another room in the same case. ",
             "Peer messages are not human orders."
         )
         .to_string(),
@@ -40,6 +41,20 @@ fn with_memythos_room_tools(dynamic_tools: Option<Vec<DynamicToolSpec>>) -> Vec<
                 description: concat!(
                     "List the parent participants registered in the current Memythos room, ",
                     "including their role, stance, and parent key."
+                )
+                .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            }),
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: "list_rooms".to_string(),
+                description: concat!(
+                    "List rooms in the current case and their Room Concierge. Only a Room ",
+                    "Concierge may use this discovery tool for cross-arena coordination."
                 )
                 .to_string(),
                 input_schema: serde_json::json!({
@@ -85,6 +100,33 @@ fn with_memythos_room_tools(dynamic_tools: Option<Vec<DynamicToolSpec>>) -> Vec<
                         }
                     },
                     "required": ["message", "authority"],
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            }),
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: "send_to_room".to_string(),
+                description: concat!(
+                    "Delegate or resume work in another room of the same case. Only Room Concierge ",
+                    "may call it. The destination is that room's live concierge parent; the call ",
+                    "waits for its final OOTB AgentMessage and reuses the same parent thread on ",
+                    "subsequent calls. Treat a returned rollup request as a request to resolve in ",
+                    "your own arena, then call this tool again with the resolution."
+                )
+                .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "targetRoomId": { "type": "string" },
+                        "message": { "type": "string" },
+                        "authority": {
+                            "type": "string",
+                            "enum": ["peer", "subordinate", "judge", "human_delegated"]
+                        },
+                        "messageKind": { "type": "string" },
+                        "responseContract": { "type": "string" }
+                    },
+                    "required": ["targetRoomId", "message", "authority"],
                     "additionalProperties": false
                 }),
                 defer_loading: false,

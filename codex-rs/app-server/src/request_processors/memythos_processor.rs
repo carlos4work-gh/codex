@@ -162,6 +162,28 @@ pub(crate) struct MemythosRoomToolSendMessageArgs {
     pub(crate) response_contract: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MemythosRoomToolSendToRoomArgs {
+    pub(crate) target_room_id: String,
+    pub(crate) message: String,
+    pub(crate) authority: String,
+    #[serde(default = "default_cross_room_message_kind")]
+    pub(crate) message_kind: String,
+    #[serde(default = "default_cross_room_response_contract")]
+    pub(crate) response_contract: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MemythosRoomToolRoom {
+    pub(crate) room_id: String,
+    pub(crate) arena_id: String,
+    pub(crate) layer_id: String,
+    pub(crate) concierge_parent_key: String,
+    pub(crate) is_current_room: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MemythosRoomToolParticipant {
@@ -190,6 +212,14 @@ fn default_room_tool_message_kind() -> String {
 fn default_room_tool_response_contract() -> String {
     "Respond in natural language with your position, rationale, limits, and next action."
         .to_string()
+}
+
+fn default_cross_room_message_kind() -> String {
+    "cross_room_delegation".to_string()
+}
+
+fn default_cross_room_response_contract() -> String {
+    "Respond in natural language with the room outcome, unresolved definitions, and whether the caller should resume this same room.".to_string()
 }
 
 struct MemythosArenaPhaseUpdate {
@@ -2077,6 +2107,177 @@ impl MemythosRequestProcessor {
         Ok(participants)
     }
 
+    pub(crate) async fn room_tool_list_rooms(
+        &self,
+        current_thread_id: &str,
+    ) -> Result<Vec<MemythosRoomToolRoom>, JSONRPCErrorError> {
+        let state = self.state.lock().await;
+        let current_room = state
+            .rooms
+            .values()
+            .find(|room| {
+                room.participants.iter().any(|participant| {
+                    participant.thread_id == current_thread_id
+                        && participant.parent_role == "room_concierge"
+                })
+            })
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "thread {current_thread_id} is not a Room Concierge in a Memythos room"
+                ))
+            })?;
+        let mut rooms = state
+            .rooms
+            .values()
+            .filter(|room| room.case_id == current_room.case_id)
+            .filter_map(|room| {
+                room.participants
+                    .iter()
+                    .find(|participant| participant.parent_role == "room_concierge")
+                    .map(|concierge| MemythosRoomToolRoom {
+                        room_id: room.room_id.clone(),
+                        arena_id: room.arena_id.clone(),
+                        layer_id: room.layer_id.clone(),
+                        concierge_parent_key: concierge.parent_key.clone(),
+                        is_current_room: room.room_id == current_room.room_id,
+                    })
+            })
+            .collect::<Vec<_>>();
+        rooms.sort_by(|left, right| left.room_id.cmp(&right.room_id));
+        Ok(rooms)
+    }
+
+    pub(crate) async fn room_tool_send_to_room(
+        &self,
+        current_thread_id: &str,
+        args: MemythosRoomToolSendToRoomArgs,
+    ) -> Result<MemythosRoomToolResponse, JSONRPCErrorError> {
+        if args.message.trim().is_empty() {
+            return Err(invalid_params("cross-room message must not be empty".to_string()));
+        }
+        if !matches!(
+            args.authority.as_str(),
+            "peer" | "subordinate" | "judge" | "human_delegated"
+        ) {
+            return Err(invalid_params(format!(
+                "unsupported cross-room message authority: {}",
+                args.authority
+            )));
+        }
+
+        let (source_room, source, target_room, target) = {
+            let state = self.state.lock().await;
+            let source_room = state
+                .rooms
+                .values()
+                .find(|room| {
+                    room.participants.iter().any(|participant| {
+                        participant.thread_id == current_thread_id
+                            && participant.parent_role == "room_concierge"
+                    })
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    invalid_params(format!(
+                        "thread {current_thread_id} is not a Room Concierge in a Memythos room"
+                    ))
+                })?;
+            let source = room_participant_by_thread(&source_room, current_thread_id)
+                .cloned()
+                .expect("source concierge was validated");
+            let target_room = state
+                .rooms
+                .get(&args.target_room_id)
+                .cloned()
+                .ok_or_else(|| invalid_params(format!("unknown target room: {}", args.target_room_id)))?;
+            if source_room.room_id == target_room.room_id {
+                return Err(invalid_params(
+                    "send_to_room requires a different target room; use send_message inside a room"
+                        .to_string(),
+                ));
+            }
+            if source_room.case_id != target_room.case_id {
+                return Err(invalid_params(
+                    "cross-room delivery is restricted to rooms in the same case".to_string(),
+                ));
+            }
+            let target = target_room
+                .participants
+                .iter()
+                .find(|participant| participant.parent_role == "room_concierge")
+                .cloned()
+                .ok_or_else(|| {
+                    invalid_params(format!(
+                        "target room {} has no Room Concierge",
+                        target_room.room_id
+                    ))
+                })?;
+            (source_room, source, target_room, target)
+        };
+
+        let message_id = self.next_id("mem_cross_room_message", &self.next_delivery_id);
+        let room_message_ref = format!(
+            "app-server://rooms/{}/cross-room-messages/{message_id}",
+            source_room.room_id
+        );
+        let delivery_ref = format!("{room_message_ref}/delivery/{}", target_room.room_id);
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "memythos_round_id".to_string(),
+            serde_json::Value::String("cross_room_loopback".to_string()),
+        );
+        metadata.insert(
+            "memythos_phase".to_string(),
+            serde_json::Value::String(args.message_kind.clone()),
+        );
+        metadata.insert(
+            "memythos_source_room_id".to_string(),
+            serde_json::Value::String(source_room.room_id.clone()),
+        );
+        metadata.insert(
+            "memythos_source".to_string(),
+            serde_json::Value::String("native_cross_room_tool".to_string()),
+        );
+        let payload = self
+            .room_send_input(MemythosRoomSendInputParams {
+                room_id: target_room.room_id.clone(),
+                room_message_ref,
+                delivery_ref,
+                from_parent_thread_id: Some(current_thread_id.to_string()),
+                via_concierge_thread_id: None,
+                to_parent_thread_id: target.thread_id.clone(),
+                source_parent_key: source.parent_key,
+                target_parent_key: target.parent_key.clone(),
+                message_kind: args.message_kind,
+                message_authority: args.authority,
+                human_instruction: false,
+                response_contract: args.response_contract,
+                client_user_message_id: Some(message_id),
+                prompt: args.message,
+                metadata,
+                output_schema: None,
+            })
+            .await?;
+        let ClientResponsePayload::MemythosRoomSendInput(delivery_response) = payload else {
+            return Err(invalid_params(
+                "native cross-room tool received an unexpected delivery response".to_string(),
+            ));
+        };
+        let target_turn_id = delivery_response.delivery.turn_id.clone();
+        let (response_item_ref, response_text, event_refs) = self
+            .await_parent_turn_response(&target.thread_id, &target_turn_id)
+            .await?;
+        Ok(MemythosRoomToolResponse {
+            room_id: target_room.room_id,
+            target_parent_key: target.parent_key,
+            target_thread_id: target.thread_id,
+            target_turn_id,
+            response_item_ref,
+            response_text,
+            event_refs,
+        })
+    }
+
     pub(crate) async fn room_tool_send_message(
         &self,
         current_thread_id: &str,
@@ -2371,7 +2572,21 @@ impl MemythosRequestProcessor {
                     .clone()
                     .unwrap_or_else(|| "room_concierge".to_string())
             });
-        let source = room_participant_by_thread(&room, &source_thread_id);
+        let source = {
+            let state = self.state.lock().await;
+            room_participant_by_thread(&room, &source_thread_id)
+                .cloned()
+                .or_else(|| {
+                    state.rooms.values().find_map(|candidate_room| {
+                        if candidate_room.case_id != room.case_id {
+                            return None;
+                        }
+                        room_participant_by_thread(candidate_room, &source_thread_id)
+                            .filter(|participant| participant.parent_role == "room_concierge")
+                            .cloned()
+                    })
+                })
+        };
         if !params.human_instruction
             && source.is_none()
             && params
@@ -4020,7 +4235,7 @@ fn setup_prompt_for_participant(
 ) -> String {
     if role == MemythosParentRole::RoomConcierge {
         return format!(
-            "Sos Room Concierge tecnico de la arena {} en el room {}. Tu stance es {}. Coordinas la conversacion entre padres, preservas linaje de pedidos y respuestas, no decidis negocio salvo autoridad explicita, y cuando un peer o concierge te habla no lo tratas como orden humana absoluta. Ante todo pedido humano que requiera una decision multirol, primero usa memythos_room.list_participants, despues consulta mediante memythos_room.send_message al menos un peer pertinente y al judge registrado, e integra sus cierres OOTB antes de responder. No reemplaces esas consultas con una respuesta individual ni afirmes consenso sin evidencia de los turnos de esos padres.",
+            "Sos Room Concierge tecnico de la arena {} en el room {}. Tu stance es {}. Coordinas la conversacion entre padres, preservas linaje de pedidos y respuestas, no decidis negocio salvo autoridad explicita, y cuando un peer o concierge te habla no lo tratas como orden humana absoluta. Ante todo pedido humano que requiera una decision multirol, primero usa memythos_room.list_participants, despues consulta mediante memythos_room.send_message al menos un peer pertinente y al judge registrado, e integra sus cierres OOTB antes de responder. Si el resultado necesita trabajo de otra arena, usa memythos_room.list_rooms y memythos_room.send_to_room. Si esa arena devuelve un pedido de rollup, resuelvelo con tus padres y reanuda el mismo room mediante una segunda llamada a send_to_room; no inventes su respuesta ni reinicies su debate. No reemplaces esas consultas con una respuesta individual ni afirmes consenso sin evidencia de los turnos de esos padres.",
             room.arena_id,
             room.room_id,
             stance.as_wire()
@@ -4536,6 +4751,38 @@ mod tests {
         params
     }
 
+    fn second_room_register_params_with_concierge() -> MemythosRoomRegisterParams {
+        MemythosRoomRegisterParams {
+            room_id: "room-002".to_string(),
+            case_id: "case-001".to_string(),
+            layer_id: "tactical_operational".to_string(),
+            arena_id: "arena-room-002".to_string(),
+            topology: "cross_parent_room".to_string(),
+            participants: vec![
+                MemythosRoomParticipant {
+                    parent_key: "case/tactical/arena/room_concierge".to_string(),
+                    thread_id: "thread_tactical_concierge".to_string(),
+                    parent_role: "room_concierge".to_string(),
+                    stance_profile: "coordination".to_string(),
+                    goal_ref: Some(
+                        "app-server://threads/thread_tactical_concierge/goals/current".to_string(),
+                    ),
+                    authority_scope: vec!["room_coordination".to_string()],
+                },
+                MemythosRoomParticipant {
+                    parent_key: "case/tactical/arena/bettor/design".to_string(),
+                    thread_id: "thread_tactical_bettor".to_string(),
+                    parent_role: "bettor".to_string(),
+                    stance_profile: "customer_flow".to_string(),
+                    goal_ref: Some(
+                        "app-server://threads/thread_tactical_bettor/goals/current".to_string(),
+                    ),
+                    authority_scope: vec!["peer_debate".to_string()],
+                },
+            ],
+        }
+    }
+
     #[tokio::test]
     async fn room_registration_rejects_duplicate_threads() {
         let processor = MemythosRequestProcessor::new();
@@ -4622,6 +4869,76 @@ mod tests {
         assert_eq!(participants[0].parent_role, "bettor");
         assert!(participants[0].is_current_parent);
         assert_eq!(participants[2].parent_role, "room_concierge");
+    }
+
+    #[tokio::test]
+    async fn room_tool_delegates_and_resumes_the_same_cross_room_concierge_thread() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(FakeParentTurnResponseAdapter),
+        );
+        processor
+            .room_register(room_register_params_with_concierge())
+            .await
+            .unwrap();
+        processor
+            .room_register(second_room_register_params_with_concierge())
+            .await
+            .unwrap();
+
+        let rooms = processor
+            .room_tool_list_rooms("thread_concierge")
+            .await
+            .unwrap();
+        assert_eq!(rooms.len(), 2);
+        assert_eq!(rooms.iter().filter(|room| room.is_current_room).count(), 1);
+
+        let delegate = processor
+            .room_tool_send_to_room(
+                "thread_concierge",
+                MemythosRoomToolSendToRoomArgs {
+                    target_room_id: "room-002".to_string(),
+                    message: "Produce una bajada tactica y devuelve un rollup.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "delegate_to_tactical".to_string(),
+                    response_contract: "Devuelve un unico rollup.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let resume = processor
+            .room_tool_send_to_room(
+                "thread_concierge",
+                MemythosRoomToolSendToRoomArgs {
+                    target_room_id: "room-002".to_string(),
+                    message: "Reanuda con esta definicion resuelta.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "resume_tactical_after_rollup".to_string(),
+                    response_contract: "Devuelve cierre tactico final.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(delegate.target_thread_id, "thread_tactical_concierge");
+        assert_eq!(resume.target_thread_id, delegate.target_thread_id);
+        assert!(delegate.response_text.contains("thread_tactical_concierge"));
+        assert!(resume.response_text.contains("thread_tactical_concierge"));
+        let state = processor.state.lock().await;
+        let cross_room_deliveries = state
+            .arena_message_deliveries
+            .iter()
+            .filter(|delivery| delivery.receiver_thread_id == "thread_tactical_concierge")
+            .collect::<Vec<_>>();
+        assert_eq!(cross_room_deliveries.len(), 2);
+        assert_eq!(cross_room_deliveries[0].phase.as_deref(), Some("delegate_to_tactical"));
+        assert_eq!(
+            cross_room_deliveries[1].phase.as_deref(),
+            Some("resume_tactical_after_rollup")
+        );
     }
 
     #[tokio::test]
