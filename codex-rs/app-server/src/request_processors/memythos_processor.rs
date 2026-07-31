@@ -621,8 +621,55 @@ pub(crate) trait ThreadConsolidationAdapter: Send + Sync {
 #[derive(Debug, Clone)]
 pub(crate) struct ParentTurnResponse {
     pub(crate) status: Option<TurnStatus>,
+    pub(crate) request_item_ref: Option<String>,
+    pub(crate) request_text: Option<String>,
     pub(crate) item_ref: Option<String>,
     pub(crate) text: Option<String>,
+}
+
+fn parent_turn_response(
+    thread_id: &str,
+    turn: &codex_app_server_protocol::Turn,
+) -> ParentTurnResponse {
+    let request = turn.items.iter().find_map(|item| match item {
+        ThreadItem::UserMessage { id, content, .. } => {
+            let text = content
+                .iter()
+                .filter_map(|input| match input {
+                    UserInput::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then(|| {
+                (
+                    format!(
+                        "app-server://threads/{thread_id}/turns/{}/items/{id}",
+                        turn.id
+                    ),
+                    text,
+                )
+            })
+        }
+        _ => None,
+    });
+    let response = turn.items.iter().rev().find_map(|item| match item {
+        ThreadItem::AgentMessage { id, text, .. } => Some((
+            format!(
+                "app-server://threads/{thread_id}/turns/{}/items/{id}",
+                turn.id
+            ),
+            text.clone(),
+        )),
+        _ => None,
+    });
+    ParentTurnResponse {
+        status: Some(turn.status.clone()),
+        request_item_ref: request.as_ref().map(|(item_ref, _)| item_ref.clone()),
+        request_text: request.map(|(_, text)| text),
+        item_ref: response.as_ref().map(|(item_ref, _)| item_ref.clone()),
+        text: response.map(|(_, text)| text),
+    }
 }
 
 pub(crate) type ParentTurnResponseFuture<'a> =
@@ -663,6 +710,8 @@ impl ParentTurnResponseAdapter for RecordOnlyParentTurnResponseAdapter {
         Box::pin(async {
             ParentTurnResponse {
                 status: None,
+                request_item_ref: None,
+                request_text: None,
                 item_ref: None,
                 text: None,
             }
@@ -701,6 +750,8 @@ impl ParentTurnResponseAdapter for ThreadTurnsParentResponseAdapter {
             let Ok(Some(ClientResponsePayload::ThreadTurnsList(response))) = response else {
                 return ParentTurnResponse {
                     status: None,
+                    request_item_ref: None,
+                    request_text: None,
                     item_ref: None,
                     text: None,
                 };
@@ -708,29 +759,13 @@ impl ParentTurnResponseAdapter for ThreadTurnsParentResponseAdapter {
             let Some(turn) = response.data.iter().find(|turn| turn.id == turn_id) else {
                 return ParentTurnResponse {
                     status: None,
+                    request_item_ref: None,
+                    request_text: None,
                     item_ref: None,
                     text: None,
                 };
             };
-            let status = turn.status.clone();
-            turn.items
-                .iter()
-                .rev()
-                .find_map(|item| match item {
-                    ThreadItem::AgentMessage { id, text, .. } => Some(ParentTurnResponse {
-                        status: Some(status.clone()),
-                        item_ref: Some(format!(
-                            "app-server://threads/{thread_id}/turns/{turn_id}/items/{id}"
-                        )),
-                        text: Some(text.clone()),
-                    }),
-                    _ => None,
-                })
-                .unwrap_or(ParentTurnResponse {
-                    status: Some(status),
-                    item_ref: None,
-                    text: None,
-                })
+            parent_turn_response(thread_id, turn)
         })
     }
 
@@ -766,29 +801,7 @@ impl ParentTurnResponseAdapter for ThreadTurnsParentResponseAdapter {
                         if !requested_turn_ids.remove(&turn.id) {
                             continue;
                         }
-                        let status = turn.status.clone();
-                        let response = turn
-                            .items
-                            .iter()
-                            .rev()
-                            .find_map(|item| match item {
-                                ThreadItem::AgentMessage { id, text, .. } => {
-                                    Some(ParentTurnResponse {
-                                        status: Some(status.clone()),
-                                        item_ref: Some(format!(
-                                            "app-server://threads/{thread_id}/turns/{}/items/{id}",
-                                            turn.id
-                                        )),
-                                        text: Some(text.clone()),
-                                    })
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or(ParentTurnResponse {
-                                status: Some(status),
-                                item_ref: None,
-                                text: None,
-                            });
+                        let response = parent_turn_response(&thread_id, &turn);
                         responses.insert((thread_id.clone(), turn.id), response);
                     }
 
@@ -3530,6 +3543,30 @@ fn room_activity_turn_from_delivery(
         refs: compact_event_refs(refs.clone()),
     }];
     if let Some(ParentTurnResponse {
+        request_item_ref: Some(item_ref),
+        request_text: Some(text),
+        ..
+    }) = native_response
+    {
+        let mut request_refs = refs.clone();
+        if !request_refs.contains(item_ref) {
+            request_refs.push(item_ref.clone());
+        }
+        items.push(MemythosRoomActivityItem {
+            item_id: item_ref.rsplit('/').next().map(str::to_string),
+            item_type: Some("userMessage".to_string()),
+            kind: "user_message".to_string(),
+            status: "completed".to_string(),
+            summary: format!("Native UserMessage request for turn {turn_id}."),
+            text: Some(text.clone()),
+            human_highlight: Some(text.clone()),
+            technical_summary: None,
+            artifact_ref: None,
+            event_ref: item_ref.clone(),
+            refs: compact_event_refs(request_refs),
+        });
+    }
+    if let Some(ParentTurnResponse {
         item_ref: Some(item_ref),
         text: Some(text),
         ..
@@ -4349,6 +4386,12 @@ mod tests {
             Box::pin(async move {
                 ParentTurnResponse {
                     status: Some(TurnStatus::Completed),
+                    request_item_ref: Some(format!(
+                        "app-server://threads/{thread_id}/turns/{turn_id}/items/user-message"
+                    )),
+                    request_text: Some(format!(
+                        "Pedido conversacional OOTB para {thread_id} en {turn_id}."
+                    )),
                     item_ref: Some(format!(
                         "app-server://threads/{thread_id}/turns/{turn_id}/items/final-agent-message"
                     )),
@@ -4376,12 +4419,20 @@ mod tests {
                 if read == 0 {
                     return ParentTurnResponse {
                         status: Some(TurnStatus::Interrupted),
+                        request_item_ref: None,
+                        request_text: None,
                         item_ref: None,
                         text: None,
                     };
                 }
                 ParentTurnResponse {
                     status: Some(TurnStatus::Completed),
+                    request_item_ref: Some(format!(
+                        "app-server://threads/{thread_id}/turns/{turn_id}/items/user-message"
+                    )),
+                    request_text: Some(format!(
+                        "Pedido conversacional OOTB para {thread_id} en {turn_id}."
+                    )),
                     item_ref: Some(format!(
                         "app-server://threads/{thread_id}/turns/{turn_id}/items/final-agent-message"
                     )),
@@ -5653,12 +5704,26 @@ mod tests {
         assert_eq!(response.collab.completed_send_input_count, 1);
         assert_eq!(response.usage.token_usage_events, 1);
         assert!(response.blockers.is_empty());
-        assert_eq!(response.turns[0].items.len(), 2);
+        assert_eq!(response.turns[0].items.len(), 3);
         let delivery_item = &response.turns[0].items[0];
         assert_eq!(delivery_item.kind, "collab_call");
         assert!(delivery_item.text.is_none());
         assert!(delivery_item.human_highlight.is_none());
-        let response_item = &response.turns[0].items[1];
+        let request_item = &response.turns[0].items[1];
+        assert_eq!(request_item.kind, "user_message");
+        assert_eq!(request_item.item_type.as_deref(), Some("userMessage"));
+        assert_eq!(
+            request_item.text.as_deref(),
+            Some(
+                "Pedido conversacional OOTB para thread_risk en turn_for_thread_risk_message-003."
+            )
+        );
+        assert_eq!(request_item.human_highlight, request_item.text);
+        assert_eq!(
+            request_item.event_ref,
+            "app-server://threads/thread_risk/turns/turn_for_thread_risk_message-003/items/user-message"
+        );
+        let response_item = &response.turns[0].items[2];
         assert_eq!(response_item.kind, "agent_message");
         assert_eq!(response_item.item_type.as_deref(), Some("agentMessage"));
         assert_eq!(
