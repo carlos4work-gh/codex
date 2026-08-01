@@ -26,6 +26,7 @@ pub struct AgentRolePlannerCapabilities {
     pub participant_kinds: Vec<String>,
     pub required_companions: Vec<String>,
     pub incompatible_roles: Vec<String>,
+    pub allowed_stances: Vec<String>,
     pub relative_cost: Option<String>,
     pub relative_tool_use: Option<String>,
     pub supports_multiple_stances: bool,

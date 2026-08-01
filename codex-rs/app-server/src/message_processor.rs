@@ -33,6 +33,7 @@ use crate::request_processors::InitializeRequestProcessor;
 use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
 use crate::request_processors::MemythosRequestProcessor;
+use crate::request_processors::NativeArenaParentProvisioningAdapter;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
@@ -538,6 +539,12 @@ impl MessageProcessor {
             Arc::new(ThreadManagerParentConfigurationAdapter::new(Arc::clone(
                 &thread_manager,
             ))),
+            Arc::new(NativeArenaParentProvisioningAdapter::new(
+                Arc::clone(&thread_manager),
+                Arc::clone(&config),
+                thread_goal_processor.clone(),
+                thread_processor.clone(),
+            )),
         );
         *memythos_processor_holder
             .lock()
@@ -1218,6 +1225,11 @@ impl MessageProcessor {
             ClientRequest::MemythosArenaCreate { params, .. } => {
                 self.memythos_processor.arena_create(params).await.map(Some)
             }
+            ClientRequest::MemythosArenaCompositionProvision { params, .. } => self
+                .memythos_processor
+                .arena_composition_provision(params, request_id.connection_id)
+                .await
+                .map(Some),
             ClientRequest::MemythosArenaList { params, .. } => {
                 self.memythos_processor.arena_list(params).await.map(Some)
             }
@@ -1322,12 +1334,14 @@ impl MessageProcessor {
                 .map(Some),
             ClientRequest::MemythosRoomSendInput { params, .. } => self
                 .memythos_processor
-                .room_send_input(params)
+                .room_send_input_on_connection(params, request_id.connection_id)
                 .await
                 .map(Some),
-            ClientRequest::MemythosRoomSend { params, .. } => {
-                self.memythos_processor.room_send(params).await.map(Some)
-            }
+            ClientRequest::MemythosRoomSend { params, .. } => self
+                .memythos_processor
+                .room_send_on_connection(params, request_id.connection_id)
+                .await
+                .map(Some),
             ClientRequest::MemythosThreadConsolidate { params, .. } => self
                 .memythos_processor
                 .thread_consolidate(params)

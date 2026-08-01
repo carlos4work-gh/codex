@@ -743,6 +743,9 @@ pub struct AgentRolePlannerCapabilitiesToml {
     pub required_companions: Vec<String>,
     #[serde(default)]
     pub incompatible_roles: Vec<String>,
+    /// Semantic stances this role may adopt when an arena planner composes a team.
+    #[serde(default)]
+    pub allowed_stances: Vec<String>,
     pub relative_cost: Option<String>,
     pub relative_tool_use: Option<String>,
     #[serde(default)]

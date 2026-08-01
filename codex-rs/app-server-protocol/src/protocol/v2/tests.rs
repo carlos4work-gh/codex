@@ -70,6 +70,7 @@ fn memythos_agent_role_catalog_response_uses_stable_camel_case_contract() {
             has_locked_runtime_settings: true,
             planner_capabilities: Some(AgentRolePlannerCapabilities {
                 work_modes: vec!["competitive_debate".to_string()],
+                allowed_stances: vec!["growth".to_string(), "risk".to_string()],
                 required_companions: vec!["judge".to_string()],
                 supports_multiple_stances: true,
                 proposal_bearing: true,
@@ -93,6 +94,7 @@ fn memythos_agent_role_catalog_response_uses_stable_camel_case_contract() {
                     "participantKinds": [],
                     "requiredCompanions": ["judge"],
                     "incompatibleRoles": [],
+                    "allowedStances": ["growth", "risk"],
                     "relativeCost": null,
                     "relativeToolUse": null,
                     "supportsMultipleStances": true,

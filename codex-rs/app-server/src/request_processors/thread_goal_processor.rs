@@ -44,6 +44,57 @@ impl ThreadGoalRequestProcessor {
             .map(|()| None)
     }
 
+    pub(crate) async fn thread_goal_set_internal(
+        &self,
+        params: ThreadGoalSetParams,
+    ) -> Result<ThreadGoal, JSONRPCErrorError> {
+        if !self.config.features.enabled(Feature::Goals) {
+            return Err(invalid_request("goals feature is disabled"));
+        }
+
+        let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        self.reconcile_thread_goal_rollout(thread_id, &state_db)
+            .await?;
+        let listener_command_tx = {
+            let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+            let thread_state = thread_state.lock().await;
+            thread_state.listener_command_tx()
+        };
+        let outcome = self
+            .goal_service
+            .set_thread_goal(
+                &state_db,
+                GoalSetRequest {
+                    thread_id,
+                    objective: params
+                        .objective
+                        .as_deref()
+                        .map(GoalObjectiveUpdate::Set)
+                        .unwrap_or(GoalObjectiveUpdate::Keep),
+                    status: params.status.map(ThreadGoalStatus::to_core),
+                    token_budget: match params.token_budget {
+                        Some(token_budget) => GoalTokenBudgetUpdate::Set(token_budget),
+                        None => GoalTokenBudgetUpdate::Keep,
+                    },
+                },
+            )
+            .await
+            .map_err(goal_service_error)?;
+        let goal = ThreadGoal::from(outcome.goal.clone());
+        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+            && let Err(err) = thread
+                .append_rollout_items(&[outcome.thread_goal_updated_item()])
+                .await
+        {
+            warn!("failed to persist internal goal update for live thread {thread_id}: {err}");
+        }
+        self.emit_thread_goal_updated_ordered(thread_id, goal.clone(), listener_command_tx)
+            .await;
+        outcome.apply_runtime_effects(&self.goal_service).await;
+        Ok(goal)
+    }
+
     pub(crate) async fn thread_goal_get(
         &self,
         params: ThreadGoalGetParams,

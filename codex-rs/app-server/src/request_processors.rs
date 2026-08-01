@@ -520,6 +520,7 @@ pub(crate) use mcp_processor::McpRequestProcessor;
 pub(crate) use memythos_processor::MemythosRequestProcessor;
 pub(crate) use memythos_processor::MemythosRoomToolSendMessageArgs;
 pub(crate) use memythos_processor::MemythosRoomToolSendToRoomArgs;
+pub(crate) use memythos_processor::NativeArenaParentProvisioningAdapter;
 pub(crate) use memythos_processor::ThreadGoalParentSnapshotAdapter;
 pub(crate) use memythos_processor::ThreadManagerParentConfigurationAdapter;
 pub(crate) use memythos_processor::ThreadTurnsParentResponseAdapter;

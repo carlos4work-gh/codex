@@ -495,6 +495,112 @@ pub struct MemythosArenaCreateResponse {
     pub arena: MemythosArena,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosArenaDecisionMethod {
+    SingleExpert,
+    ExpertReview,
+    RankedSelection,
+    CompetitiveDebate,
+    BettingRound,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCompositionParticipant {
+    pub participant_id: String,
+    pub agent_role: String,
+    pub stance: String,
+    #[serde(default)]
+    pub authority_scope: Vec<String>,
+    pub role_objective: String,
+    pub expected_contribution: String,
+    pub exit_condition: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaRoundPolicy {
+    pub minimum_competing_positions: u32,
+    pub cross_read_required: bool,
+    pub objection_required: bool,
+    pub explicit_bet_required: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCompositionCoordination {
+    #[ts(optional = nullable)]
+    pub coordinator_participant_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub concierge_participant_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub judge_participant_id: Option<String>,
+    pub decision_method: MemythosArenaDecisionMethod,
+    #[ts(optional = nullable)]
+    pub round_policy: Option<MemythosArenaRoundPolicy>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCompositionContract {
+    pub contract_version: String,
+    pub arena_id: String,
+    pub shared_objective: String,
+    pub completion_criteria: Vec<String>,
+    pub participants: Vec<MemythosArenaCompositionParticipant>,
+    pub coordination: MemythosArenaCompositionCoordination,
+    pub rationale: String,
+    #[ts(optional = nullable)]
+    pub unresolved_role_gap: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCompositionProvisionParams {
+    pub case_id: String,
+    pub layer_id: String,
+    pub room_id: String,
+    #[ts(optional = nullable)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub upstream_authority_scope: Vec<String>,
+    pub contract: MemythosArenaCompositionContract,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCompositionLease {
+    pub participant_id: String,
+    pub parent_key: String,
+    pub thread_id: String,
+    pub role: String,
+    pub effective_agent_role: String,
+    pub stance: String,
+    pub lease_id: String,
+    pub lease_source: String,
+    pub memory_scope: String,
+    pub goal_ref: String,
+    pub status: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCompositionProvisionResponse {
+    pub contract: MemythosArenaCompositionContract,
+    pub room: MemythosRoom,
+    pub leases: Vec<MemythosArenaCompositionLease>,
+    pub event_refs: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

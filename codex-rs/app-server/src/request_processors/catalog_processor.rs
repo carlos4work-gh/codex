@@ -195,6 +195,7 @@ impl CatalogRequestProcessor {
                         participant_kinds: value.participant_kinds.clone(),
                         required_companions: value.required_companions.clone(),
                         incompatible_roles: value.incompatible_roles.clone(),
+                        allowed_stances: value.allowed_stances.clone(),
                         relative_cost: value.relative_cost.clone(),
                         relative_tool_use: value.relative_tool_use.clone(),
                         supports_multiple_stances: value.supports_multiple_stances,

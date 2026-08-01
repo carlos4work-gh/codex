@@ -581,6 +581,12 @@ client_request_definitions! {
         serialization: global_shared_read("memythos"),
         response: v2::MemythosArenaListResponse,
     },
+    #[experimental("memythos/arena/composition/provision")]
+    MemythosArenaCompositionProvision => "memythos/arena/composition/provision" {
+        params: v2::MemythosArenaCompositionProvisionParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaCompositionProvisionResponse,
+    },
     #[experimental("memythos/thread/attach")]
     MemythosThreadAttach => "memythos/thread/attach" {
         params: v2::MemythosThreadAttachParams,

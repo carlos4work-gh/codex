@@ -13,7 +13,9 @@ const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
 const MEMYTHOS_ROOM_TOOL_NAMESPACE: &str = "memythos_room";
 
-fn with_memythos_room_tools(dynamic_tools: Option<Vec<DynamicToolSpec>>) -> Vec<DynamicToolSpec> {
+pub(crate) fn with_memythos_room_tools(
+    dynamic_tools: Option<Vec<DynamicToolSpec>>,
+) -> Vec<DynamicToolSpec> {
     let mut dynamic_tools = dynamic_tools.unwrap_or_default();
     let already_registered = dynamic_tools.iter().any(|spec| {
         matches!(
@@ -2654,6 +2656,44 @@ impl ThreadRequestProcessor {
                 "thread",
             );
         }
+    }
+
+    /// Attach one initialized connection to a thread before exposing the thread to a caller.
+    ///
+    /// Unlike the broadcast-driven best-effort path above, composition provisioning uses this
+    /// method as part of its atomic commit boundary so a parent cannot become runnable before its
+    /// native app-server event stream is observable by the requesting connection.
+    pub(crate) async fn attach_thread_listener(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> Result<(), JSONRPCErrorError> {
+        let mut raw_events_enabled = false;
+        let thread = self
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+            .map_err(|_| invalid_request(format!("thread not loaded: {thread_id}")))?;
+        let config_snapshot = thread.config_snapshot().await;
+        let loaded_thread = build_thread_from_snapshot(
+            thread_id,
+            thread.session_configured().session_id.to_string(),
+            &config_snapshot,
+            thread.rollout_path(),
+        );
+        self.thread_watch_manager.upsert_thread(loaded_thread).await;
+        if let Some(parent_thread_id) = config_snapshot.parent_thread_id {
+            raw_events_enabled = self
+                .thread_state_manager
+                .thread_state(parent_thread_id)
+                .await
+                .lock()
+                .await
+                .experimental_raw_events;
+        }
+        self.ensure_conversation_listener(thread_id, connection_id, raw_events_enabled)
+            .await
+            .map(|_| ())
     }
 
     async fn thread_resume_inner(
