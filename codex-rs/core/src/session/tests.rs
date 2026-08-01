@@ -3401,6 +3401,7 @@ async fn set_rate_limits_retains_previous_credits() {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -3508,6 +3509,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -4037,6 +4039,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     }
@@ -4553,6 +4556,7 @@ enabled = false
             description: None,
             config_file: Some(role_path.to_path_buf()),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
     crate::agent::role::apply_role_to_config(&mut child_config, Some("custom"))
@@ -4904,6 +4908,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -5017,6 +5022,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -5263,6 +5269,7 @@ async fn make_session_with_config_and_rx(
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -5370,6 +5377,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -7078,6 +7086,7 @@ where
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools,
         user_shell_override: None,
     };

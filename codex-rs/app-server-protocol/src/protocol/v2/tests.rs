@@ -61,6 +61,49 @@ fn test_absolute_path() -> AbsolutePathBuf {
 }
 
 #[test]
+fn memythos_agent_role_catalog_response_uses_stable_camel_case_contract() {
+    let response = AgentRoleListResponse {
+        roles: vec![AgentRoleListEntry {
+            id: "bettor".to_string(),
+            description: Some("Develop an independent position.".to_string()),
+            origin: AgentRoleOrigin::UserConfigured,
+            has_locked_runtime_settings: true,
+            planner_capabilities: Some(AgentRolePlannerCapabilities {
+                work_modes: vec!["competitive_debate".to_string()],
+                required_companions: vec!["judge".to_string()],
+                supports_multiple_stances: true,
+                proposal_bearing: true,
+                ..Default::default()
+            }),
+        }],
+    };
+
+    assert_eq!(
+        serde_json::to_value(response).expect("serialize agent role catalog"),
+        json!({
+            "roles": [{
+                "id": "bettor",
+                "description": "Develop an independent position.",
+                "origin": "userConfigured",
+                "hasLockedRuntimeSettings": true,
+                "plannerCapabilities": {
+                    "workModes": ["competitive_debate"],
+                    "problemClasses": [],
+                    "authorityScopes": [],
+                    "participantKinds": [],
+                    "requiredCompanions": ["judge"],
+                    "incompatibleRoles": [],
+                    "relativeCost": null,
+                    "relativeToolUse": null,
+                    "supportsMultipleStances": true,
+                    "proposalBearing": true
+                }
+            }]
+        })
+    );
+}
+
+#[test]
 fn thread_sources_round_trip_as_scalar_labels() {
     for (source, label) in [
         (ThreadSource::User, "user"),

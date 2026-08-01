@@ -1096,6 +1096,11 @@ client_request_definitions! {
         serialization: global_shared_read("config"),
         response: v2::PermissionProfileListResponse,
     },
+    AgentRoleList => "agentRole/list" {
+        params: v2::AgentRoleListParams,
+        serialization: global_shared_read("config"),
+        response: v2::AgentRoleListResponse,
+    },
     ExperimentalFeatureEnablementSet => "experimentalFeature/enablement/set" {
         params: v2::ExperimentalFeatureEnablementSetParams,
         serialization: global("config"),
@@ -1946,6 +1951,22 @@ mod tests {
     fn request_id() -> RequestId {
         const REQUEST_ID: i64 = 1;
         RequestId::Integer(REQUEST_ID)
+    }
+
+    #[test]
+    fn memythos_agent_role_list_is_a_shared_native_rpc() -> Result<()> {
+        let request: ClientRequest = serde_json::from_value(json!({
+            "method": "agentRole/list",
+            "id": 1,
+            "params": {}
+        }))?;
+
+        assert_eq!(
+            request.serialization_scope(),
+            Some(ClientRequestSerializationScope::GlobalSharedRead("config"))
+        );
+        assert!(matches!(request, ClientRequest::AgentRoleList { .. }));
+        Ok(())
     }
 
     #[test]

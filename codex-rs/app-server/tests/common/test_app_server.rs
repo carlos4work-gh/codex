@@ -449,6 +449,12 @@ impl TestAppServer {
         self.send_request("thread/start", params).await
     }
 
+    /// Send an `agentRole/list` JSON-RPC request.
+    pub async fn send_agent_role_list_request(&mut self) -> anyhow::Result<i64> {
+        self.send_request("agentRole/list", Some(serde_json::json!({})))
+            .await
+    }
+
     /// Send a `thread/resume` JSON-RPC request.
     pub async fn send_thread_resume_request(
         &mut self,

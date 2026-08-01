@@ -6,6 +6,7 @@ use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
+use codex_app_server_protocol::AgentRoleListResponse;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
@@ -200,7 +201,7 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
 }
 
 #[tokio::test]
-async fn thread_start_composes_named_agent_role_with_root_developer_instructions() -> Result<()> {
+async fn memythos_agent_role_catalog_id_is_accepted_by_thread_start() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
@@ -219,6 +220,15 @@ personality = "pragmatic"
 
     let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let list_request_id = mcp.send_agent_role_list_request().await?;
+    let list_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_request_id)),
+    )
+    .await??;
+    let catalog = to_response::<AgentRoleListResponse>(list_response)?;
+    assert!(catalog.roles.iter().any(|role| role.id == "room_concierge"));
 
     let request_id = mcp
         .send_thread_start_request(ThreadStartParams {
