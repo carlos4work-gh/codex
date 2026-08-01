@@ -73,8 +73,13 @@ use codex_app_server_protocol::MemythosRoomActivityTurn;
 use codex_app_server_protocol::MemythosRoomActivityUsage;
 use codex_app_server_protocol::MemythosRoomActorKind;
 use codex_app_server_protocol::MemythosRoomActorRef;
+use codex_app_server_protocol::MemythosRoomDialogueEntry;
+use codex_app_server_protocol::MemythosRoomDialogueListParams;
+use codex_app_server_protocol::MemythosRoomDialogueListResponse;
 use codex_app_server_protocol::MemythosRoomListParams;
 use codex_app_server_protocol::MemythosRoomListResponse;
+use codex_app_server_protocol::MemythosRoomParentConfigurationListParams;
+use codex_app_server_protocol::MemythosRoomParentConfigurationListResponse;
 use codex_app_server_protocol::MemythosRoomParticipant;
 use codex_app_server_protocol::MemythosRoomRegisterParams;
 use codex_app_server_protocol::MemythosRoomRegisterResponse;
@@ -3354,18 +3359,6 @@ impl MemythosRequestProcessor {
                 }
             })
             .collect::<Vec<_>>();
-        let mut parent_configurations = Vec::with_capacity(room.participants.len());
-        for participant in &room.participants {
-            let snapshot = self
-                .parent_configuration_adapter
-                .read_configuration(&participant.thread_id)
-                .await;
-            parent_configurations.push(parent_configuration_for_participant(
-                &room,
-                participant,
-                snapshot,
-            ));
-        }
         let requested_turns = deliveries
             .iter()
             .filter_map(|delivery| {
@@ -3428,7 +3421,6 @@ impl MemythosRequestProcessor {
             returned_activity_scope: returned_activity_scope.to_string(),
             source_method: "memythos/room/activity/list".to_string(),
             events: filtered_events,
-            parent_configurations,
             participants,
             turns,
             lifecycle: MemythosRoomActivityLifecycle {
@@ -3459,6 +3451,222 @@ impl MemythosRequestProcessor {
                 token_usage_events: token_usage_refs.len(),
                 refs: token_usage_refs,
             },
+            blockers,
+        }
+        .into())
+    }
+
+    pub(crate) async fn room_parent_configuration_list(
+        &self,
+        params: MemythosRoomParentConfigurationListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let room = {
+            let state = self.state.lock().await;
+            state
+                .rooms
+                .get(&params.room_id)
+                .cloned()
+                .ok_or_else(|| invalid_params(format!("unknown room id: {}", params.room_id)))?
+        };
+        let mut configurations = Vec::with_capacity(room.participants.len());
+        let mut blockers = Vec::new();
+        for participant in &room.participants {
+            let snapshot = self
+                .parent_configuration_adapter
+                .read_configuration(&participant.thread_id)
+                .await;
+            let configuration = parent_configuration_for_participant(&room, participant, snapshot);
+            blockers.extend(
+                configuration
+                    .blockers
+                    .iter()
+                    .map(|blocker| format!("parent {}: {blocker}", participant.thread_id)),
+            );
+            configurations.push(configuration);
+        }
+        Ok(MemythosRoomParentConfigurationListResponse {
+            room_id: room.room_id,
+            arena_id: room.arena_id,
+            source_method: "memythos/room/parent-configuration/list".to_string(),
+            configurations,
+            blockers,
+        }
+        .into())
+    }
+
+    pub(crate) async fn room_dialogue_list(
+        &self,
+        params: MemythosRoomDialogueListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let (room, mut deliveries, input_events) = {
+            let state = self.state.lock().await;
+            let room =
+                state.rooms.get(&params.room_id).cloned().ok_or_else(|| {
+                    invalid_params(format!("unknown room id: {}", params.room_id))
+                })?;
+            let participant_thread_ids = room
+                .participants
+                .iter()
+                .map(|participant| participant.thread_id.as_str())
+                .collect::<HashSet<_>>();
+            let deliveries = state
+                .arena_message_deliveries
+                .iter()
+                .filter(|delivery| delivery.arena_id == room.arena_id)
+                .filter(|delivery| {
+                    participant_thread_ids.contains(delivery.sender_thread_id.as_str())
+                        || participant_thread_ids.contains(delivery.receiver_thread_id.as_str())
+                })
+                .filter(|delivery| {
+                    params
+                        .round_id
+                        .as_ref()
+                        .map_or(true, |round_id| &delivery.round_id == round_id)
+                })
+                .filter(|delivery| {
+                    params
+                        .phase
+                        .as_ref()
+                        .map_or(true, |phase| delivery.phase.as_ref() == Some(phase))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let input_events = state
+                .room_activity_events
+                .get(&room.room_id)
+                .into_iter()
+                .flatten()
+                .filter(|event| {
+                    event.channel == "human_like"
+                        && matches!(
+                            event.event_kind.as_str(),
+                            "human_intake_delivered" | "input_delivered"
+                        )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            (room, deliveries, input_events)
+        };
+        deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
+        let requested_turns = deliveries
+            .iter()
+            .filter_map(|delivery| {
+                delivery
+                    .receiver_turn_id
+                    .as_ref()
+                    .map(|turn_id| (delivery.receiver_thread_id.clone(), turn_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        let native_responses = self
+            .parent_turn_response_adapter
+            .read_responses(requested_turns)
+            .await;
+        let participant_by_thread = room
+            .participants
+            .iter()
+            .map(|participant| (participant.thread_id.as_str(), participant))
+            .collect::<HashMap<_, _>>();
+        let mut blockers = Vec::new();
+        let mut entries = Vec::new();
+        for delivery in &deliveries {
+            let Some(turn_id) = delivery.receiver_turn_id.as_ref() else {
+                continue;
+            };
+            let Some(input_event) = input_events
+                .iter()
+                .find(|event| event.turn_id.as_ref() == Some(turn_id))
+            else {
+                blockers.push(format!("turn {turn_id} has no native room input event"));
+                continue;
+            };
+            let native_response =
+                native_responses.get(&(delivery.receiver_thread_id.clone(), turn_id.clone()));
+            if let Some(item_ref) =
+                native_response.and_then(|response| response.request_item_ref.as_ref())
+            {
+                entries.push(MemythosRoomDialogueEntry {
+                    cursor: format!("{}:request", input_event.cursor),
+                    iteration: input_event.iteration,
+                    sequence: input_event.sequence.saturating_mul(2),
+                    room_id: room.room_id.clone(),
+                    arena_id: room.arena_id.clone(),
+                    thread_id: delivery.receiver_thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    round_id: Some(delivery.round_id.clone()),
+                    phase: delivery.phase.clone(),
+                    kind: "request".to_string(),
+                    sender: input_event.sender.clone(),
+                    recipient: input_event.recipient.clone(),
+                    text: delivery.human_summary.clone(),
+                    source_item_ref: item_ref.clone(),
+                    causal_ref: delivery.message_id.clone(),
+                });
+            } else {
+                blockers.push(format!(
+                    "turn {turn_id} request has no native UserMessage item ref"
+                ));
+            }
+            if let Some(response) = native_response {
+                match (response.item_ref.as_ref(), response.text.as_ref()) {
+                    (Some(item_ref), Some(text)) => {
+                        let sender = participant_by_thread
+                            .get(delivery.receiver_thread_id.as_str())
+                            .map(|participant| room_actor_ref_for_participant(participant))
+                            .unwrap_or_else(app_server_actor_ref);
+                        entries.push(MemythosRoomDialogueEntry {
+                            cursor: format!("{}:response", input_event.cursor),
+                            iteration: input_event.iteration,
+                            sequence: input_event.sequence.saturating_mul(2).saturating_add(1),
+                            room_id: room.room_id.clone(),
+                            arena_id: room.arena_id.clone(),
+                            thread_id: delivery.receiver_thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                            round_id: Some(delivery.round_id.clone()),
+                            phase: delivery.phase.clone(),
+                            kind: "response".to_string(),
+                            sender,
+                            recipient: input_event.sender.clone(),
+                            text: text.clone(),
+                            source_item_ref: item_ref.clone(),
+                            causal_ref: format!("{}:request", input_event.cursor),
+                        });
+                    }
+                    (None, Some(_)) | (Some(_), None) => blockers.push(format!(
+                        "turn {turn_id} has an incomplete native AgentMessage projection"
+                    )),
+                    (None, None) => {}
+                }
+            }
+        }
+        entries.sort_by_key(|entry| (entry.iteration, entry.sequence));
+        let mut after_cursor_applied = false;
+        if let Some(after_cursor) = params.after_cursor.as_deref() {
+            if let Some(index) = entries
+                .iter()
+                .position(|entry| entry.cursor == after_cursor)
+            {
+                entries = entries.into_iter().skip(index + 1).collect();
+                after_cursor_applied = true;
+            } else {
+                blockers.push(format!(
+                    "unknown or stale room dialogue cursor: {after_cursor}"
+                ));
+                entries.clear();
+            }
+        }
+        let has_more = params.limit.map_or(false, |limit| entries.len() > limit);
+        if let Some(limit) = params.limit {
+            entries.truncate(limit.clamp(1, 500));
+        }
+        let cursor = entries.last().map(|entry| entry.cursor.clone());
+        Ok(MemythosRoomDialogueListResponse {
+            room_id: room.room_id,
+            arena_id: room.arena_id,
+            source_method: "memythos/room/dialogue/list".to_string(),
+            cursor,
+            after_cursor_applied,
+            has_more,
+            entries,
             blockers,
         }
         .into())
@@ -5904,26 +6112,6 @@ mod tests {
         };
 
         assert_eq!(response.source_method, "memythos/room/activity/list");
-        assert_eq!(response.parent_configurations.len(), 2);
-        assert_eq!(
-            response.parent_configurations[0].registered_role,
-            MemythosParentRole::Bettor
-        );
-        assert_eq!(
-            response.parent_configurations[0].stance,
-            MemythosParentStance::Growth
-        );
-        assert_eq!(
-            response.parent_configurations[0]
-                .effective_agent_role
-                .as_deref(),
-            Some("native_role_for_thread_growth")
-        );
-        assert_eq!(
-            response.parent_configurations[0].personality.as_deref(),
-            Some("pragmatic")
-        );
-        assert!(response.parent_configurations[0].blockers.is_empty());
         assert_eq!(response.events.len(), 3);
         assert_eq!(response.events[0].event_kind, "room_registered");
         assert_eq!(response.events[0].sequence, 1);
@@ -5954,6 +6142,43 @@ mod tests {
         assert_eq!(response.events[2].sequence, 3);
         assert_eq!(response.next_cursor, response.cursor);
         assert!(!response.has_more);
+
+        let configuration = processor
+            .room_parent_configuration_list(MemythosRoomParentConfigurationListParams {
+                room_id: "room-001".to_string(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomParentConfigurationList(configuration) =
+            configuration
+        else {
+            panic!("expected MemythosRoomParentConfigurationList response");
+        };
+        assert_eq!(
+            configuration.source_method,
+            "memythos/room/parent-configuration/list"
+        );
+        assert_eq!(configuration.configurations.len(), 2);
+        assert_eq!(
+            configuration.configurations[0].registered_role,
+            MemythosParentRole::Bettor
+        );
+        assert_eq!(
+            configuration.configurations[0].stance,
+            MemythosParentStance::Growth
+        );
+        assert_eq!(
+            configuration.configurations[0]
+                .effective_agent_role
+                .as_deref(),
+            Some("native_role_for_thread_growth")
+        );
+        assert_eq!(
+            configuration.configurations[0].personality.as_deref(),
+            Some("pragmatic")
+        );
+        assert!(configuration.configurations[0].blockers.is_empty());
+        assert!(configuration.blockers.is_empty());
     }
 
     #[tokio::test]
@@ -6097,6 +6322,49 @@ mod tests {
                 .refs
                 .iter()
                 .all(|event_ref| { !event_ref.contains("/events/") })
+        );
+
+        let dialogue = processor
+            .room_dialogue_list(MemythosRoomDialogueListParams {
+                room_id: "room-001".to_string(),
+                round_id: Some("round-001".to_string()),
+                phase: Some("bet".to_string()),
+                after_cursor: None,
+                limit: Some(25),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomDialogueList(dialogue) = dialogue else {
+            panic!("expected MemythosRoomDialogueList response");
+        };
+        assert_eq!(dialogue.source_method, "memythos/room/dialogue/list");
+        assert_eq!(dialogue.entries.len(), 2);
+        assert!(dialogue.blockers.is_empty());
+        assert_eq!(dialogue.entries[0].kind, "request");
+        assert_eq!(
+            dialogue.entries[0].text,
+            "Place a bet and state execution conditions."
+        );
+        assert!(
+            dialogue.entries[0]
+                .source_item_ref
+                .ends_with("/user-message")
+        );
+        assert_eq!(dialogue.entries[1].kind, "response");
+        assert_eq!(
+            dialogue.entries[1].text,
+            "Cierre conversacional OOTB de thread_risk para turn_for_thread_risk_message-003."
+        );
+        assert!(
+            dialogue.entries[1]
+                .source_item_ref
+                .ends_with("/final-agent-message")
+        );
+        assert!(
+            dialogue
+                .entries
+                .iter()
+                .all(|entry| !entry.text.contains("Participant "))
         );
 
         let bet_response = processor

@@ -9835,6 +9835,83 @@
       ],
       "type": "object"
     },
+    "MemythosRoomDialogueEntry": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "causalRef": {
+          "type": "string"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "iteration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "phase": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recipient": {
+          "$ref": "#/definitions/MemythosRoomActorRef"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "roundId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sender": {
+          "$ref": "#/definitions/MemythosRoomActorRef"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sourceItemRef": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arenaId",
+        "causalRef",
+        "cursor",
+        "iteration",
+        "kind",
+        "recipient",
+        "roomId",
+        "sender",
+        "sequence",
+        "sourceItemRef",
+        "text",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
     "MemythosRoomParticipant": {
       "properties": {
         "authorityScope": {

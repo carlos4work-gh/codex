@@ -279,6 +279,7 @@ export type { MemythosRoomActivityTurn } from "./MemythosRoomActivityTurn";
 export type { MemythosRoomActivityUsage } from "./MemythosRoomActivityUsage";
 export type { MemythosRoomActorKind } from "./MemythosRoomActorKind";
 export type { MemythosRoomActorRef } from "./MemythosRoomActorRef";
+export type { MemythosRoomDialogueEntry } from "./MemythosRoomDialogueEntry";
 export type { MemythosRoomParticipant } from "./MemythosRoomParticipant";
 export type { MemythosRoomSendInputDelivery } from "./MemythosRoomSendInputDelivery";
 export type { MemythosRuntimeLifecycleState } from "./MemythosRuntimeLifecycleState";

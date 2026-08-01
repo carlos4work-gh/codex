@@ -1305,6 +1305,16 @@ impl MessageProcessor {
                 .room_activity_list(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosRoomParentConfigurationList { params, .. } => self
+                .memythos_processor
+                .room_parent_configuration_list(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomDialogueList { params, .. } => self
+                .memythos_processor
+                .room_dialogue_list(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosRoomTimelineGet { params, .. } => self
                 .memythos_processor
                 .room_timeline_get(params)

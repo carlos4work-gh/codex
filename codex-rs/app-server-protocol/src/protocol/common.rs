@@ -690,6 +690,18 @@ client_request_definitions! {
         serialization: global_shared_read("memythos"),
         response: v2::MemythosRoomActivityListResponse,
     },
+    #[experimental("memythos/room/parent-configuration/list")]
+    MemythosRoomParentConfigurationList => "memythos/room/parent-configuration/list" {
+        params: v2::MemythosRoomParentConfigurationListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosRoomParentConfigurationListResponse,
+    },
+    #[experimental("memythos/room/dialogue/list")]
+    MemythosRoomDialogueList => "memythos/room/dialogue/list" {
+        params: v2::MemythosRoomDialogueListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosRoomDialogueListResponse,
+    },
     #[experimental("memythos/room/timeline/get")]
     MemythosRoomTimelineGet => "memythos/room/timeline/get" {
         params: v2::MemythosRoomActivityListParams,
