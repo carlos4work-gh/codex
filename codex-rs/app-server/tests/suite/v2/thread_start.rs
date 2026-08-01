@@ -200,7 +200,7 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
 }
 
 #[tokio::test]
-async fn thread_start_applies_named_agent_role_to_root_thread() -> Result<()> {
+async fn thread_start_composes_named_agent_role_with_root_developer_instructions() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
@@ -223,6 +223,10 @@ personality = "pragmatic"
     let request_id = mcp
         .send_thread_start_request(ThreadStartParams {
             agent_role: Some("room_concierge".to_string()),
+            developer_instructions: Some(
+                "Coordinate arena-bpm-e2e until native room evidence satisfies its completion criteria."
+                    .to_string(),
+            ),
             thread_source: Some(ThreadSource::User),
             ..Default::default()
         })
@@ -274,6 +278,9 @@ personality = "pragmatic"
         model_request_body
             .contains("Coordinate the room and preserve each peer's independent authority.")
     );
+    assert!(model_request_body.contains(
+        "Coordinate arena-bpm-e2e until native room evidence satisfies its completion criteria."
+    ));
 
     Ok(())
 }

@@ -182,6 +182,10 @@ pub struct StartThreadOptions {
     pub config: Config,
     /// Named role for a root thread. It does not imply a subagent relationship.
     pub agent_role: Option<String>,
+    /// Additional root-thread context supplied by an app-server client.
+    /// This is composed after the named role is resolved and is not inherited
+    /// by subagents spawned through the native collaboration runtime.
+    pub root_developer_instructions: Option<String>,
     pub initial_history: InitialHistory,
     pub session_source: Option<SessionSource>,
     pub thread_source: Option<ThreadSource>,
@@ -607,6 +611,7 @@ impl ThreadManager {
         Box::pin(self.start_thread_with_options(StartThreadOptions {
             config,
             agent_role: None,
+            root_developer_instructions: None,
             initial_history: InitialHistory::New,
             session_source: None,
             thread_source: None,
@@ -638,6 +643,12 @@ impl ThreadManager {
             crate::agent::role::apply_role_to_config(&mut options.config, Some(agent_role))
                 .await
                 .map_err(CodexErr::InvalidRequest)?;
+            if let Some(root_instructions) = options.root_developer_instructions.take() {
+                options.config.developer_instructions = Some(compose_root_developer_instructions(
+                    options.config.developer_instructions.take(),
+                    root_instructions,
+                ));
+            }
         }
         let agent_control = self.agent_control_for_config(&options.config);
         let (resumed_session_source, resumed_thread_source) = options
@@ -1057,6 +1068,18 @@ impl ThreadManager {
             .as_ref()
             .and_then(|ops_log| ops_log.lock().ok().map(|log| log.clone()))
             .unwrap_or_default()
+    }
+}
+
+fn compose_root_developer_instructions(
+    role_instructions: Option<String>,
+    root_instructions: String,
+) -> String {
+    match role_instructions {
+        Some(role_instructions) if !role_instructions.trim().is_empty() => {
+            format!("{role_instructions}\n\n{root_instructions}")
+        }
+        _ => root_instructions,
     }
 }
 

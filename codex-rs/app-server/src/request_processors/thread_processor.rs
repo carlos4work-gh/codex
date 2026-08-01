@@ -1041,6 +1041,7 @@ impl ThreadRequestProcessor {
             thread_source,
             environments,
         } = params;
+        let root_developer_instructions = developer_instructions.clone();
         if sandbox.is_some() && permissions.is_some() {
             return Err(invalid_request(
                 "`permissions` cannot be combined with `sandbox`",
@@ -1091,6 +1092,7 @@ impl ThreadRequestProcessor {
                 config,
                 typesafe_overrides,
                 agent_role,
+                root_developer_instructions,
                 multi_agent_mode,
                 dynamic_tools,
                 selected_capability_roots.unwrap_or_default(),
@@ -1167,6 +1169,7 @@ impl ThreadRequestProcessor {
         config_overrides: Option<HashMap<String, serde_json::Value>>,
         typesafe_overrides: ConfigOverrides,
         agent_role: Option<String>,
+        root_developer_instructions: Option<String>,
         multi_agent_mode: Option<MultiAgentMode>,
         dynamic_tools: Option<Vec<DynamicToolSpec>>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
@@ -1282,6 +1285,7 @@ impl ThreadRequestProcessor {
             .start_thread_with_options(StartThreadOptions {
                 config,
                 agent_role,
+                root_developer_instructions,
                 initial_history: match session_start_source
                     .unwrap_or(codex_app_server_protocol::ThreadStartSource::Startup)
                 {

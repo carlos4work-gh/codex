@@ -747,6 +747,7 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         .start_thread_with_options(StartThreadOptions {
             config: test.config.clone(),
             agent_role: None,
+            root_developer_instructions: None,
             initial_history: InitialHistory::New,
             session_source: Some(SessionSource::SubAgent(SubAgentSource::Review)),
             thread_source: None,
