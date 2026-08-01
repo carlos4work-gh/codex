@@ -97,7 +97,10 @@ fn memythos_room_cross_room_tools_reuse_native_parent_turns() {
         .iter()
         .find_map(|tool| match tool {
             DynamicToolSpec::Namespace(namespace)
-                if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE => Some(namespace),
+                if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE =>
+            {
+                Some(namespace)
+            }
             _ => None,
         })
         .expect("Memythos room namespace should be registered");
@@ -121,7 +124,11 @@ fn memythos_room_cross_room_tools_reuse_native_parent_turns() {
         })
         .expect("send_to_room tool should be registered");
     assert!(send_to_room.description.contains("live concierge parent"));
-    assert!(send_to_room.description.contains("reuses the same parent thread"));
+    assert!(
+        send_to_room
+            .description
+            .contains("reuses the same parent thread")
+    );
 }
 
 mod thread_list_cwd_filter_tests {
@@ -880,6 +887,7 @@ mod thread_processor_behavior_tests {
             initial_turns_page: None,
         };
         let config_snapshot = ThreadConfigSnapshot {
+            agent_role: None,
             model: "gpt-5".to_string(),
             model_provider_id: "openai".to_string(),
             service_tier: Some("flex".to_string()),

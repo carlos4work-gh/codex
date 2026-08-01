@@ -8968,6 +8968,101 @@
       ],
       "type": "string"
     },
+    "MemythosParentConfiguration": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "authorityScope": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "blockers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "collaborationMode": {
+          "type": "string"
+        },
+        "configSources": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "effectiveAgentRole": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "goalRef": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lifecycleState": {
+          "type": "string"
+        },
+        "multiAgentMode": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentThreadId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "personality": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registeredRole": {
+          "$ref": "#/definitions/MemythosParentRole"
+        },
+        "roomId": {
+          "type": "string"
+        },
+        "sessionSource": {
+          "type": "string"
+        },
+        "stance": {
+          "$ref": "#/definitions/MemythosParentStance"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arenaId",
+        "collaborationMode",
+        "lifecycleState",
+        "registeredRole",
+        "roomId",
+        "sessionSource",
+        "stance",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "MemythosParentContinuityStatus": {
       "enum": [
         "noTurns",
@@ -9062,55 +9157,6 @@
         "peer"
       ],
       "type": "string"
-    },
-    "MemythosParentSetup": {
-      "properties": {
-        "arenaId": {
-          "type": "string"
-        },
-        "goalRef": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "promptLineage": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/MemythosPromptLineagePart"
-          },
-          "type": "array"
-        },
-        "promptOrigin": {
-          "$ref": "#/definitions/MemythosPromptOrigin"
-        },
-        "role": {
-          "$ref": "#/definitions/MemythosParentRole"
-        },
-        "roomId": {
-          "type": "string"
-        },
-        "setupPrompt": {
-          "type": "string"
-        },
-        "stance": {
-          "$ref": "#/definitions/MemythosParentStance"
-        },
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "arenaId",
-        "promptOrigin",
-        "role",
-        "roomId",
-        "setupPrompt",
-        "stance",
-        "threadId"
-      ],
-      "type": "object"
     },
     "MemythosParentStance": {
       "enum": [

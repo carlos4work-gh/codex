@@ -516,6 +516,7 @@ pub(crate) use memythos_processor::MemythosRequestProcessor;
 pub(crate) use memythos_processor::MemythosRoomToolSendMessageArgs;
 pub(crate) use memythos_processor::MemythosRoomToolSendToRoomArgs;
 pub(crate) use memythos_processor::ThreadGoalParentSnapshotAdapter;
+pub(crate) use memythos_processor::ThreadManagerParentConfigurationAdapter;
 pub(crate) use memythos_processor::ThreadTurnsParentResponseAdapter;
 pub(crate) use memythos_processor::TurnStartPeerParentDeliveryAdapter;
 pub(crate) use memythos_processor::TurnStartThreadConsolidationAdapter;

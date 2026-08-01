@@ -268,19 +268,36 @@ pub struct MemythosPromptLineagePart {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
-pub struct MemythosParentSetup {
+pub struct MemythosParentConfiguration {
     pub thread_id: String,
     pub room_id: String,
     pub arena_id: String,
-    pub role: MemythosParentRole,
+    pub registered_role: MemythosParentRole,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub effective_agent_role: Option<String>,
     pub stance: MemythosParentStance,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub goal_ref: Option<String>,
-    pub setup_prompt: String,
-    pub prompt_origin: MemythosPromptOrigin,
     #[serde(default)]
-    pub prompt_lineage: Vec<MemythosPromptLineagePart>,
+    pub authority_scope: Vec<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub personality: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub multi_agent_mode: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub parent_thread_id: Option<String>,
+    pub collaboration_mode: String,
+    pub session_source: String,
+    #[serde(default)]
+    pub config_sources: Vec<String>,
+    pub lifecycle_state: String,
+    #[serde(default)]
+    pub blockers: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -1043,7 +1060,7 @@ pub struct MemythosRoomActivityListResponse {
     #[serde(default)]
     pub events: Vec<MemythosRoomActivityEvent>,
     #[serde(default)]
-    pub parent_setups: Vec<MemythosParentSetup>,
+    pub parent_configurations: Vec<MemythosParentConfiguration>,
     pub participants: Vec<MemythosRoomActivityParticipant>,
     pub turns: Vec<MemythosRoomActivityTurn>,
     pub lifecycle: MemythosRoomActivityLifecycle,

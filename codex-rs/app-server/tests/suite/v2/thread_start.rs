@@ -270,9 +270,10 @@ personality = "pragmatic"
         .body_json::<Value>()
         .context("model request body should be JSON")?
         .to_string();
-    assert!(model_request_body.contains(
-        "Coordinate the room and preserve each peer's independent authority."
-    ));
+    assert!(
+        model_request_body
+            .contains("Coordinate the room and preserve each peer's independent authority.")
+    );
 
     Ok(())
 }

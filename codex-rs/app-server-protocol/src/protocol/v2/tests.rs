@@ -4059,6 +4059,7 @@ fn memythos_room_native_alias_methods_deserialize() {
             "messageKind": "ask_position",
             "messageAuthority": "peer_debate",
             "humanInstruction": false,
+            "humanSummary": "Ask the peer to challenge the proposal.",
             "responseContract": "natural_parent_closure",
             "clientUserMessageId": "message-001",
             "prompt": "No soy humano; soy peer de arena. Responde desde tu postura.",
