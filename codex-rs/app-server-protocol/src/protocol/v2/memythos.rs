@@ -560,6 +560,54 @@ pub struct MemythosArenaCompositionContract {
     pub unresolved_role_gap: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosArenaCompositionLifecycleState {
+    Provisioning,
+    ActiveProposals,
+    RecompositionRequested,
+    ApplyingRevision,
+    Closing,
+    Closed,
+    BlockedCatalogGap,
+    BlockedAuthority,
+    FailedProvisioning,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosArenaCompositionRevisionActionKind {
+    Add,
+    Keep,
+    Retire,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCompositionRevisionAction {
+    pub action: MemythosArenaCompositionRevisionActionKind,
+    pub participant_id: String,
+    #[ts(optional = nullable)]
+    pub thread_id: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCompositionRevision {
+    pub revision_id: String,
+    pub previous_version: u32,
+    pub next_version: u32,
+    pub previous_contract_ref: String,
+    pub trigger: String,
+    pub rationale: String,
+    pub actions: Vec<MemythosArenaCompositionRevisionAction>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -572,6 +620,9 @@ pub struct MemythosArenaCompositionProvisionParams {
     #[serde(default)]
     pub upstream_authority_scope: Vec<String>,
     pub contract: MemythosArenaCompositionContract,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub revision: Option<MemythosArenaCompositionRevision>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -596,6 +647,10 @@ pub struct MemythosArenaCompositionLease {
 #[ts(export_to = "v2/")]
 pub struct MemythosArenaCompositionProvisionResponse {
     pub contract: MemythosArenaCompositionContract,
+    pub composition_version: u32,
+    pub lifecycle_state: MemythosArenaCompositionLifecycleState,
+    #[ts(optional = nullable)]
+    pub applied_revision: Option<MemythosArenaCompositionRevision>,
     pub room: MemythosRoom,
     pub leases: Vec<MemythosArenaCompositionLease>,
     pub event_refs: Vec<String>,

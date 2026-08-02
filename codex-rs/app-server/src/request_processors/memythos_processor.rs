@@ -14,8 +14,10 @@ use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::MemythosArena;
 use codex_app_server_protocol::MemythosArenaCompositionLease;
+use codex_app_server_protocol::MemythosArenaCompositionLifecycleState;
 use codex_app_server_protocol::MemythosArenaCompositionProvisionParams;
 use codex_app_server_protocol::MemythosArenaCompositionProvisionResponse;
+use codex_app_server_protocol::MemythosArenaCompositionRevisionActionKind;
 use codex_app_server_protocol::MemythosArenaCreateParams;
 use codex_app_server_protocol::MemythosArenaCreateResponse;
 use codex_app_server_protocol::MemythosArenaDecisionMethod;
@@ -165,6 +167,7 @@ struct MemythosRuntimeState {
     rooms: HashMap<String, MemythosRoom>,
     thread_attachments: HashMap<String, MemythosThreadAttachment>,
     arena_parents: HashMap<String, MemythosArenaParent>,
+    arena_compositions: HashMap<String, MemythosArenaCompositionProvisionResponse>,
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
     room_activity_events: HashMap<String, Vec<MemythosRoomActivityEvent>>,
     structured_contracts: HashMap<String, MemythosStructuredContract>,
@@ -1636,6 +1639,7 @@ impl MemythosRequestProcessor {
                 rooms: HashMap::new(),
                 thread_attachments: HashMap::new(),
                 arena_parents: HashMap::new(),
+                arena_compositions: HashMap::new(),
                 arena_message_deliveries: Vec::new(),
                 room_activity_events: HashMap::new(),
                 structured_contracts: HashMap::new(),
@@ -1878,30 +1882,48 @@ impl MemythosRequestProcessor {
                 .validate_role_stance(&participant.agent_role, &participant.stance)?;
         }
 
+        let previous_composition = {
+            let state = self.state.lock().await;
+            state
+                .arena_compositions
+                .get(&params.contract.arena_id)
+                .cloned()
+        };
+        validate_arena_composition_revision(&params, previous_composition.as_ref())?;
+        let composition_version = previous_composition
+            .as_ref()
+            .map_or(1, |previous| previous.composition_version + 1);
+
         let participant_by_id = params
             .contract
             .participants
             .iter()
             .map(|participant| (participant.participant_id.as_str(), participant))
             .collect::<HashMap<_, _>>();
-        let reusable_threads = {
-            let state = self.state.lock().await;
-            state
-                .arena_parents
-                .values()
-                .filter(|parent| parent.arena_id == params.contract.arena_id)
-                .map(|parent| {
-                    (
-                        (parent.parent_role.clone(), parent.stance_profile.clone()),
-                        parent.thread_id.clone(),
-                    )
-                })
-                .collect::<HashMap<_, _>>()
-        };
+        let reusable_threads = previous_composition
+            .as_ref()
+            .zip(params.revision.as_ref())
+            .map(|(previous, revision)| {
+                revision
+                    .actions
+                    .iter()
+                    .filter(|action| {
+                        action.action == MemythosArenaCompositionRevisionActionKind::Keep
+                    })
+                    .filter_map(|action| {
+                        let lease = previous
+                            .leases
+                            .iter()
+                            .find(|lease| lease.participant_id == action.participant_id)?;
+                        Some((action.participant_id.clone(), lease.thread_id.clone()))
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
         let mut provisioned_parents = Vec::with_capacity(params.contract.participants.len());
         for participant in &params.contract.participants {
             let reusable_thread_id = reusable_threads
-                .get(&(participant.agent_role.clone(), participant.stance.clone()))
+                .get(&participant.participant_id)
                 .map(String::as_str);
             match self
                 .arena_parent_provisioning_adapter
@@ -2056,7 +2078,10 @@ impl MemythosRequestProcessor {
             )
             .collect::<Vec<_>>();
         let event_refs = vec![
-            format!("memythos://arenas/{}/composition", params.contract.arena_id),
+            format!(
+                "memythos://arenas/{}/compositions/{composition_version}",
+                params.contract.arena_id
+            ),
             format!("memythos://rooms/{}/registered", params.room_id),
         ];
 
@@ -2128,13 +2153,20 @@ impl MemythosRequestProcessor {
             ),
         );
 
-        Ok(MemythosArenaCompositionProvisionResponse {
+        let response = MemythosArenaCompositionProvisionResponse {
             contract: params.contract,
+            composition_version,
+            lifecycle_state: MemythosArenaCompositionLifecycleState::ActiveProposals,
+            applied_revision: params.revision,
             room,
             leases,
             event_refs,
-        }
-        .into())
+        };
+        state
+            .arena_compositions
+            .insert(response.contract.arena_id.clone(), response.clone());
+
+        Ok(response.into())
     }
 
     pub(crate) async fn thread_attach(
@@ -4966,6 +4998,149 @@ fn validate_arena_composition_contract(
     Ok(())
 }
 
+fn validate_arena_composition_revision(
+    params: &MemythosArenaCompositionProvisionParams,
+    previous: Option<&MemythosArenaCompositionProvisionResponse>,
+) -> Result<(), JSONRPCErrorError> {
+    let Some(previous) = previous else {
+        if params.revision.is_some() {
+            return Err(invalid_params(
+                "initial arena composition cannot declare a revision",
+            ));
+        }
+        return Ok(());
+    };
+    let revision = params.revision.as_ref().ok_or_else(|| {
+        invalid_params("an active arena composition requires an explicit add/keep/retire revision")
+    })?;
+    if revision.revision_id.trim().is_empty()
+        || revision.trigger.trim().is_empty()
+        || revision.rationale.trim().is_empty()
+        || revision.previous_contract_ref.trim().is_empty()
+    {
+        return Err(invalid_params(
+            "arena composition revision requires id, trigger, rationale, and previous contract ref",
+        ));
+    }
+    if revision.previous_version != previous.composition_version
+        || revision.next_version != previous.composition_version + 1
+    {
+        return Err(invalid_params(format!(
+            "arena composition revision version must advance {} -> {}",
+            previous.composition_version,
+            previous.composition_version + 1
+        )));
+    }
+    let expected_ref = previous.event_refs.first().cloned().unwrap_or_default();
+    if revision.previous_contract_ref != expected_ref {
+        return Err(invalid_params(format!(
+            "arena composition revision must reference previous contract {expected_ref}"
+        )));
+    }
+
+    let previous_participants = previous
+        .contract
+        .participants
+        .iter()
+        .map(|participant| (participant.participant_id.as_str(), participant))
+        .collect::<HashMap<_, _>>();
+    let next_participants = params
+        .contract
+        .participants
+        .iter()
+        .map(|participant| (participant.participant_id.as_str(), participant))
+        .collect::<HashMap<_, _>>();
+    let mut action_ids = HashSet::new();
+    for action in &revision.actions {
+        if !action_ids.insert(action.participant_id.as_str()) {
+            return Err(invalid_params(format!(
+                "duplicate revision action for participant {}",
+                action.participant_id
+            )));
+        }
+        if action.reason.trim().is_empty() {
+            return Err(invalid_params(format!(
+                "revision action for participant {} requires a reason",
+                action.participant_id
+            )));
+        }
+        match action.action {
+            MemythosArenaCompositionRevisionActionKind::Keep => {
+                let previous_participant = previous_participants
+                    .get(action.participant_id.as_str())
+                    .ok_or_else(|| invalid_params("keep action references a new participant"))?;
+                let next_participant = next_participants
+                    .get(action.participant_id.as_str())
+                    .ok_or_else(|| {
+                        invalid_params("kept participant is absent from next composition")
+                    })?;
+                if previous_participant.agent_role != next_participant.agent_role
+                    || previous_participant.stance != next_participant.stance
+                {
+                    return Err(invalid_params(format!(
+                        "live participant {} cannot change role or stance; retire and add a new participant",
+                        action.participant_id
+                    )));
+                }
+                let lease = previous
+                    .leases
+                    .iter()
+                    .find(|lease| lease.participant_id == action.participant_id)
+                    .ok_or_else(|| invalid_params("kept participant has no active lease"))?;
+                if action.thread_id.as_deref() != Some(lease.thread_id.as_str()) {
+                    return Err(invalid_params(format!(
+                        "kept participant {} must preserve thread {}",
+                        action.participant_id, lease.thread_id
+                    )));
+                }
+            }
+            MemythosArenaCompositionRevisionActionKind::Add => {
+                if previous_participants.contains_key(action.participant_id.as_str())
+                    || !next_participants.contains_key(action.participant_id.as_str())
+                    || action.thread_id.is_some()
+                {
+                    return Err(invalid_params(format!(
+                        "add action for {} must describe a new participant without a preselected thread",
+                        action.participant_id
+                    )));
+                }
+            }
+            MemythosArenaCompositionRevisionActionKind::Retire => {
+                let lease = previous
+                    .leases
+                    .iter()
+                    .find(|lease| lease.participant_id == action.participant_id)
+                    .ok_or_else(|| {
+                        invalid_params("retire action references a non-active participant")
+                    })?;
+                if next_participants.contains_key(action.participant_id.as_str())
+                    || action.thread_id.as_deref() != Some(lease.thread_id.as_str())
+                {
+                    return Err(invalid_params(format!(
+                        "retire action for {} must remove its exact active thread",
+                        action.participant_id
+                    )));
+                }
+            }
+        }
+    }
+    for participant_id in previous_participants.keys() {
+        if !action_ids.contains(participant_id) {
+            return Err(invalid_params(format!(
+                "previous participant {participant_id} requires keep or retire action"
+            )));
+        }
+    }
+    for participant_id in next_participants.keys() {
+        if !action_ids.contains(participant_id) {
+            return Err(invalid_params(format!(
+                "next participant {participant_id} requires keep or add action"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn native_token_usage_key(thread_id: &str, turn_id: &str) -> String {
     format!("{thread_id}::{turn_id}")
 }
@@ -5720,6 +5895,7 @@ mod tests {
             room_id: "room-composition".to_string(),
             cwd: None,
             upstream_authority_scope: vec!["business_process".to_string()],
+            revision: None,
             contract: codex_app_server_protocol::MemythosArenaCompositionContract {
                 contract_version: "1.0".to_string(),
                 arena_id: "arena-composition".to_string(),
@@ -5779,9 +5955,97 @@ mod tests {
             2
         );
         assert_eq!(response.room.participants.len(), 5);
+        assert_eq!(response.composition_version, 1);
+        assert_eq!(
+            response.lifecycle_state,
+            MemythosArenaCompositionLifecycleState::ActiveProposals
+        );
+        assert!(response.applied_revision.is_none());
         let state = processor.state.lock().await;
         assert_eq!(state.arena_parents.len(), 5);
         assert!(state.arenas.contains_key("arena-composition"));
+        assert!(state.arena_compositions.contains_key("arena-composition"));
+    }
+
+    #[tokio::test]
+    async fn arena_composition_requires_explicit_revision_and_reuses_only_kept_identity() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+        );
+        let first = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("initial composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(first) = first else {
+            panic!("expected initial composition response");
+        };
+
+        let implicit_error = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect_err("an active composition cannot be replaced implicitly");
+        assert!(
+            implicit_error
+                .message
+                .contains("explicit add/keep/retire revision")
+        );
+
+        let mut revised = competitive_composition_params();
+        revised.revision = Some(
+            codex_app_server_protocol::MemythosArenaCompositionRevision {
+                revision_id: "revision-2".to_string(),
+                previous_version: 1,
+                next_version: 2,
+                previous_contract_ref: first.event_refs[0].clone(),
+                trigger: "upstream_contract_changed".to_string(),
+                rationale: "Retain the valid team while applying the revised goal".to_string(),
+                actions: first
+                    .leases
+                    .iter()
+                    .map(|lease| {
+                        codex_app_server_protocol::MemythosArenaCompositionRevisionAction {
+                            action: MemythosArenaCompositionRevisionActionKind::Keep,
+                            participant_id: lease.participant_id.clone(),
+                            thread_id: Some(lease.thread_id.clone()),
+                            reason: "Role and stance remain required".to_string(),
+                        }
+                    })
+                    .collect(),
+            },
+        );
+        let second = processor
+            .arena_composition_provision(revised, ConnectionId(0))
+            .await
+            .expect("explicit revision should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(second) = second else {
+            panic!("expected revised composition response");
+        };
+        assert_eq!(second.composition_version, 2);
+        assert!(second.applied_revision.is_some());
+        assert!(
+            second
+                .leases
+                .iter()
+                .all(|lease| lease.lease_source == "reused")
+        );
+        assert_eq!(
+            first
+                .leases
+                .iter()
+                .map(|lease| lease.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            second
+                .leases
+                .iter()
+                .map(|lease| lease.thread_id.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
