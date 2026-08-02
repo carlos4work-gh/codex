@@ -3566,6 +3566,12 @@ impl MemythosRequestProcessor {
             )
         };
         validate_room_message_kind(decision_method.as_ref(), &args.message_kind)?;
+        validate_room_message_route(
+            decision_method.as_ref(),
+            &args.message_kind,
+            &source.parent_role,
+            &target.parent_role,
+        )?;
         if target.thread_id == current_thread_id {
             return Err(invalid_params(
                 "room message target must be a different parent thread".to_string(),
@@ -5324,7 +5330,7 @@ fn build_arena_intake_prompt(
         })
         .unwrap_or_else(|| "not required by the selected method".to_string());
     format!(
-        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. As coordinator, own the complete method through the Room Concierge; the client will only observe. For a competitive method, obtain independent proposals, require each proposal-bearing parent to cross-read and object to a peer, obtain explicit revised bets, then request an independent judge verdict. Use semantic room message kinds peer_proposal, peer_cross_read or peer_objection, peer_bet, and judge_verdict so native activity preserves phase evidence. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. As coordinator, own the complete method through the Room Concierge; the client will only observe. Begin by asking the Room Concierge to coordinate the selected method with message kind notify_coordinator. For a competitive method, the Room Concierge must obtain independent proposals from every proposal-bearing bettor with peer_proposal, require each bettor to cross-read and object with peer_cross_read or peer_objection, and then obtain one explicit revised commitment from every bettor with peer_bet. Only after those commitments exist, the Room Concierge must send exactly one verdict_request to the configured judge. That request must require the judge to identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, and state reopening signals. Never use verdict_request for peer comparison and never use judge_verdict to request a verdict. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
         params.request_origin,
         params.case_brief,
         params.layer_objective,
@@ -5352,6 +5358,43 @@ fn validate_room_message_kind(
         )));
     }
     Ok(())
+}
+
+fn validate_room_message_route(
+    decision_method: Option<&MemythosArenaDecisionMethod>,
+    message_kind: &str,
+    source_role: &str,
+    target_role: &str,
+) -> Result<(), JSONRPCErrorError> {
+    if !decision_method.is_some_and(|method| is_competitive_method(*method)) {
+        return Ok(());
+    }
+
+    let valid = match message_kind {
+        "peer_proposal" | "peer_cross_read" | "peer_objection" | "peer_bet" => {
+            (source_role == "room_concierge" && target_role == "bettor")
+                || (source_role == "bettor" && target_role == "room_concierge")
+        }
+        "verdict_request" => source_role == "room_concierge" && target_role == "judge",
+        "judge_verdict" => source_role == "judge" && target_role == "room_concierge",
+        "notify_coordinator" => {
+            (source_role == "room_concierge"
+                && matches!(target_role, "scrum_master" | "coordinator"))
+                || (matches!(source_role, "scrum_master" | "coordinator")
+                    && target_role == "room_concierge")
+        }
+        // Legacy protocol aliases remain available for old non-agentic callers. Native parents
+        // are instructed to use the explicit peer message kinds above.
+        "dispatch_proposals" | "dispatch_cross_read" | "dispatch_bets" | "request_judge" => true,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid_params(format!(
+            "competitive arena message route is invalid: {source_role} --{message_kind}--> {target_role}. Peer phases flow only between room_concierge and bettor; verdict_request flows room_concierge to judge; judge_verdict flows judge to room_concierge; notify_coordinator flows between room_concierge and coordinator"
+        )))
+    }
 }
 
 const MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS: usize = 240;
@@ -6728,6 +6771,36 @@ mod tests {
             Some("judge")
         );
         assert!(validate_room_message_kind(None, "consultation").is_ok());
+    }
+
+    #[test]
+    fn competitive_room_routes_phases_through_their_native_roles() {
+        let method = Some(&MemythosArenaDecisionMethod::BettingRound);
+        assert!(
+            validate_room_message_route(
+                method,
+                "notify_coordinator",
+                "scrum_master",
+                "room_concierge",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_room_message_route(method, "peer_bet", "room_concierge", "bettor",).is_ok()
+        );
+        assert!(
+            validate_room_message_route(method, "verdict_request", "room_concierge", "judge",)
+                .is_ok()
+        );
+        assert!(
+            validate_room_message_route(method, "verdict_request", "room_concierge", "bettor",)
+                .is_err()
+        );
+        assert!(
+            validate_room_message_route(method, "judge_verdict", "bettor", "room_concierge",)
+                .is_err()
+        );
+        assert!(validate_room_message_route(None, "consultation", "peer", "observer").is_ok());
     }
 
     #[test]
