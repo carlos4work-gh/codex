@@ -391,7 +391,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     config,
                     agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
                     root_developer_instructions: Some(
-                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Optimize team size only after preserving this invariant. Propose an effort intent for every participant. Set a positive token budget only when the semantic cost goal and work uncertainty justify a cap; otherwise leave it null. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Native method authorities such as coordinate and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent for every participant. Set a positive token budget only when the semantic cost goal and work uncertainty justify a cap; otherwise leave it null. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
                             .to_string(),
                     ),
                     initial_history: InitialHistory::New,
@@ -3488,7 +3488,7 @@ impl MemythosRequestProcessor {
             )));
         }
 
-        let (room, source, target, inherited_round_id, inherited_phase) = {
+        let (room, source, target, inherited_round_id, inherited_phase, decision_method) = {
             let state = self.state.lock().await;
             let room = state
                 .rooms
@@ -3552,8 +3552,20 @@ impl MemythosRequestProcessor {
                 .map(|delivery| (delivery.round_id.clone(), delivery.phase.clone()));
             let (inherited_round_id, inherited_phase) =
                 inherited_context.unwrap_or_else(|| ("agentic_room_turn".to_string(), None));
-            (room, source, target, inherited_round_id, inherited_phase)
+            let decision_method = state
+                .arena_compositions
+                .get(&room.arena_id)
+                .map(|composition| composition.contract.coordination.decision_method.clone());
+            (
+                room,
+                source,
+                target,
+                inherited_round_id,
+                inherited_phase,
+                decision_method,
+            )
         };
+        validate_room_message_kind(decision_method.as_ref(), &args.message_kind)?;
         if target.thread_id == current_thread_id {
             return Err(invalid_params(
                 "room message target must be a different parent thread".to_string(),
@@ -5273,7 +5285,7 @@ fn phase_from_message_kind(message_kind: &str) -> Option<String> {
             Some("cross_read".to_string())
         }
         "dispatch_bets" | "peer_bet" => Some("bet".to_string()),
-        "request_judge" | "judge_verdict" => Some("judge".to_string()),
+        "request_judge" | "verdict_request" | "judge_verdict" => Some("judge".to_string()),
         "notify_coordinator" => Some("learning".to_string()),
         _ => None,
     }
@@ -5326,6 +5338,20 @@ fn build_arena_intake_prompt(
         round_policy,
         participants,
     )
+}
+
+fn validate_room_message_kind(
+    decision_method: Option<&MemythosArenaDecisionMethod>,
+    message_kind: &str,
+) -> Result<(), JSONRPCErrorError> {
+    if decision_method.is_some_and(|method| is_competitive_method(method.clone()))
+        && phase_from_message_kind(message_kind).is_none()
+    {
+        return Err(invalid_params(format!(
+            "competitive arena room acts require an explicit semantic phase messageKind; {message_kind} is ambiguous. Use peer_proposal, peer_cross_read, peer_objection, peer_bet, verdict_request, judge_verdict, or notify_coordinator"
+        )));
+    }
+    Ok(())
 }
 
 const MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS: usize = 240;
@@ -5434,10 +5460,10 @@ fn validate_arena_composition_contract(
             )));
         }
         if !params.upstream_authority_scope.is_empty()
-            && participant
-                .authority_scope
-                .iter()
-                .any(|scope| !params.upstream_authority_scope.contains(scope))
+            && participant.authority_scope.iter().any(|scope| {
+                !is_native_method_authority(&participant.agent_role, scope)
+                    && !params.upstream_authority_scope.contains(scope)
+            })
         {
             return Err(invalid_params(format!(
                 "participant {} exceeds upstream authority scope",
@@ -5508,6 +5534,16 @@ fn validate_arena_composition_contract(
         }
     }
     Ok(())
+}
+
+fn is_native_method_authority(agent_role: &str, scope: &str) -> bool {
+    matches!(
+        (agent_role, scope),
+        ("room_concierge", "coordinate")
+            | ("scrum_master", "coordinate")
+            | ("coordinator", "coordinate")
+            | ("judge", "judge")
+    )
 }
 
 fn validate_arena_composition_revision(
@@ -6669,6 +6705,54 @@ mod tests {
             cost_goal: "Use the smallest sufficient arena".to_string(),
             composition_change_signal: None,
         }
+    }
+
+    #[test]
+    fn competitive_room_requires_explicit_semantic_message_kinds() {
+        assert!(
+            validate_room_message_kind(
+                Some(&MemythosArenaDecisionMethod::CompetitiveDebate),
+                "consultation",
+            )
+            .is_err()
+        );
+        assert!(
+            validate_room_message_kind(
+                Some(&MemythosArenaDecisionMethod::CompetitiveDebate),
+                "peer_proposal",
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            phase_from_message_kind("verdict_request").as_deref(),
+            Some("judge")
+        );
+        assert!(validate_room_message_kind(None, "consultation").is_ok());
+    }
+
+    #[test]
+    fn native_method_authority_does_not_consume_upstream_business_authority() {
+        let mut params = competitive_composition_params();
+        params.upstream_authority_scope = vec!["recommend".to_string()];
+        for participant in &mut params.contract.participants {
+            participant.authority_scope = match participant.agent_role.as_str() {
+                "room_concierge" | "scrum_master" => vec!["coordinate".to_string()],
+                "judge" => vec!["judge".to_string()],
+                _ => vec!["recommend".to_string()],
+            };
+        }
+
+        validate_arena_composition_contract(&params)
+            .expect("native coordination and judging authority belongs to the selected method");
+
+        params
+            .contract
+            .participants
+            .iter_mut()
+            .find(|participant| participant.agent_role == "bettor")
+            .expect("bettor")
+            .authority_scope = vec!["decide_business_policy".to_string()];
+        assert!(validate_arena_composition_contract(&params).is_err());
     }
 
     #[tokio::test]
