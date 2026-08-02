@@ -209,6 +209,7 @@ pub(crate) struct ProvisionedArenaParent {
     lease_id: String,
     lease_source: String,
     memory_scope: String,
+    goal: ThreadGoal,
     newly_created: bool,
 }
 
@@ -347,7 +348,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     config,
                     agent_role: None,
                     root_developer_instructions: Some(
-                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. For a competitive arena, create at least two proposal-bearing bettors with materially different stances, plus coordination and judging roles required by the catalog. Return only the requested structured contract."
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. For a competitive arena, create at least two proposal-bearing bettors with materially different stances, plus coordination and judging roles required by the catalog. Propose an effort intent for every participant. Set a positive token budget only when the semantic cost goal and work uncertainty justify a cap; otherwise leave it null. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
                             .to_string(),
                     ),
                     initial_history: InitialHistory::New,
@@ -604,11 +605,11 @@ impl ArenaParentProvisioningAdapter for NativeArenaParentProvisioningAdapter {
                     // arena delivers its first room turn. The native room delivery path
                     // activates the goal immediately after that turn is accepted.
                     status: Some(ThreadGoalStatus::Paused),
-                    token_budget: None,
+                    token_budget: Some(participant.token_budget),
                 })
                 .await;
-            match goal {
-                Ok(_) => {}
+            let goal = match goal {
+                Ok(goal) => goal,
                 Err(error) => {
                     if newly_created
                         && let Ok(parsed) = ThreadId::from_string(&thread_id)
@@ -618,7 +619,7 @@ impl ArenaParentProvisioningAdapter for NativeArenaParentProvisioningAdapter {
                     }
                     return Err(error);
                 }
-            }
+            };
             Ok(ProvisionedArenaParent {
                 participant_id: participant.participant_id.clone(),
                 goal_ref: format!("app-server://threads/{thread_id}/goal"),
@@ -640,6 +641,7 @@ impl ArenaParentProvisioningAdapter for NativeArenaParentProvisioningAdapter {
                     participant.agent_role,
                     participant.stance
                 ),
+                goal,
                 thread_id,
                 newly_created,
             })
@@ -664,6 +666,16 @@ impl ArenaParentProvisioningAdapter for NativeArenaParentProvisioningAdapter {
                 lease_id: String::new(),
                 lease_source: "rolled_back".to_string(),
                 memory_scope: String::new(),
+                goal: ThreadGoal {
+                    thread_id: thread_id.to_string(),
+                    objective: String::new(),
+                    status: ThreadGoalStatus::Paused,
+                    token_budget: None,
+                    tokens_used: 0,
+                    time_used_seconds: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                },
                 newly_created: false,
             })
         })
@@ -719,6 +731,16 @@ impl ArenaParentProvisioningAdapter for RecordOnlyArenaParentProvisioningAdapter
                 lease_id: String::new(),
                 lease_source: "rolled_back".to_string(),
                 memory_scope: String::new(),
+                goal: ThreadGoal {
+                    thread_id: thread_id.to_string(),
+                    objective: String::new(),
+                    status: ThreadGoalStatus::Paused,
+                    token_budget: None,
+                    tokens_used: 0,
+                    time_used_seconds: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                },
                 newly_created: false,
             })
         })
@@ -2473,10 +2495,18 @@ impl MemythosRequestProcessor {
                     lease_source: provisioned.lease_source.clone(),
                     memory_scope: provisioned.memory_scope.clone(),
                     goal_ref: provisioned.goal_ref.clone(),
+                    effort_intent: participant.effort_intent.clone(),
+                    token_budget: provisioned.goal.token_budget,
+                    goal_status: provisioned.goal.status,
                     status: "active".to_string(),
                 },
             )
             .collect::<Vec<_>>();
+        let planned_token_budget = if leases.iter().all(|lease| lease.token_budget.is_some()) {
+            Some(leases.iter().filter_map(|lease| lease.token_budget).sum())
+        } else {
+            None
+        };
         let event_refs = vec![
             format!(
                 "memythos://arenas/{}/compositions/{composition_version}",
@@ -2560,6 +2590,7 @@ impl MemythosRequestProcessor {
             applied_revision: params.revision,
             room,
             leases,
+            planned_token_budget,
             event_refs,
         };
         state
@@ -5267,6 +5298,7 @@ fn validate_arena_composition_contract(
     if contract.contract_version.trim().is_empty()
         || contract.arena_id.trim().is_empty()
         || contract.shared_objective.trim().is_empty()
+        || contract.effort_rationale.trim().is_empty()
         || contract.completion_criteria.is_empty()
         || contract.participants.is_empty()
     {
@@ -5315,9 +5347,16 @@ fn validate_arena_composition_contract(
         if participant.role_objective.trim().is_empty()
             || participant.expected_contribution.trim().is_empty()
             || participant.exit_condition.trim().is_empty()
+            || participant.effort_intent.trim().is_empty()
         {
             return Err(invalid_params(format!(
                 "participant {} has an incomplete role contract",
+                participant.participant_id
+            )));
+        }
+        if participant.token_budget.is_some_and(|budget| budget <= 0) {
+            return Err(invalid_params(format!(
+                "participant {} token budget must be positive when specified",
                 participant.participant_id
             )));
         }
@@ -6278,6 +6317,11 @@ mod tests {
         contract: MemythosArenaCompositionContract,
     }
 
+    struct ExpandingArenaCompositionPlanningAdapter {
+        initial_contract: MemythosArenaCompositionContract,
+        expanded_contract: MemythosArenaCompositionContract,
+    }
+
     impl ArenaCompositionPlanningAdapter for FakeArenaCompositionPlanningAdapter {
         fn plan<'a>(
             &'a self,
@@ -6286,6 +6330,28 @@ mod tests {
             _connection_id: ConnectionId,
         ) -> ArenaCompositionPlanningFuture<'a> {
             let contract = self.contract.clone();
+            Box::pin(async move {
+                Ok(PlannedArenaComposition {
+                    planner_thread_id: "planner-thread".to_string(),
+                    planner_turn_id: "planner-turn".to_string(),
+                    contract,
+                })
+            })
+        }
+    }
+
+    impl ArenaCompositionPlanningAdapter for ExpandingArenaCompositionPlanningAdapter {
+        fn plan<'a>(
+            &'a self,
+            _params: &'a MemythosArenaRequestParams,
+            previous: Option<&'a MemythosArenaCompositionProvisionResponse>,
+            _connection_id: ConnectionId,
+        ) -> ArenaCompositionPlanningFuture<'a> {
+            let contract = if previous.is_some() {
+                self.expanded_contract.clone()
+            } else {
+                self.initial_contract.clone()
+            };
             Box::pin(async move {
                 Ok(PlannedArenaComposition {
                     planner_thread_id: "planner-thread".to_string(),
@@ -6321,6 +6387,16 @@ mod tests {
                     lease_id: format!("lease::{}", participant.participant_id),
                     lease_source: if newly_created { "created" } else { "reused" }.to_string(),
                     memory_scope: format!("arena:{}", params.contract.arena_id),
+                    goal: ThreadGoal {
+                        thread_id: thread_id.clone(),
+                        objective: participant.role_objective.clone(),
+                        status: ThreadGoalStatus::Paused,
+                        token_budget: participant.token_budget,
+                        tokens_used: 0,
+                        time_used_seconds: 0,
+                        created_at: 0,
+                        updated_at: 0,
+                    },
                     thread_id,
                     newly_created,
                 })
@@ -6337,6 +6413,16 @@ mod tests {
                     lease_id: String::new(),
                     lease_source: "rolled_back".to_string(),
                     memory_scope: String::new(),
+                    goal: ThreadGoal {
+                        thread_id: thread_id.to_string(),
+                        objective: String::new(),
+                        status: ThreadGoalStatus::Paused,
+                        token_budget: None,
+                        tokens_used: 0,
+                        time_used_seconds: 0,
+                        created_at: 0,
+                        updated_at: 0,
+                    },
                     newly_created: false,
                 })
             })
@@ -6396,6 +6482,8 @@ mod tests {
                 role_objective: format!("Fulfil the {participant_id} responsibility"),
                 expected_contribution: format!("Independent contribution from {participant_id}"),
                 exit_condition: format!("{participant_id} has delivered its position"),
+                effort_intent: "proportionate to uncertainty and decision impact".to_string(),
+                token_budget: Some(20_000),
             }
         };
         MemythosArenaCompositionProvisionParams {
@@ -6429,6 +6517,9 @@ mod tests {
                         explicit_bet_required: true,
                     }),
                 },
+                effort_rationale:
+                    "Allocate bounded effort while preserving both independent positions"
+                        .to_string(),
                 rationale: "Two independent bettors prevent a fake round".to_string(),
                 unresolved_role_gap: None,
             },
@@ -6481,6 +6572,10 @@ mod tests {
         assert_eq!(response.planner_thread_id, "planner-thread");
         assert_eq!(response.planner_turn_id, "planner-turn");
         assert_eq!(response.composition.leases.len(), 5);
+        assert_eq!(response.composition.planned_token_budget, Some(100_000));
+        assert!(response.composition.leases.iter().all(|lease| {
+            lease.goal_status == ThreadGoalStatus::Paused && lease.token_budget == Some(20_000)
+        }));
         assert_eq!(
             response
                 .composition
@@ -6551,6 +6646,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn arena_request_can_expand_after_a_budget_or_evidence_gap_without_restarting_parents() {
+        let initial_contract = competitive_composition_params().contract;
+        let mut expanded_contract = initial_contract.clone();
+        let mut reality = expanded_contract
+            .participants
+            .iter()
+            .find(|participant| participant.participant_id == "bettor-risk")
+            .expect("risk participant fixture")
+            .clone();
+        reality.participant_id = "reality-observer".to_string();
+        reality.agent_role = "observer".to_string();
+        reality.stance = "reality_fit".to_string();
+        reality.role_objective = "Test the decision against current reality".to_string();
+        reality.expected_contribution = "Independent reality evidence".to_string();
+        reality.effort_intent = "Focused validation of the material evidence gap".to_string();
+        reality.token_budget = None;
+        expanded_contract.participants.push(reality);
+        expanded_contract.effort_rationale =
+            "Keep the valid parents and add one open-budget reality check".to_string();
+
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(ExpandingArenaCompositionPlanningAdapter {
+                initial_contract,
+                expanded_contract,
+            }),
+        );
+
+        let first = processor
+            .arena_request(semantic_arena_request_params(), ConnectionId(7))
+            .await
+            .expect("initial semantic request should provision");
+        let ClientResponsePayload::MemythosArenaRequest(first) = first else {
+            panic!("expected initial semantic arena request response");
+        };
+        let original_threads = first
+            .composition
+            .leases
+            .iter()
+            .map(|lease| (lease.participant_id.clone(), lease.thread_id.clone()))
+            .collect::<HashMap<_, _>>();
+
+        let mut update = semantic_arena_request_params();
+        update.composition_change_signal = Some(
+            "The current parents reached their bounded goal but exposed a material reality-evidence gap; preserve their conclusions and add only the missing perspective"
+                .to_string(),
+        );
+        let second = processor
+            .arena_request(update, ConnectionId(7))
+            .await
+            .expect("semantic evidence gap should expand the live arena");
+        let ClientResponsePayload::MemythosArenaRequest(second) = second else {
+            panic!("expected expanded semantic arena request response");
+        };
+
+        assert_eq!(second.composition.composition_version, 2);
+        assert_eq!(second.composition.leases.len(), 6);
+        assert_eq!(second.composition.planned_token_budget, None);
+        assert!(second.composition.leases.iter().any(|lease| {
+            lease.participant_id == "reality-observer"
+                && lease.lease_source == "created"
+                && lease.token_budget.is_none()
+        }));
+        assert!(
+            second
+                .composition
+                .leases
+                .iter()
+                .filter(|lease| {
+                    original_threads
+                        .get(&lease.participant_id)
+                        .is_some_and(|thread_id| thread_id == &lease.thread_id)
+                })
+                .count()
+                == 5
+        );
+    }
+
+    #[tokio::test]
     async fn arena_composition_provisions_plural_bettors_atomically() {
         let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
             AppServerRpcTransport::InProcess,
@@ -6580,6 +6760,12 @@ mod tests {
             2
         );
         assert_eq!(response.room.participants.len(), 5);
+        assert_eq!(response.planned_token_budget, Some(100_000));
+        assert!(response.leases.iter().all(|lease| {
+            lease.token_budget == Some(20_000)
+                && lease.goal_status == ThreadGoalStatus::Paused
+                && !lease.effort_intent.is_empty()
+        }));
         assert_eq!(response.composition_version, 1);
         assert_eq!(
             response.lifecycle_state,
@@ -6729,6 +6915,27 @@ mod tests {
                 .message
                 .contains("at least 2 proposal-bearing parents")
         );
+    }
+
+    #[tokio::test]
+    async fn arena_composition_rejects_a_non_positive_planner_budget() {
+        let mut params = competitive_composition_params();
+        params.contract.participants[0].token_budget = Some(0);
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let error = processor
+            .arena_composition_provision(params, ConnectionId(0))
+            .await
+            .expect_err("a non-positive planner budget must not reach thread/goal/set");
+        assert!(error.message.contains("token budget must be positive"));
     }
 
     #[derive(Debug)]

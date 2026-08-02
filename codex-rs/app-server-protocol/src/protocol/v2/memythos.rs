@@ -518,6 +518,9 @@ pub struct MemythosArenaCompositionParticipant {
     pub role_objective: String,
     pub expected_contribution: String,
     pub exit_condition: String,
+    pub effort_intent: String,
+    #[ts(optional = nullable, type = "number | null")]
+    pub token_budget: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -555,6 +558,7 @@ pub struct MemythosArenaCompositionContract {
     pub completion_criteria: Vec<String>,
     pub participants: Vec<MemythosArenaCompositionParticipant>,
     pub coordination: MemythosArenaCompositionCoordination,
+    pub effort_rationale: String,
     pub rationale: String,
     #[ts(optional = nullable)]
     pub unresolved_role_gap: Option<String>,
@@ -639,6 +643,10 @@ pub struct MemythosArenaCompositionLease {
     pub lease_source: String,
     pub memory_scope: String,
     pub goal_ref: String,
+    pub effort_intent: String,
+    #[ts(optional = nullable, type = "number | null")]
+    pub token_budget: Option<i64>,
+    pub goal_status: ThreadGoalStatus,
     pub status: String,
 }
 
@@ -653,6 +661,8 @@ pub struct MemythosArenaCompositionProvisionResponse {
     pub applied_revision: Option<MemythosArenaCompositionRevision>,
     pub room: MemythosRoom,
     pub leases: Vec<MemythosArenaCompositionLease>,
+    #[ts(optional = nullable, type = "number | null")]
+    pub planned_token_budget: Option<i64>,
     pub event_refs: Vec<String>,
 }
 
