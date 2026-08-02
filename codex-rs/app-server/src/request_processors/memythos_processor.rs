@@ -3572,6 +3572,28 @@ impl MemythosRequestProcessor {
             &source.parent_role,
             &target.parent_role,
         )?;
+        let eligible_winner_ids = {
+            let state = self.state.lock().await;
+            let composition = state.arena_compositions.get(&room.arena_id);
+            validate_competitive_round_progress(
+                decision_method.as_ref(),
+                &args.message_kind,
+                &room,
+                composition,
+                &state.arena_message_deliveries,
+            )?;
+            composition
+                .map(|composition| {
+                    composition
+                        .contract
+                        .participants
+                        .iter()
+                        .filter(|participant| participant.agent_role == "bettor")
+                        .map(|participant| participant.participant_id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
         if target.thread_id == current_thread_id {
             return Err(invalid_params(
                 "room message target must be a different parent thread".to_string(),
@@ -3596,6 +3618,17 @@ impl MemythosRequestProcessor {
             "memythos_source".to_string(),
             serde_json::Value::String("native_room_tool".to_string()),
         );
+        let execution_prompt = if args.message_kind == "verdict_request"
+            && !eligible_winner_ids.is_empty()
+        {
+            format!(
+                "{}\n\nNative verdict boundary: the eligible winner participant ids are [{}]. Name exactly one with `winner_participant_id: <exact-id>`, then rank the alternatives, preserve dissent, and state reopening signals.",
+                args.message,
+                eligible_winner_ids.join(", ")
+            )
+        } else {
+            args.message.clone()
+        };
         let payload = self
             .room_send_input(MemythosRoomSendInputParams {
                 room_id: room.room_id.clone(),
@@ -3612,7 +3645,7 @@ impl MemythosRequestProcessor {
                 response_contract: args.response_contract,
                 client_user_message_id: Some(message_id),
                 human_summary: args.message.clone(),
-                prompt: args.message,
+                prompt: execution_prompt,
                 metadata,
                 output_schema: None,
             })
@@ -5397,6 +5430,51 @@ fn validate_room_message_route(
     }
 }
 
+fn validate_competitive_round_progress(
+    decision_method: Option<&MemythosArenaDecisionMethod>,
+    message_kind: &str,
+    room: &MemythosRoom,
+    composition: Option<&MemythosArenaCompositionProvisionResponse>,
+    deliveries: &[MemythosArenaMessageDelivery],
+) -> Result<(), JSONRPCErrorError> {
+    if !decision_method.is_some_and(|method| is_competitive_method(*method)) {
+        return Ok(());
+    }
+
+    let minimum_positions = composition
+        .and_then(|composition| composition.contract.coordination.round_policy.as_ref())
+        .map(|policy| policy.minimum_competing_positions as usize)
+        .unwrap_or(2);
+    let completed_targets_for_phase = |phase: &str| {
+        deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.arena_id == room.arena_id
+                    && delivery.phase.as_deref() == Some(phase)
+                    && delivery.status == "receiver_turn_completed"
+            })
+            .map(|delivery| delivery.receiver_thread_id.as_str())
+            .collect::<HashSet<_>>()
+            .len()
+    };
+
+    let prerequisite = match message_kind {
+        "peer_cross_read" | "peer_objection" => Some(("proposal", "peer proposals")),
+        "peer_bet" => Some(("cross_read", "peer cross-reads or objections")),
+        "verdict_request" => Some(("bet", "explicit peer bets")),
+        _ => None,
+    };
+    if let Some((phase, label)) = prerequisite {
+        let observed = completed_targets_for_phase(phase);
+        if observed < minimum_positions {
+            return Err(invalid_params(format!(
+                "competitive arena method cannot advance with {message_kind}: collect {minimum_positions} distinct {label} first; observed {observed}. Continue the current room round through the Room Concierge and retry this act after the missing parent responses complete"
+            )));
+        }
+    }
+    Ok(())
+}
+
 const MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS: usize = 240;
 
 fn find_attachment_context(
@@ -6801,6 +6879,57 @@ mod tests {
                 .is_err()
         );
         assert!(validate_room_message_route(None, "consultation", "peer", "observer").is_ok());
+    }
+
+    #[test]
+    fn competitive_room_cannot_request_judge_before_plural_bets_complete() {
+        let room = MemythosRoom {
+            room_id: "room-1".to_string(),
+            case_id: "case-1".to_string(),
+            layer_id: "layer-1".to_string(),
+            arena_id: "arena-1".to_string(),
+            topology: "concierge_hub".to_string(),
+            participants: Vec::new(),
+        };
+        let delivery = |id: &str, receiver: &str| MemythosArenaMessageDelivery {
+            delivery_id: id.to_string(),
+            message_id: id.to_string(),
+            human_summary: "bet".to_string(),
+            status: "receiver_turn_completed".to_string(),
+            sender_thread_id: "concierge".to_string(),
+            receiver_thread_id: receiver.to_string(),
+            arena_id: room.arena_id.clone(),
+            round_id: "round-1".to_string(),
+            phase: Some("bet".to_string()),
+            delivery_mechanism: "room_loopback_send_input".to_string(),
+            receiver_turn_id: Some(format!("turn-{id}")),
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: Vec::new(),
+            rejection_reason: None,
+        };
+        let method = Some(&MemythosArenaDecisionMethod::CompetitiveDebate);
+        assert!(
+            validate_competitive_round_progress(
+                method,
+                "verdict_request",
+                &room,
+                None,
+                &[delivery("one", "bettor-a")],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_competitive_round_progress(
+                method,
+                "verdict_request",
+                &room,
+                None,
+                &[delivery("one", "bettor-a"), delivery("two", "bettor-b"),],
+            )
+            .is_ok()
+        );
     }
 
     #[test]
