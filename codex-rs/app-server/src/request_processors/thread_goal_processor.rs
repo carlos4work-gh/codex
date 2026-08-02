@@ -48,6 +48,26 @@ impl ThreadGoalRequestProcessor {
         &self,
         params: ThreadGoalSetParams,
     ) -> Result<ThreadGoal, JSONRPCErrorError> {
+        self.thread_goal_set_internal_with_runtime_effects(params, true)
+            .await
+    }
+
+    /// Arms a goal for an immediately following `turn/start` without launching an
+    /// idle goal continuation. The turn-start extension will bind the active goal
+    /// to the accepted turn and retain the standard OOTB accounting lifecycle.
+    pub(crate) async fn thread_goal_arm_for_next_turn_internal(
+        &self,
+        params: ThreadGoalSetParams,
+    ) -> Result<ThreadGoal, JSONRPCErrorError> {
+        self.thread_goal_set_internal_with_runtime_effects(params, false)
+            .await
+    }
+
+    async fn thread_goal_set_internal_with_runtime_effects(
+        &self,
+        params: ThreadGoalSetParams,
+        apply_runtime_effects: bool,
+    ) -> Result<ThreadGoal, JSONRPCErrorError> {
         if !self.config.features.enabled(Feature::Goals) {
             return Err(invalid_request("goals feature is disabled"));
         }
@@ -91,7 +111,9 @@ impl ThreadGoalRequestProcessor {
         }
         self.emit_thread_goal_updated_ordered(thread_id, goal.clone(), listener_command_tx)
             .await;
-        outcome.apply_runtime_effects(&self.goal_service).await;
+        if apply_runtime_effects {
+            outcome.apply_runtime_effects(&self.goal_service).await;
+        }
         Ok(goal)
     }
 
