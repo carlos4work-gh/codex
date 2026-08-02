@@ -142,6 +142,7 @@ use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -419,17 +420,8 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
             let planner_turn_id = turn.turn.id;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
             loop {
-                let response = self
-                    .parent_turn_response_adapter
-                    .read_response(&planner_thread_id, &planner_turn_id)
-                    .await;
-                match response.status {
-                    Some(TurnStatus::Completed) => {
-                        let text = response.text.ok_or_else(|| {
-                            invalid_params(
-                                "native arena planner completed without structured output",
-                            )
-                        })?;
+                match planner.thread.agent_status().await {
+                    AgentStatus::Completed(Some(text)) => {
                         let contract =
                             serde_json::from_str::<MemythosArenaCompositionContract>(&text)
                                 .map_err(|err| {
@@ -443,13 +435,22 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                             contract,
                         });
                     }
-                    Some(TurnStatus::Failed) | Some(TurnStatus::Interrupted) => {
+                    AgentStatus::Completed(None) => {
+                        return Err(invalid_params(
+                            "native arena planner completed without an OOTB final AgentMessage",
+                        ));
+                    }
+                    AgentStatus::Errored(error) => {
                         return Err(invalid_params(format!(
-                            "native arena planner turn {} did not complete successfully",
-                            planner_turn_id
+                            "native arena planner turn {planner_turn_id} failed: {error}"
                         )));
                     }
-                    _ => {}
+                    AgentStatus::Shutdown | AgentStatus::NotFound => {
+                        return Err(invalid_params(format!(
+                            "native arena planner thread {planner_thread_id} closed before turn {planner_turn_id} produced a contract"
+                        )));
+                    }
+                    AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted => {}
                 }
                 if tokio::time::Instant::now() >= deadline {
                     return Err(invalid_params(format!(
