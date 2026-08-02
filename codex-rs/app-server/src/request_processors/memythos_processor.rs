@@ -3741,7 +3741,6 @@ impl MemythosRequestProcessor {
         target_thread_id: &str,
         target_turn_id: &str,
     ) -> Result<(String, String, Vec<String>), JSONRPCErrorError> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
         let mut completed_without_message_since = None;
         let mut inferred_terminal_since = None;
         let mut event_refs = Vec::new();
@@ -3842,11 +3841,6 @@ impl MemythosRequestProcessor {
                     completed_without_message_since = None;
                     inferred_terminal_since = None;
                 }
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(invalid_params(format!(
-                    "timed out waiting for parent turn {target_turn_id}"
-                )));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -7546,6 +7540,43 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct DelayedParentTurnResponseAdapter {
+        reads: AtomicUsize,
+    }
+
+    impl ParentTurnResponseAdapter for DelayedParentTurnResponseAdapter {
+        fn read_response<'a>(
+            &'a self,
+            thread_id: &'a str,
+            turn_id: &'a str,
+        ) -> ParentTurnResponseFuture<'a> {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if read < 3 {
+                    return ParentTurnResponse {
+                        status: Some(TurnStatus::InProgress),
+                        request_item_ref: None,
+                        request_text: None,
+                        item_ref: None,
+                        text: None,
+                    };
+                }
+                ParentTurnResponse {
+                    status: Some(TurnStatus::Completed),
+                    request_item_ref: Some(format!(
+                        "app-server://threads/{thread_id}/turns/{turn_id}/items/user-message"
+                    )),
+                    request_text: Some("Native request".to_string()),
+                    item_ref: Some(format!(
+                        "app-server://threads/{thread_id}/turns/{turn_id}/items/final-agent-message"
+                    )),
+                    text: Some("Native parent completed after remaining in progress.".to_string()),
+                }
+            })
+        }
+    }
+
     #[derive(Debug)]
     struct FakeThreadConsolidationAdapter;
 
@@ -7876,6 +7907,42 @@ mod tests {
                 .receiver_response_event_ref
                 .as_deref()
                 .is_some_and(|value| value.ends_with("/items/final-agent-message"))
+        );
+    }
+
+    #[tokio::test]
+    async fn room_tool_waits_for_the_native_parent_terminal_state() {
+        let response_adapter = Arc::new(DelayedParentTurnResponseAdapter::default());
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            response_adapter.clone(),
+        );
+        processor
+            .room_register(room_register_params_with_concierge())
+            .await
+            .unwrap();
+
+        let response = processor
+            .room_tool_send_message(
+                "thread_concierge",
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: Some("case/bpm_e2e/arena/bettor/risk".to_string()),
+                    message: "Continue until the native parent closes.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "consultation".to_string(),
+                    response_contract: "Return the native final AgentMessage.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(response_adapter.reads.load(Ordering::SeqCst) >= 4);
+        assert_eq!(
+            response.response_text,
+            "Native parent completed after remaining in progress."
         );
     }
 
