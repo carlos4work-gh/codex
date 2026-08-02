@@ -457,7 +457,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                 return Err(invalid_params("native arena planner did not start a turn"));
             };
             let mut planner_turn_id = turn.turn.id;
-            let mut role_gap_repair_attempted = false;
+            let mut role_gap_repair_attempts = 0_u8;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
             loop {
                 match planner.thread.agent_status().await {
@@ -469,10 +469,13 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                                         "native arena planner returned invalid contract JSON: {err}"
                                     ))
                                 })?;
-                        if let Some(role_gap) = contract.unresolved_role_gap.as_deref()
-                            && !role_gap_repair_attempted
-                        {
-                            role_gap_repair_attempted = true;
+                        if let Some(role_gap) = contract.unresolved_role_gap.as_deref() {
+                            if role_gap_repair_attempts >= 2 {
+                                return Err(invalid_params(format!(
+                                    "native arena planner retained unresolvedRoleGap after {role_gap_repair_attempts} same-thread reviews: {role_gap}"
+                                )));
+                            }
+                            role_gap_repair_attempts += 1;
                             let repair = self
                                 .turn_processor
                                 .turn_start(
@@ -480,18 +483,18 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                                         connection_id,
                                         request_id: RequestId::String(format!(
                                             "memythos-arena-plan-repair:{}",
-                                            params.arena_id
+                                            format!("{}:{role_gap_repair_attempts}", params.arena_id)
                                         )),
                                     },
                                     TurnStartParams {
                                         thread_id: planner_thread_id.clone(),
                                         client_user_message_id: Some(format!(
                                             "arena-plan-repair:{}",
-                                            params.arena_id
+                                            format!("{}:{role_gap_repair_attempts}", params.arena_id)
                                         )),
                                         input: vec![UserInput::Text {
                                             text: format!(
-                                                "Native contract validation rejected unresolvedRoleGap: {role_gap}. Re-plan on this same thread. Generic native roles plus domain-specific stances are sufficient unless the catalog structurally lacks coordination or decision authority. Preserve competitive method integrity, return unresolvedRoleGap as null, and emit the complete corrected contract only."
+                                                "Native contract validation rejected unresolvedRoleGap: {role_gap}. Review attempt {role_gap_repair_attempts} of 2 on this same planner thread. Re-read nativeRoleCatalog in the original planning context below. Generic roles are intentionally domain-independent: express business specialization through stance and roleObjective, not a new role. A competitive arena already has native coordination and decision authority through scrum_master, room_concierge, and judge. Unless the catalog truly lacks one of those structural capabilities, return unresolvedRoleGap as null. Preserve method integrity and emit the complete corrected contract only.\n\nOriginal planning context:\n{context}"
                                             ),
                                             text_elements: vec![],
                                         }],
