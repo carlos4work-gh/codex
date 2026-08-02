@@ -334,6 +334,48 @@ fn arena_composition_output_schema() -> Result<serde_json::Value, JSONRPCErrorEr
     Ok(schema)
 }
 
+fn native_judge_verdict_output_schema(
+    eligible_winner_ids: &[String],
+) -> Result<serde_json::Value, JSONRPCErrorError> {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "winner_participant_id": {
+                "type": "string",
+                "enum": eligible_winner_ids
+            },
+            "ranked_alternatives": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": eligible_winner_ids
+                }
+            },
+            "dissent": { "type": "string" },
+            "reopening_signals": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "closed_decisions_status": {
+                "type": "string",
+                "enum": ["preserved", "reopened"]
+            },
+            "rationale": { "type": "string" }
+        },
+        "required": [
+            "winner_participant_id",
+            "ranked_alternatives",
+            "dissent",
+            "reopening_signals",
+            "closed_decisions_status",
+            "rationale"
+        ],
+        "additionalProperties": false
+    });
+    validate_responses_output_schema(&schema)?;
+    Ok(schema)
+}
+
 fn normalize_arena_composition_output_schema(schema: &mut serde_json::Value) {
     match schema {
         serde_json::Value::Object(object) => {
@@ -3190,6 +3232,7 @@ impl MemythosRequestProcessor {
             memory_replay_required: delivery_attempt.memory_replay_required,
             event_refs: delivery_attempt.event_refs,
             rejection_reason: delivery_attempt.rejection_reason,
+            failure_reason: None,
         };
         state.arena_message_deliveries.push(delivery.clone());
         self.push_telemetry_ref(
@@ -3977,6 +4020,12 @@ impl MemythosRequestProcessor {
         } else {
             args.message.clone()
         };
+        let output_schema =
+            if args.message_kind == "verdict_request" && !eligible_winner_ids.is_empty() {
+                Some(native_judge_verdict_output_schema(&eligible_winner_ids)?)
+            } else {
+                None
+            };
         let payload = self
             .room_send_input(MemythosRoomSendInputParams {
                 room_id: room.room_id.clone(),
@@ -3995,7 +4044,7 @@ impl MemythosRequestProcessor {
                 human_summary: args.message.clone(),
                 prompt: execution_prompt,
                 metadata,
-                output_schema: None,
+                output_schema,
             })
             .await?;
         let ClientResponsePayload::MemythosRoomSendInput(delivery_response) = payload else {
@@ -4344,6 +4393,7 @@ impl MemythosRequestProcessor {
             memory_replay_required: false,
             event_refs: event_refs.clone(),
             rejection_reason: None,
+            failure_reason: None,
         };
         let mut state = self.state.lock().await;
         if let Some(composition) = state.arena_compositions.get_mut(&room.arena_id)
@@ -5317,6 +5367,7 @@ impl MemythosRequestProcessor {
         status: &str,
         completed_at: Option<i64>,
         duration_ms: Option<i64>,
+        failure_reason: Option<String>,
     ) -> bool {
         let (matched_delivery, closure_candidate) = {
             let mut state = self.state.lock().await;
@@ -5343,6 +5394,7 @@ impl MemythosRequestProcessor {
                     _ => format!("receiver_turn_{status}"),
                 };
                 delivery.receiver_response_event_ref = Some(native_event_ref.clone());
+                delivery.failure_reason = failure_reason.clone();
                 if !delivery.event_refs.contains(&native_event_ref) {
                     delivery.event_refs.push(native_event_ref.clone());
                 }
@@ -5353,11 +5405,17 @@ impl MemythosRequestProcessor {
                     "app-server://threads/{thread_id}/turns/{turn_id}/completed_at/{completed_at}"
                 )
             });
-            let summary = match duration_ms {
-                Some(duration_ms) => format!(
+            let summary = match (duration_ms, failure_reason.as_deref()) {
+                (Some(duration_ms), Some(reason)) => format!(
+                    "Native turn {turn_id} for thread {thread_id} completed with status {status} in {duration_ms}ms: {reason}"
+                ),
+                (None, Some(reason)) => format!(
+                    "Native turn {turn_id} for thread {thread_id} completed with status {status}: {reason}"
+                ),
+                (Some(duration_ms), None) => format!(
                     "Native turn {turn_id} for thread {thread_id} completed with status {status} in {duration_ms}ms."
                 ),
-                None => format!(
+                (None, None) => format!(
                     "Native turn {turn_id} for thread {thread_id} completed with status {status}."
                 ),
             };
@@ -7055,6 +7113,23 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
+    fn judge_verdict_schema_constrains_winner_to_native_participant_ids() {
+        let eligible = vec!["p1-growth".to_string(), "p2-risk".to_string()];
+        let schema = native_judge_verdict_output_schema(&eligible).expect("verdict schema");
+        assert_eq!(
+            schema["properties"]["winner_participant_id"]["enum"],
+            serde_json::json!(["p1-growth", "p2-risk"])
+        );
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert!(
+            schema["required"]
+                .as_array()
+                .expect("required fields")
+                .contains(&serde_json::json!("closed_decisions_status"))
+        );
+    }
+
+    #[test]
     fn arena_composition_schema_closes_every_object_for_strict_output() {
         fn assert_closed(value: &serde_json::Value, object_count: &mut usize) {
             match value {
@@ -7577,6 +7652,7 @@ mod tests {
             memory_replay_required: false,
             event_refs: Vec::new(),
             rejection_reason: None,
+            failure_reason: None,
         };
         let method = Some(&MemythosArenaDecisionMethod::CompetitiveDebate);
         assert!(
@@ -7641,6 +7717,7 @@ mod tests {
                 memory_replay_required: false,
                 event_refs: Vec::new(),
                 rejection_reason: None,
+                failure_reason: None,
             };
         {
             let mut state = processor.state.lock().await;
@@ -7682,6 +7759,7 @@ mod tests {
                     "completed",
                     Some(1),
                     Some(100),
+                    None,
                 )
                 .await
         );
@@ -8881,6 +8959,7 @@ mod tests {
                     memory_replay_required: false,
                     event_refs: Vec::new(),
                     rejection_reason: None,
+                    failure_reason: None,
                 });
         }
 
@@ -8961,6 +9040,7 @@ mod tests {
                     "completed",
                     Some(1_000),
                     Some(250),
+                    None,
                 )
                 .await
         );
@@ -9034,6 +9114,7 @@ mod tests {
                     "completed",
                     Some(1_000),
                     Some(250),
+                    None,
                 )
                 .await
         );
@@ -9750,7 +9831,8 @@ mod tests {
                     "turn_for_thread_risk_message-003",
                     "completed",
                     Some(1_000),
-                    Some(250)
+                    Some(250),
+                    None,
                 )
                 .await
         );
@@ -9963,6 +10045,7 @@ mod tests {
                     "thread_risk",
                     "turn_for_thread_risk_message-missing",
                     "completed",
+                    None,
                     None,
                     None,
                 )
@@ -10839,6 +10922,7 @@ mod tests {
                 "completed",
                 Some(1234),
                 Some(2500),
+                None,
             )
             .await;
         assert!(matched);
@@ -10891,8 +10975,8 @@ mod tests {
 
         let telemetry_response = processor
             .telemetry_list(MemythosTelemetryListParams {
-                layer_id: Some(layer_response.layer.layer_id),
-                arena_id: Some(arena_response.arena.arena_id),
+                layer_id: Some(layer_response.layer.layer_id.clone()),
+                arena_id: Some(arena_response.arena.arena_id.clone()),
                 thread_id: Some("thread_risk".to_string()),
                 limit: Some(20),
             })
@@ -10913,6 +10997,83 @@ mod tests {
                                 "app-server://threads/thread_risk/turns/turn_for_thread_risk_message-live-002/completed"
                             )
                 })
+        );
+
+        processor
+            .arena_message_send(MemythosArenaMessageSendParams {
+                message: MemythosArenaMessage {
+                    message_id: "message-live-003".to_string(),
+                    case_id: "case-001".to_string(),
+                    arena_id: arena_response.arena.arena_id.clone(),
+                    round_id: "round-001".to_string(),
+                    from_parent_thread_id: "thread_growth".to_string(),
+                    from_parent_role: "bettor".to_string(),
+                    to_parent_thread_id: "thread_risk".to_string(),
+                    to_parent_role: "bettor".to_string(),
+                    message_kind: "peer_objection".to_string(),
+                    human_summary: "Exercise native failure evidence preservation.".to_string(),
+                    execution_prompt: None,
+                    context_packet_ref: "artifact://context/minimal".to_string(),
+                    artifact_refs: vec![],
+                    requires_response: true,
+                    response_contract: Some("peer_objection_response".to_string()),
+                },
+            })
+            .await
+            .unwrap();
+
+        let failure_reason = "Model backend ended the turn before producing a response.";
+        let matched = processor
+            .record_native_turn_completed(
+                "thread_risk",
+                "turn_for_thread_risk_message-live-003",
+                "failed",
+                Some(5678),
+                Some(667),
+                Some(failure_reason.to_string()),
+            )
+            .await;
+        assert!(matched);
+
+        let list_response = processor
+            .arena_message_list(MemythosArenaMessageListParams {
+                arena_id: arena_response.arena.arena_id.clone(),
+                round_id: Some("round-001".to_string()),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaMessageList(list_response) = list_response else {
+            panic!("expected MemythosArenaMessageList response");
+        };
+        let failed_delivery = list_response
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.message_id == "message-live-003")
+            .expect("failed native delivery should remain observable");
+        assert_eq!(failed_delivery.status, "receiver_turn_failed");
+        assert_eq!(
+            failed_delivery.failure_reason.as_deref(),
+            Some(failure_reason)
+        );
+
+        let telemetry_response = processor
+            .telemetry_list(MemythosTelemetryListParams {
+                layer_id: Some(layer_response.layer.layer_id),
+                arena_id: Some(arena_response.arena.arena_id),
+                thread_id: Some("thread_risk".to_string()),
+                limit: Some(20),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosTelemetryList(telemetry_response) = telemetry_response
+        else {
+            panic!("expected MemythosTelemetryList response");
+        };
+        assert!(
+            telemetry_response
+                .telemetry_refs
+                .iter()
+                .any(|telemetry_ref| telemetry_ref.summary.contains(failure_reason))
         );
     }
 
@@ -11120,6 +11281,7 @@ mod tests {
                 "completed",
                 Some(1234),
                 Some(2500),
+                None,
             )
             .await;
         processor

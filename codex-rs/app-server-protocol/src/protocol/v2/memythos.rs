@@ -936,6 +936,11 @@ pub struct MemythosArenaMessageDelivery {
     pub event_refs: Vec<String>,
     #[ts(optional = nullable)]
     pub rejection_reason: Option<String>,
+    /// Native app-server failure preserved at the room boundary. This is absent for
+    /// successful deliveries and avoids reducing a failed parent turn to a bare status.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub failure_reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

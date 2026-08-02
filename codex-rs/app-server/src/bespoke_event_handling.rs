@@ -1553,6 +1553,7 @@ async fn handle_turn_complete(
         None => (TurnStatus::Completed, None),
     };
     let status_label = turn_status_label(&status);
+    let native_error_message = error.as_ref().map(|error| error.message.clone());
     let completed_at = turn_complete_event.completed_at;
     let duration_ms = turn_complete_event.duration_ms;
     let native_thread_id = conversation_id.to_string();
@@ -1580,6 +1581,7 @@ async fn handle_turn_complete(
                 status_label,
                 completed_at,
                 duration_ms,
+                native_error_message,
             )
             .await;
     }
