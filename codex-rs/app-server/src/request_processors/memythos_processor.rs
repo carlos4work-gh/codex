@@ -142,6 +142,7 @@ use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::ThreadId;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
@@ -400,7 +401,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     config,
                     agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
                     root_developer_instructions: Some(
-                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Native method authorities such as coordinate and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the scrum_master coordinator; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent for every participant. Set a positive token budget only when the semantic cost goal and work uncertainty justify a cap; otherwise leave it null. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Native method authorities such as coordinate and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the scrum_master coordinator; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent and select a native reasoningEffort for every participant. reasoningEffort must be one of the OOTB app-server values and should be proportionate to uncertainty and decision impact; routine room coordination and concise phase responses normally need less effort than final judgment of material uncertainty. tokenBudget is a cumulative hard limit over the complete parent objective, including every arena phase and all input/output tokens. A qualitative request for efficiency, a small team, brevity, speed, or lower cost is not an explicit numeric hard limit: in those cases tokenBudget must be null. Set tokenBudget only when the caller supplied an explicit numeric token cap or previous measured evidence supports a calibrated cap that funds the full round. Never invent a small numeric cap from qualitative cost language. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
                             .to_string(),
                     ),
                     initial_history: InitialHistory::New,
@@ -1171,6 +1172,7 @@ pub(crate) trait PeerParentDeliveryAdapter: Send + Sync {
     fn deliver_peer_parent_message<'a>(
         &'a self,
         message: &'a MemythosArenaMessage,
+        reasoning_effort: Option<ReasoningEffort>,
         connection_id: ConnectionId,
     ) -> PeerParentDeliveryFuture<'a>;
 }
@@ -1184,6 +1186,7 @@ impl PeerParentDeliveryAdapter for RecordOnlyPeerParentDeliveryAdapter {
     fn deliver_peer_parent_message<'a>(
         &'a self,
         message: &'a MemythosArenaMessage,
+        _reasoning_effort: Option<ReasoningEffort>,
         _connection_id: ConnectionId,
     ) -> PeerParentDeliveryFuture<'a> {
         Box::pin(async move {
@@ -1227,6 +1230,7 @@ impl PeerParentDeliveryAdapter for TurnStartPeerParentDeliveryAdapter {
     fn deliver_peer_parent_message<'a>(
         &'a self,
         message: &'a MemythosArenaMessage,
+        reasoning_effort: Option<ReasoningEffort>,
         connection_id: ConnectionId,
     ) -> PeerParentDeliveryFuture<'a> {
         Box::pin(async move {
@@ -1284,7 +1288,7 @@ impl PeerParentDeliveryAdapter for TurnStartPeerParentDeliveryAdapter {
                 permissions: None,
                 model: None,
                 service_tier: None,
-                effort: None,
+                effort: reasoning_effort,
                 summary: None,
                 personality: None,
                 output_schema: None,
@@ -2642,6 +2646,7 @@ impl MemythosRequestProcessor {
                     memory_scope: provisioned.memory_scope.clone(),
                     goal_ref: provisioned.goal_ref.clone(),
                     effort_intent: participant.effort_intent.clone(),
+                    reasoning_effort: participant.reasoning_effort.clone(),
                     token_budget: provisioned.goal.token_budget,
                     goal_status: provisioned.goal.status,
                     status: "active".to_string(),
@@ -2948,7 +2953,15 @@ impl MemythosRequestProcessor {
         let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
         let delivery_attempt = self
             .peer_parent_delivery_adapter
-            .deliver_peer_parent_message(&params.message, ConnectionId(0))
+            .deliver_peer_parent_message(
+                &params.message,
+                arena_parent_reasoning_effort(
+                    &state,
+                    &params.message.arena_id,
+                    &params.message.to_parent_thread_id,
+                ),
+                ConnectionId(0),
+            )
             .await;
         let telemetry_channel = delivery_attempt.telemetry_channel;
         let telemetry_summary = delivery_attempt.telemetry_summary.clone();
@@ -4018,6 +4031,10 @@ impl MemythosRequestProcessor {
             requires_response: true,
             response_contract: Some(params.response_contract.clone()),
         };
+        let target_reasoning_effort = {
+            let state = self.state.lock().await;
+            arena_parent_reasoning_effort(&state, &room.arena_id, &target.thread_id)
+        };
         let delivery_id = self.next_id("mem_room_delivery", &self.next_delivery_id);
         let armed_goal = self
             .arena_parent_provisioning_adapter
@@ -4031,7 +4048,7 @@ impl MemythosRequestProcessor {
             })?;
         let delivery_attempt = self
             .peer_parent_delivery_adapter
-            .deliver_peer_parent_message(&message, connection_id)
+            .deliver_peer_parent_message(&message, target_reasoning_effort, connection_id)
             .await;
         let Some(target_turn_id) = delivery_attempt.receiver_turn_id.clone() else {
             let pause_result = self
@@ -5659,6 +5676,19 @@ fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
     format!("{arena_id}::{thread_id}")
 }
 
+fn arena_parent_reasoning_effort(
+    state: &MemythosRuntimeState,
+    arena_id: &str,
+    thread_id: &str,
+) -> Option<ReasoningEffort> {
+    let composition = state.arena_compositions.get(arena_id)?;
+    composition
+        .leases
+        .iter()
+        .find(|lease| lease.thread_id == thread_id)
+        .and_then(|lease| lease.reasoning_effort.clone())
+}
+
 fn is_competitive_method(method: MemythosArenaDecisionMethod) -> bool {
     matches!(
         method,
@@ -6683,6 +6713,7 @@ mod tests {
         fn deliver_peer_parent_message<'a>(
             &'a self,
             message: &'a MemythosArenaMessage,
+            _reasoning_effort: Option<ReasoningEffort>,
             _connection_id: ConnectionId,
         ) -> PeerParentDeliveryFuture<'a> {
             Box::pin(async move {
@@ -6947,6 +6978,7 @@ mod tests {
                 expected_contribution: format!("Independent contribution from {participant_id}"),
                 exit_condition: format!("{participant_id} has delivered its position"),
                 effort_intent: "proportionate to uncertainty and decision impact".to_string(),
+                reasoning_effort: Some(ReasoningEffort::Low),
                 token_budget: Some(20_000),
             }
         };

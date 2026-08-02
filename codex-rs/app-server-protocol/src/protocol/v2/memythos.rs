@@ -6,6 +6,7 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use super::ThreadGoalStatus;
+use codex_protocol::openai_models::ReasoningEffort;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -519,6 +520,10 @@ pub struct MemythosArenaCompositionParticipant {
     pub expected_contribution: String,
     pub exit_condition: String,
     pub effort_intent: String,
+    /// Native app-server effort applied to every turn for this parent in the arena.
+    /// The composition planner selects it from the OOTB ReasoningEffort values.
+    #[ts(optional = nullable)]
+    pub reasoning_effort: Option<ReasoningEffort>,
     #[ts(optional = nullable, type = "number | null")]
     pub token_budget: Option<i64>,
 }
@@ -644,6 +649,8 @@ pub struct MemythosArenaCompositionLease {
     pub memory_scope: String,
     pub goal_ref: String,
     pub effort_intent: String,
+    #[ts(optional = nullable)]
+    pub reasoning_effort: Option<ReasoningEffort>,
     #[ts(optional = nullable, type = "number | null")]
     pub token_budget: Option<i64>,
     pub goal_status: ThreadGoalStatus,
