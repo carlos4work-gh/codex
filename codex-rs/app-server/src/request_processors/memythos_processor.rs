@@ -241,6 +241,7 @@ pub(crate) trait ArenaParentProvisioningAdapter: Send + Sync {
     fn transition_parent_goal<'a>(
         &'a self,
         thread_id: &'a str,
+        objective: Option<&'a str>,
         status: ThreadGoalStatus,
         arm_for_next_turn: bool,
     ) -> ArenaParentGoalTransitionFuture<'a>;
@@ -252,19 +253,40 @@ pub(crate) trait ArenaParentProvisioningAdapter: Send + Sync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RoomDeliveryGoalTransition {
-    ArmPausedGoal,
+    AssignDeliveryGoal,
     PreserveGoal,
 }
 
 fn room_delivery_goal_transition(status: &ThreadGoalStatus) -> RoomDeliveryGoalTransition {
     match status {
-        ThreadGoalStatus::Paused => RoomDeliveryGoalTransition::ArmPausedGoal,
+        ThreadGoalStatus::Paused | ThreadGoalStatus::Complete => {
+            RoomDeliveryGoalTransition::AssignDeliveryGoal
+        }
         ThreadGoalStatus::Active
         | ThreadGoalStatus::Blocked
         | ThreadGoalStatus::UsageLimited
-        | ThreadGoalStatus::BudgetLimited
-        | ThreadGoalStatus::Complete => RoomDeliveryGoalTransition::PreserveGoal,
+        | ThreadGoalStatus::BudgetLimited => RoomDeliveryGoalTransition::PreserveGoal,
     }
+}
+
+fn room_delivery_goal_objective(room: &MemythosRoom, message: &MemythosArenaMessage) -> String {
+    format!(
+        concat!(
+            "Complete only room assignment {message_id} in arena {arena_id}, round {round_id}. ",
+            "Act as the persistent parent role {to_parent_role}. The requested act is ",
+            "{message_kind}: {human_summary} Required response contract: {response_contract}. ",
+            "Use your existing role, stance, memory, and native room tools. Do not advance to ",
+            "another arena phase on your own. When this response contract is fully satisfied, ",
+            "call update_goal with status complete."
+        ),
+        message_id = message.message_id,
+        arena_id = room.arena_id,
+        round_id = message.round_id,
+        to_parent_role = message.to_parent_role,
+        message_kind = message.message_kind,
+        human_summary = message.human_summary,
+        response_contract = message.response_contract.as_deref().unwrap_or("none"),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -890,13 +912,14 @@ impl ArenaParentProvisioningAdapter for NativeArenaParentProvisioningAdapter {
     fn transition_parent_goal<'a>(
         &'a self,
         thread_id: &'a str,
+        objective: Option<&'a str>,
         status: ThreadGoalStatus,
         arm_for_next_turn: bool,
     ) -> ArenaParentGoalTransitionFuture<'a> {
         Box::pin(async move {
             let params = ThreadGoalSetParams {
                 thread_id: thread_id.to_string(),
-                objective: None,
+                objective: objective.map(str::to_string),
                 status: Some(status),
                 token_budget: None,
             };
@@ -997,13 +1020,14 @@ impl ArenaParentProvisioningAdapter for RecordOnlyArenaParentProvisioningAdapter
     fn transition_parent_goal<'a>(
         &'a self,
         thread_id: &'a str,
+        objective: Option<&'a str>,
         status: ThreadGoalStatus,
         _arm_for_next_turn: bool,
     ) -> ArenaParentGoalTransitionFuture<'a> {
         Box::pin(async move {
             Ok(ThreadGoal {
                 thread_id: thread_id.to_string(),
-                objective: String::new(),
+                objective: objective.unwrap_or_default().to_string(),
                 status,
                 token_budget: None,
                 tokens_used: 0,
@@ -4203,48 +4227,46 @@ impl MemythosRequestProcessor {
                     params.to_parent_thread_id
                 ))
             })?;
-        let (delivery_goal, armed_for_delivery) = match room_delivery_goal_transition(
-            &current_goal.status,
-        ) {
-            RoomDeliveryGoalTransition::ArmPausedGoal => {
-                let armed = self
-                    .arena_parent_provisioning_adapter
-                    .transition_parent_goal(
-                        &params.to_parent_thread_id,
-                        ThreadGoalStatus::Active,
-                        true,
-                    )
-                    .await
-                    .map_err(|error| {
-                        invalid_params(format!(
-                            "failed to arm paused parent goal for first room delivery to {}: {}",
-                            params.to_parent_thread_id, error.message
-                        ))
-                    })?;
-                (armed, true)
-            }
-            RoomDeliveryGoalTransition::PreserveGoal => (current_goal, false),
-        };
+        let assignment_objective = room_delivery_goal_objective(&room, &message);
+        let rollback_goal = current_goal.clone();
+        let (delivery_goal, assigned_for_delivery) =
+            match room_delivery_goal_transition(&current_goal.status) {
+                RoomDeliveryGoalTransition::AssignDeliveryGoal => {
+                    let armed = self
+                        .arena_parent_provisioning_adapter
+                        .transition_parent_goal(
+                            &params.to_parent_thread_id,
+                            Some(&assignment_objective),
+                            ThreadGoalStatus::Active,
+                            true,
+                        )
+                        .await
+                        .map_err(|error| {
+                            invalid_params(format!(
+                                "failed to assign parent goal for room delivery to {}: {}",
+                                params.to_parent_thread_id, error.message
+                            ))
+                        })?;
+                    (armed, true)
+                }
+                RoomDeliveryGoalTransition::PreserveGoal => (current_goal, false),
+            };
         let delivery_attempt = self
             .peer_parent_delivery_adapter
             .deliver_peer_parent_message(&message, target_reasoning_effort, connection_id)
             .await;
         let Some(target_turn_id) = delivery_attempt.receiver_turn_id.clone() else {
-            let rollback_detail = if armed_for_delivery {
+            let rollback_detail = if assigned_for_delivery {
                 self.arena_parent_provisioning_adapter
                     .transition_parent_goal(
                         &params.to_parent_thread_id,
-                        ThreadGoalStatus::Paused,
+                        Some(&rollback_goal.objective),
+                        rollback_goal.status.clone(),
                         false,
                     )
                     .await
                     .err()
-                    .map(|error| {
-                        format!(
-                            "; first-delivery goal rollback to paused also failed: {}",
-                            error.message
-                        )
-                    })
+                    .map(|error| format!("; delivery goal rollback also failed: {}", error.message))
                     .unwrap_or_default()
             } else {
                 String::new()
@@ -7015,7 +7037,7 @@ mod tests {
     struct FakeArenaParentProvisioningAdapter {
         fail_participant: Option<String>,
         rolled_back: Arc<Mutex<Vec<String>>>,
-        goal_transitions: Arc<Mutex<Vec<(String, ThreadGoalStatus, bool)>>>,
+        goal_transitions: Arc<Mutex<Vec<(String, Option<String>, ThreadGoalStatus, bool)>>>,
         goals: Arc<Mutex<HashMap<String, ThreadGoal>>>,
     }
 
@@ -7117,29 +7139,26 @@ mod tests {
         fn transition_parent_goal<'a>(
             &'a self,
             thread_id: &'a str,
+            objective: Option<&'a str>,
             status: ThreadGoalStatus,
             arm_for_next_turn: bool,
         ) -> ArenaParentGoalTransitionFuture<'a> {
             Box::pin(async move {
                 self.goal_transitions.lock().await.push((
                     thread_id.to_string(),
+                    objective.map(str::to_string),
                     status.clone(),
                     arm_for_next_turn,
                 ));
-                let goal = ThreadGoal {
-                    thread_id: thread_id.to_string(),
-                    objective: String::new(),
-                    status,
-                    token_budget: None,
-                    tokens_used: 0,
-                    time_used_seconds: 0,
-                    created_at: 0,
-                    updated_at: 0,
-                };
-                self.goals
-                    .lock()
-                    .await
-                    .insert(thread_id.to_string(), goal.clone());
+                let mut goals = self.goals.lock().await;
+                let goal = goals
+                    .get_mut(thread_id)
+                    .ok_or_else(|| invalid_params("test parent goal does not exist"))?;
+                if let Some(objective) = objective {
+                    goal.objective = objective.to_string();
+                }
+                goal.status = status;
+                let goal = goal.clone();
                 Ok(goal)
             })
         }
@@ -7600,14 +7619,23 @@ mod tests {
                 output_schema: None,
             })
             .await
-            .expect("a later room turn should not reopen a completed role goal");
-        assert_eq!(
-            *provisioning.goal_transitions.lock().await,
-            vec![(
-                "test::scrum_master::coordinator".to_string(),
-                ThreadGoalStatus::Active,
-                true,
-            )]
+            .expect("a later room turn should create a bounded assignment on the same parent");
+        let transitions = provisioning.goal_transitions.lock().await;
+        assert_eq!(transitions.len(), 2);
+        assert!(transitions.iter().all(|transition| {
+            transition.0 == "test::scrum_master::coordinator"
+                && transition.1.as_deref().is_some_and(|objective| {
+                    objective.contains("Complete only room assignment")
+                        && objective.contains("call update_goal with status complete")
+                })
+                && transition.2 == ThreadGoalStatus::Active
+                && transition.3
+        }));
+        assert!(
+            transitions[1]
+                .1
+                .as_deref()
+                .is_some_and(|objective| objective.contains("follow-up"))
         );
         let state = processor.state.lock().await;
         assert_eq!(state.arena_compositions.len(), 1);
@@ -7646,22 +7674,25 @@ mod tests {
     }
 
     #[test]
-    fn room_delivery_only_arms_a_paused_goal() {
+    fn room_delivery_assigns_paused_or_completed_goals() {
         assert_eq!(
             room_delivery_goal_transition(&ThreadGoalStatus::Paused),
-            RoomDeliveryGoalTransition::ArmPausedGoal
+            RoomDeliveryGoalTransition::AssignDeliveryGoal
+        );
+        assert_eq!(
+            room_delivery_goal_transition(&ThreadGoalStatus::Complete),
+            RoomDeliveryGoalTransition::AssignDeliveryGoal
         );
         for status in [
             ThreadGoalStatus::Active,
             ThreadGoalStatus::Blocked,
             ThreadGoalStatus::UsageLimited,
             ThreadGoalStatus::BudgetLimited,
-            ThreadGoalStatus::Complete,
         ] {
             assert_eq!(
                 room_delivery_goal_transition(&status),
                 RoomDeliveryGoalTransition::PreserveGoal,
-                "room delivery must not reopen {status:?} goals"
+                "room delivery must not override {status:?} goals"
             );
         }
     }
