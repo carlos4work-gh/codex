@@ -828,6 +828,20 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    /// Returns whether the native thread listener observed the terminal event for this turn.
+    /// Persisted rollout reconstruction is intentionally not used as a lifecycle signal because
+    /// the initial user input can be visible before the listener projects `TurnStarted`.
+    pub(crate) async fn turn_terminal_observed(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<bool, JSONRPCErrorError> {
+        let thread_id = ThreadId::from_string(thread_id)
+            .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+        Ok(thread_state.lock().await.last_terminal_turn_id.as_deref() == Some(turn_id))
+    }
+
     pub(crate) async fn thread_turns_items_list(
         &self,
         _params: ThreadTurnsItemsListParams,

@@ -604,6 +604,19 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
             let mut role_gap_repair_attempts = 0_u8;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
             loop {
+                if !self
+                    .thread_processor
+                    .turn_terminal_observed(&planner_thread_id, &planner_turn_id)
+                    .await?
+                {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(invalid_params(format!(
+                            "native arena planner turn {planner_turn_id} did not reach an OOTB terminal event before timeout"
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
                 let planner_turn = self
                     .read_planner_turn(&planner_thread_id, &planner_turn_id)
                     .await?;
@@ -1769,6 +1782,19 @@ impl ParentTurnResponseAdapter for ThreadTurnsParentResponseAdapter {
         turn_id: &'a str,
     ) -> ParentTurnResponseFuture<'a> {
         Box::pin(async move {
+            let Ok(true) = self
+                .thread_processor
+                .turn_terminal_observed(thread_id, turn_id)
+                .await
+            else {
+                return ParentTurnResponse {
+                    status: None,
+                    request_item_ref: None,
+                    request_text: None,
+                    item_ref: None,
+                    text: None,
+                };
+            };
             let response = self
                 .thread_processor
                 .thread_turns_list(ThreadTurnsListParams {
@@ -3992,7 +4018,6 @@ impl MemythosRequestProcessor {
         target_turn_id: &str,
     ) -> Result<(String, String, Vec<String>), JSONRPCErrorError> {
         let mut completed_without_message_since = None;
-        let mut inferred_terminal_since = None;
         let mut event_refs = Vec::new();
         loop {
             let mut native_delivery_status = None;
@@ -4027,7 +4052,6 @@ impl MemythosRequestProcessor {
                 .await;
             match response.status {
                 Some(TurnStatus::Completed) => {
-                    inferred_terminal_since = None;
                     let completed_ref = format!(
                         "app-server://threads/{target_thread_id}/turns/{target_turn_id}/completed"
                     );
@@ -4064,32 +4088,17 @@ impl MemythosRequestProcessor {
                     }
                 }
                 Some(TurnStatus::Failed) => {
-                    let inferred_since =
-                        inferred_terminal_since.get_or_insert_with(tokio::time::Instant::now);
-                    if inferred_since.elapsed() >= Duration::from_secs(2) {
-                        return Err(invalid_params(format!(
-                            "parent turn {target_turn_id} failed"
-                        )));
-                    }
+                    return Err(invalid_params(format!(
+                        "parent turn {target_turn_id} failed"
+                    )));
                 }
                 Some(TurnStatus::Interrupted) => {
-                    // thread/turns/list rebuilds turns from persisted rollout plus the
-                    // active in-memory snapshot. Immediately after turn/start, the
-                    // persisted user input can be visible before TurnStarted marks the
-                    // thread active, so an in-progress turn can briefly be reconstructed
-                    // as interrupted. Native TurnAborted remains authoritative; only use
-                    // the reconstructed status after it stays stable.
-                    let inferred_since =
-                        inferred_terminal_since.get_or_insert_with(tokio::time::Instant::now);
-                    if inferred_since.elapsed() >= Duration::from_secs(2) {
-                        return Err(invalid_params(format!(
-                            "parent turn {target_turn_id} was interrupted"
-                        )));
-                    }
+                    return Err(invalid_params(format!(
+                        "parent turn {target_turn_id} was interrupted"
+                    )));
                 }
                 Some(TurnStatus::InProgress) | None => {
                     completed_without_message_since = None;
-                    inferred_terminal_since = None;
                 }
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -8070,11 +8079,11 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct TransientInterruptedParentTurnResponseAdapter {
+    struct ListenerGatedParentTurnResponseAdapter {
         reads: AtomicUsize,
     }
 
-    impl ParentTurnResponseAdapter for TransientInterruptedParentTurnResponseAdapter {
+    impl ParentTurnResponseAdapter for ListenerGatedParentTurnResponseAdapter {
         fn read_response<'a>(
             &'a self,
             thread_id: &'a str,
@@ -8084,7 +8093,7 @@ mod tests {
             Box::pin(async move {
                 if read == 0 {
                     return ParentTurnResponse {
-                        status: Some(TurnStatus::Interrupted),
+                        status: None,
                         request_item_ref: None,
                         request_text: None,
                         item_ref: None,
@@ -8517,13 +8526,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn room_tool_ignores_transient_interrupted_status_before_native_turn_starts() {
+    async fn room_tool_waits_until_native_listener_observes_terminal_turn() {
         let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
             AppServerRpcTransport::Websocket,
             Arc::new(FakeLivePeerParentDeliveryAdapter),
             Arc::new(FakeParentGoalSnapshotAdapter),
             Arc::new(RecordOnlyThreadConsolidationAdapter),
-            Arc::new(TransientInterruptedParentTurnResponseAdapter::default()),
+            Arc::new(ListenerGatedParentTurnResponseAdapter::default()),
         );
         processor
             .room_register(room_register_params_with_concierge())
