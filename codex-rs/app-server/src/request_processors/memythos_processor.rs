@@ -391,7 +391,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     config,
                     agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
                     root_developer_instructions: Some(
-                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Optimize team size only after preserving this invariant. Propose an effort intent for every participant. Set a positive token budget only when the semantic cost goal and work uncertainty justify a cap; otherwise leave it null. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Optimize team size only after preserving this invariant. Propose an effort intent for every participant. Set a positive token budget only when the semantic cost goal and work uncertainty justify a cap; otherwise leave it null. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
                             .to_string(),
                     ),
                     initial_history: InitialHistory::New,
@@ -879,7 +879,6 @@ pub(crate) struct MemythosRoomToolSendMessageArgs {
     pub(crate) target_parent_key: Option<String>,
     pub(crate) message: String,
     pub(crate) authority: String,
-    #[serde(default = "default_room_tool_message_kind")]
     pub(crate) message_kind: String,
     #[serde(default = "default_room_tool_response_contract")]
     pub(crate) response_contract: String,
@@ -891,7 +890,6 @@ pub(crate) struct MemythosRoomToolSendToRoomArgs {
     pub(crate) target_room_id: String,
     pub(crate) message: String,
     pub(crate) authority: String,
-    #[serde(default = "default_cross_room_message_kind")]
     pub(crate) message_kind: String,
     #[serde(default = "default_cross_room_response_contract")]
     pub(crate) response_contract: String,
@@ -928,17 +926,9 @@ pub(crate) struct MemythosRoomToolResponse {
     pub(crate) event_refs: Vec<String>,
 }
 
-fn default_room_tool_message_kind() -> String {
-    "consultation".to_string()
-}
-
 fn default_room_tool_response_contract() -> String {
     "Respond in natural language with your position, rationale, limits, and next action."
         .to_string()
-}
-
-fn default_cross_room_message_kind() -> String {
-    "cross_room_delegation".to_string()
 }
 
 fn default_cross_room_response_contract() -> String {
@@ -3890,12 +3880,15 @@ impl MemythosRequestProcessor {
             .chain(delivery_attempt.event_refs.clone())
             .collect(),
         );
-        let delivery_phase = params
-            .metadata
-            .get("memythos_phase")
-            .and_then(|value| value.as_str())
-            .map(|value| value.to_string())
-            .or_else(|| phase_from_message_kind(&message.message_kind));
+        // The explicit room act is the native phase source of truth. The caller's
+        // inherited phase is only a fallback for non-debate message kinds.
+        let delivery_phase = phase_from_message_kind(&message.message_kind).or_else(|| {
+            params
+                .metadata
+                .get("memythos_phase")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        });
 
         let delivery = MemythosArenaMessageDelivery {
             delivery_id,
@@ -8047,7 +8040,7 @@ mod tests {
             .room_timeline_get(MemythosRoomActivityListParams {
                 room_id: "room-001".to_string(),
                 round_id: Some("round-001".to_string()),
-                phase: Some("bet".to_string()),
+                phase: Some("proposal".to_string()),
                 since_cursor: None,
                 after_cursor: None,
                 limit: Some(25),
@@ -8073,6 +8066,7 @@ mod tests {
         );
         assert_eq!(delivered.recipient.role, Some(MemythosParentRole::Bettor));
         assert_eq!(delivered.authority, "peer_debate");
+        assert_eq!(delivered.phase.as_deref(), Some("proposal"));
         assert_eq!(
             delivered.prompt_origin,
             MemythosPromptOrigin::AgentToAgentPrompt

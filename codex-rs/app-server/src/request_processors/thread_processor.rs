@@ -94,14 +94,24 @@ pub(crate) fn with_memythos_room_tools(
                         },
                         "messageKind": {
                             "type": "string",
-                            "description": "Semantic kind such as consultation, objection, bet, or verdict_request."
+                            "enum": [
+                                "consultation",
+                                "peer_proposal",
+                                "peer_cross_read",
+                                "peer_objection",
+                                "peer_bet",
+                                "verdict_request",
+                                "judge_verdict",
+                                "notify_coordinator"
+                            ],
+                            "description": "Required semantic room act. It is the native source of truth for debate phase projection."
                         },
                         "responseContract": {
                             "type": "string",
                             "description": "Natural-language expectation for the response."
                         }
                     },
-                    "required": ["message", "authority"],
+                    "required": ["message", "authority", "messageKind"],
                     "additionalProperties": false
                 }),
                 defer_loading: false,
@@ -125,10 +135,13 @@ pub(crate) fn with_memythos_room_tools(
                             "type": "string",
                             "enum": ["peer", "subordinate", "judge", "human_delegated"]
                         },
-                        "messageKind": { "type": "string" },
+                        "messageKind": {
+                            "type": "string",
+                            "description": "Required semantic cross-room act."
+                        },
                         "responseContract": { "type": "string" }
                     },
-                    "required": ["targetRoomId", "message", "authority"],
+                    "required": ["targetRoomId", "message", "authority", "messageKind"],
                     "additionalProperties": false
                 }),
                 defer_loading: false,
