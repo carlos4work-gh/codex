@@ -278,8 +278,76 @@ const ARENA_COMPOSITION_PLANNER_ROLE: &str = "arena_composition_planner";
 fn arena_composition_output_schema() -> Result<serde_json::Value, JSONRPCErrorError> {
     let mut schema = serde_json::to_value(schemars::schema_for!(MemythosArenaCompositionContract))
         .map_err(|err| invalid_params(format!("failed to build composition schema: {err}")))?;
+    normalize_arena_composition_output_schema(&mut schema);
     close_json_schema_objects(&mut schema);
+    validate_responses_output_schema(&schema)?;
     Ok(schema)
+}
+
+fn normalize_arena_composition_output_schema(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Object(object) => {
+            if let Some(reasoning_effort) = object
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|properties| properties.get_mut("reasoningEffort"))
+            {
+                *reasoning_effort = serde_json::json!({
+                    "type": "string",
+                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh"],
+                    "description": "Native app-server reasoning effort for this arena parent."
+                });
+            }
+            for value in object.values_mut() {
+                normalize_arena_composition_output_schema(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                normalize_arena_composition_output_schema(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_responses_output_schema(schema: &serde_json::Value) -> Result<(), JSONRPCErrorError> {
+    fn find_unsupported_keyword(
+        value: &serde_json::Value,
+        path: &mut Vec<String>,
+    ) -> Option<String> {
+        match value {
+            serde_json::Value::Object(object) => {
+                if object.contains_key("allOf") {
+                    return Some(path.join("."));
+                }
+                for (key, nested) in object {
+                    path.push(key.clone());
+                    if let Some(found) = find_unsupported_keyword(nested, path) {
+                        return Some(found);
+                    }
+                    path.pop();
+                }
+                None
+            }
+            serde_json::Value::Array(values) => {
+                values.iter().enumerate().find_map(|(index, nested)| {
+                    path.push(index.to_string());
+                    let found = find_unsupported_keyword(nested, path);
+                    path.pop();
+                    found
+                })
+            }
+            _ => None,
+        }
+    }
+
+    if let Some(path) = find_unsupported_keyword(schema, &mut Vec::new()) {
+        return Err(invalid_params(format!(
+            "arena composition output schema contains unsupported allOf at {path}"
+        )));
+    }
+    Ok(())
 }
 
 fn close_json_schema_objects(schema: &mut serde_json::Value) {
@@ -5806,6 +5874,12 @@ fn validate_arena_composition_contract(
                 participant.participant_id
             )));
         }
+        if matches!(participant.reasoning_effort, ReasoningEffort::Custom(_)) {
+            return Err(invalid_params(format!(
+                "participant {} reasoning effort must use a native app-server value",
+                participant.participant_id
+            )));
+        }
         if !params.upstream_authority_scope.is_empty()
             && participant.authority_scope.iter().any(|scope| {
                 !is_native_method_authority(&participant.agent_role, scope)
@@ -6745,6 +6819,49 @@ mod tests {
         assert!(object_count >= 4, "expected nested composition objects");
     }
 
+    #[test]
+    fn arena_composition_schema_uses_only_responses_compatible_reasoning_effort() {
+        fn assert_no_all_of(value: &serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    assert!(!object.contains_key("allOf"), "allOf is not supported");
+                    for nested in object.values() {
+                        assert_no_all_of(nested);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for nested in values {
+                        assert_no_all_of(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn find_reasoning_effort(value: &serde_json::Value) -> Option<&serde_json::Value> {
+            match value {
+                serde_json::Value::Object(object) => object
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|properties| properties.get("reasoningEffort"))
+                    .or_else(|| object.values().find_map(find_reasoning_effort)),
+                serde_json::Value::Array(values) => values.iter().find_map(find_reasoning_effort),
+                _ => None,
+            }
+        }
+
+        let schema = arena_composition_output_schema().expect("composition schema");
+        assert_no_all_of(&schema);
+        assert_eq!(
+            find_reasoning_effort(&schema)
+                .and_then(|value| value.get("enum"))
+                .cloned(),
+            Some(serde_json::json!([
+                "none", "minimal", "low", "medium", "high", "xhigh"
+            ]))
+        );
+    }
+
     #[derive(Debug)]
     struct FakeLivePeerParentDeliveryAdapter;
 
@@ -7278,6 +7395,18 @@ mod tests {
         .expect_err("reasoningEffort must not be omitted by the native planner");
 
         assert!(error.to_string().contains("reasoningEffort"));
+    }
+
+    #[test]
+    fn arena_composition_rejects_custom_reasoning_effort() {
+        let mut params = competitive_composition_params();
+        params.contract.participants[0].reasoning_effort =
+            ReasoningEffort::Custom("future-effort".to_string());
+
+        let error = validate_arena_composition_contract(&params)
+            .expect_err("arena participants must use known app-server effort values");
+
+        assert!(error.message.contains("reasoning effort"));
     }
 
     #[tokio::test]
