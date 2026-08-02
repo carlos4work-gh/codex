@@ -33,6 +33,7 @@ use crate::request_processors::InitializeRequestProcessor;
 use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
 use crate::request_processors::MemythosRequestProcessor;
+use crate::request_processors::NativeArenaCompositionPlanningAdapter;
 use crate::request_processors::NativeArenaParentProvisioningAdapter;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
@@ -544,6 +545,15 @@ impl MessageProcessor {
                 Arc::clone(&config),
                 thread_goal_processor.clone(),
                 thread_processor.clone(),
+            )),
+            Arc::new(NativeArenaCompositionPlanningAdapter::new(
+                Arc::clone(&thread_manager),
+                Arc::clone(&config),
+                thread_processor.clone(),
+                turn_processor.clone(),
+                Arc::new(ThreadTurnsParentResponseAdapter::new(
+                    thread_processor.clone(),
+                )),
             )),
         );
         *memythos_processor_holder
@@ -1228,6 +1238,11 @@ impl MessageProcessor {
             ClientRequest::MemythosArenaCompositionProvision { params, .. } => self
                 .memythos_processor
                 .arena_composition_provision(params, request_id.connection_id)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaRequest { params, .. } => self
+                .memythos_processor
+                .arena_request(params, request_id.connection_id)
                 .await
                 .map(Some),
             ClientRequest::MemythosArenaList { params, .. } => {

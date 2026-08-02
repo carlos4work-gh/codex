@@ -13,6 +13,7 @@ use codex_app_server_protocol::AdditionalContextKind;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::MemythosArena;
+use codex_app_server_protocol::MemythosArenaCompositionContract;
 use codex_app_server_protocol::MemythosArenaCompositionLease;
 use codex_app_server_protocol::MemythosArenaCompositionLifecycleState;
 use codex_app_server_protocol::MemythosArenaCompositionProvisionParams;
@@ -45,6 +46,8 @@ use codex_app_server_protocol::MemythosArenaPhaseCloseParams;
 use codex_app_server_protocol::MemythosArenaPhaseCloseResponse;
 use codex_app_server_protocol::MemythosArenaPhaseStartParams;
 use codex_app_server_protocol::MemythosArenaPhaseStartResponse;
+use codex_app_server_protocol::MemythosArenaRequestParams;
+use codex_app_server_protocol::MemythosArenaRequestResponse;
 use codex_app_server_protocol::MemythosArenaRunParams;
 use codex_app_server_protocol::MemythosArenaRunResponse;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
@@ -228,6 +231,232 @@ pub(crate) trait ArenaParentProvisioningAdapter: Send + Sync {
     ) -> ArenaParentProvisionFuture<'a>;
 
     fn rollback_parent<'a>(&'a self, thread_id: &'a str) -> ArenaParentProvisionFuture<'a>;
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlannedArenaComposition {
+    planner_thread_id: String,
+    planner_turn_id: String,
+    contract: MemythosArenaCompositionContract,
+}
+
+pub(crate) type ArenaCompositionPlanningFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<PlannedArenaComposition, JSONRPCErrorError>> + Send + 'a>>;
+
+pub(crate) trait ArenaCompositionPlanningAdapter: Send + Sync {
+    fn plan<'a>(
+        &'a self,
+        params: &'a MemythosArenaRequestParams,
+        previous: Option<&'a MemythosArenaCompositionProvisionResponse>,
+        connection_id: ConnectionId,
+    ) -> ArenaCompositionPlanningFuture<'a>;
+}
+
+#[derive(Clone)]
+pub(crate) struct NativeArenaCompositionPlanningAdapter {
+    thread_manager: Arc<ThreadManager>,
+    config: Arc<Config>,
+    thread_processor: ThreadRequestProcessor,
+    turn_processor: TurnRequestProcessor,
+    parent_turn_response_adapter: Arc<dyn ParentTurnResponseAdapter>,
+}
+
+impl NativeArenaCompositionPlanningAdapter {
+    pub(crate) fn new(
+        thread_manager: Arc<ThreadManager>,
+        config: Arc<Config>,
+        thread_processor: ThreadRequestProcessor,
+        turn_processor: TurnRequestProcessor,
+        parent_turn_response_adapter: Arc<dyn ParentTurnResponseAdapter>,
+    ) -> Self {
+        Self {
+            thread_manager,
+            config,
+            thread_processor,
+            turn_processor,
+            parent_turn_response_adapter,
+        }
+    }
+
+    fn planner_context(&self, params: &MemythosArenaRequestParams) -> serde_json::Value {
+        let roles = codex_core::effective_role_catalog(&self.config)
+            .into_iter()
+            .map(|role| {
+                let capabilities = role.config.planner_capabilities.as_ref();
+                serde_json::json!({
+                    "id": role.id,
+                    "description": role.config.description,
+                    "allowedStances": capabilities.map(|value| value.allowed_stances.clone()).unwrap_or_default(),
+                    "authorityScopes": capabilities.map(|value| value.authority_scopes.clone()).unwrap_or_default(),
+                    "participantKinds": capabilities.map(|value| value.participant_kinds.clone()).unwrap_or_default(),
+                    "requiredCompanions": capabilities.map(|value| value.required_companions.clone()).unwrap_or_default(),
+                    "incompatibleRoles": capabilities.map(|value| value.incompatible_roles.clone()).unwrap_or_default(),
+                    "supportsMultipleStances": capabilities.map(|value| value.supports_multiple_stances).unwrap_or(false),
+                    "proposalBearing": capabilities.map(|value| value.proposal_bearing).unwrap_or(false),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "caseId": params.case_id,
+            "layerId": params.layer_id,
+            "arenaId": params.arena_id,
+            "roomId": params.room_id,
+            "requestOrigin": params.request_origin,
+            "caseBrief": params.case_brief,
+            "layerObjective": params.layer_objective,
+            "expectedDeliverable": params.expected_deliverable,
+            "completionCriteria": params.completion_criteria,
+            "closedDecisions": params.closed_decisions,
+            "availableAuthority": params.available_authority,
+            "uncertainties": params.uncertainties,
+            "realityEvidence": params.reality_evidence,
+            "costGoal": params.cost_goal,
+            "nativeRoleCatalog": roles,
+        })
+    }
+}
+
+impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
+    fn plan<'a>(
+        &'a self,
+        params: &'a MemythosArenaRequestParams,
+        previous: Option<&'a MemythosArenaCompositionProvisionResponse>,
+        connection_id: ConnectionId,
+    ) -> ArenaCompositionPlanningFuture<'a> {
+        Box::pin(async move {
+            if previous.is_some() {
+                return Err(invalid_params(
+                    "memythos/arena/request recomposition requires an explicit native revision",
+                ));
+            }
+            let mut config = (*self.config).clone();
+            if let Some(cwd) = params.cwd.as_ref() {
+                config.cwd = AbsolutePathBuf::try_from(PathBuf::from(cwd)).map_err(|err| {
+                    invalid_params(format!("arena request cwd must be absolute: {err}"))
+                })?;
+            }
+            let environments = self
+                .thread_manager
+                .default_environment_selections(&config.cwd);
+            let planner = self
+                .thread_manager
+                .start_thread_with_options(StartThreadOptions {
+                    config,
+                    agent_role: None,
+                    root_developer_instructions: Some(
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. For a competitive arena, create at least two proposal-bearing bettors with materially different stances, plus coordination and judging roles required by the catalog. Return only the requested structured contract."
+                            .to_string(),
+                    ),
+                    initial_history: InitialHistory::New,
+                    session_source: None,
+                    thread_source: None,
+                    dynamic_tools: Vec::new(),
+                    metrics_service_name: Some("memythos_arena_composition_planner".to_string()),
+                    multi_agent_mode: None,
+                    parent_trace: None,
+                    environments,
+                    thread_extension_init: ExtensionDataInit::default(),
+                    supports_openai_form_elicitation: false,
+                })
+                .await
+                .map_err(|err| invalid_params(format!("failed to start native arena planner: {err}")))?;
+            self.thread_processor
+                .attach_thread_listener(planner.thread_id, connection_id)
+                .await?;
+            let planner_thread_id = planner.thread_id.to_string();
+            let request_id = ConnectionRequestId {
+                connection_id,
+                request_id: RequestId::String(format!("memythos-arena-plan:{}", params.arena_id)),
+            };
+            let context =
+                serde_json::to_string_pretty(&self.planner_context(params)).map_err(|err| {
+                    invalid_params(format!("failed to serialize arena planning context: {err}"))
+                })?;
+            let turn = self
+                .turn_processor
+                .turn_start(
+                    request_id,
+                    TurnStartParams {
+                        thread_id: planner_thread_id.clone(),
+                        client_user_message_id: Some(format!("arena-plan:{}", params.arena_id)),
+                        input: vec![UserInput::Text {
+                            text: format!("Plan the parent composition for this arena request. The client supplied semantic intent only; all runtime composition decisions belong here.\n\n{context}"),
+                            text_elements: vec![],
+                        }],
+                        responsesapi_client_metadata: None,
+                        additional_context: None,
+                        environments: None,
+                        cwd: None,
+                        runtime_workspace_roots: None,
+                        approval_policy: None,
+                        approvals_reviewer: None,
+                        sandbox_policy: None,
+                        permissions: None,
+                        model: None,
+                        service_tier: None,
+                        effort: None,
+                        summary: None,
+                        personality: None,
+                        output_schema: Some(
+                            serde_json::to_value(schemars::schema_for!(MemythosArenaCompositionContract))
+                                .map_err(|err| invalid_params(format!("failed to build composition schema: {err}")))?,
+                        ),
+                        collaboration_mode: None,
+                        multi_agent_mode: None,
+                    },
+                    Some("memythos".to_string()),
+                    None,
+                    false,
+                )
+                .await?;
+            let Some(ClientResponsePayload::TurnStart(turn)) = turn else {
+                return Err(invalid_params("native arena planner did not start a turn"));
+            };
+            let planner_turn_id = turn.turn.id;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+            loop {
+                let response = self
+                    .parent_turn_response_adapter
+                    .read_response(&planner_thread_id, &planner_turn_id)
+                    .await;
+                match response.status {
+                    Some(TurnStatus::Completed) => {
+                        let text = response.text.ok_or_else(|| {
+                            invalid_params(
+                                "native arena planner completed without structured output",
+                            )
+                        })?;
+                        let contract =
+                            serde_json::from_str::<MemythosArenaCompositionContract>(&text)
+                                .map_err(|err| {
+                                    invalid_params(format!(
+                                        "native arena planner returned invalid contract JSON: {err}"
+                                    ))
+                                })?;
+                        return Ok(PlannedArenaComposition {
+                            planner_thread_id,
+                            planner_turn_id,
+                            contract,
+                        });
+                    }
+                    Some(TurnStatus::Failed) | Some(TurnStatus::Interrupted) => {
+                        return Err(invalid_params(format!(
+                            "native arena planner turn {} did not complete successfully",
+                            planner_turn_id
+                        )));
+                    }
+                    _ => {}
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(invalid_params(format!(
+                        "timed out waiting for native arena planner turn {}",
+                        planner_turn_id
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -489,6 +718,25 @@ impl ArenaParentProvisioningAdapter for RecordOnlyArenaParentProvisioningAdapter
                 memory_scope: String::new(),
                 newly_created: false,
             })
+        })
+    }
+}
+
+#[cfg(test)]
+struct RecordOnlyArenaCompositionPlanningAdapter;
+
+#[cfg(test)]
+impl ArenaCompositionPlanningAdapter for RecordOnlyArenaCompositionPlanningAdapter {
+    fn plan<'a>(
+        &'a self,
+        _params: &'a MemythosArenaRequestParams,
+        _previous: Option<&'a MemythosArenaCompositionProvisionResponse>,
+        _connection_id: ConnectionId,
+    ) -> ArenaCompositionPlanningFuture<'a> {
+        Box::pin(async {
+            Err(invalid_params(
+                "native arena composition planning is unavailable in record-only mode",
+            ))
         })
     }
 }
@@ -1542,6 +1790,7 @@ pub(crate) struct MemythosRequestProcessor {
     parent_turn_response_adapter: Arc<dyn ParentTurnResponseAdapter>,
     parent_configuration_adapter: Arc<dyn ParentConfigurationAdapter>,
     arena_parent_provisioning_adapter: Arc<dyn ArenaParentProvisioningAdapter>,
+    arena_composition_planning_adapter: Arc<dyn ArenaCompositionPlanningAdapter>,
     next_layer_id: Arc<AtomicU64>,
     next_arena_id: Arc<AtomicU64>,
     next_attachment_id: Arc<AtomicU64>,
@@ -1595,6 +1844,7 @@ impl MemythosRequestProcessor {
             parent_turn_response_adapter,
             Arc::new(RecordOnlyParentConfigurationAdapter),
             Arc::new(RecordOnlyArenaParentProvisioningAdapter),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
         )
     }
 
@@ -1606,6 +1856,7 @@ impl MemythosRequestProcessor {
         parent_turn_response_adapter: Arc<dyn ParentTurnResponseAdapter>,
         parent_configuration_adapter: Arc<dyn ParentConfigurationAdapter>,
         arena_parent_provisioning_adapter: Arc<dyn ArenaParentProvisioningAdapter>,
+        arena_composition_planning_adapter: Arc<dyn ArenaCompositionPlanningAdapter>,
     ) -> Self {
         let (connection_mode, transport_owner, transport_id, daemon_runtime_verified) =
             match rpc_transport {
@@ -1652,6 +1903,7 @@ impl MemythosRequestProcessor {
             parent_turn_response_adapter,
             parent_configuration_adapter,
             arena_parent_provisioning_adapter,
+            arena_composition_planning_adapter,
             next_layer_id: Arc::new(AtomicU64::default()),
             next_arena_id: Arc::new(AtomicU64::default()),
             next_attachment_id: Arc::new(AtomicU64::default()),
@@ -1869,6 +2121,147 @@ impl MemythosRequestProcessor {
         arenas.sort_by(|a, b| a.arena_id.cmp(&b.arena_id));
 
         Ok(MemythosArenaListResponse { arenas }.into())
+    }
+
+    pub(crate) async fn arena_request(
+        &self,
+        params: MemythosArenaRequestParams,
+        connection_id: ConnectionId,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        if params.case_id.trim().is_empty()
+            || params.layer_id.trim().is_empty()
+            || params.arena_id.trim().is_empty()
+            || params.room_id.trim().is_empty()
+            || params.request_origin.trim().is_empty()
+            || params.case_brief.trim().is_empty()
+            || params.layer_objective.trim().is_empty()
+            || params.expected_deliverable.trim().is_empty()
+            || params.completion_criteria.is_empty()
+            || params.cost_goal.trim().is_empty()
+        {
+            return Err(invalid_params(
+                "arena request requires semantic case, layer, arena, room, origin, objective, deliverable, completion criteria, and cost goal",
+            ));
+        }
+        let previous = {
+            let state = self.state.lock().await;
+            state.arena_compositions.get(&params.arena_id).cloned()
+        };
+        let planned = self
+            .arena_composition_planning_adapter
+            .plan(&params, previous.as_ref(), connection_id)
+            .await?;
+        if planned.contract.arena_id != params.arena_id {
+            return Err(invalid_params(format!(
+                "native planner returned arena id {} for requested arena {}",
+                planned.contract.arena_id, params.arena_id
+            )));
+        }
+        let provision = self
+            .arena_composition_provision(
+                MemythosArenaCompositionProvisionParams {
+                    case_id: params.case_id.clone(),
+                    layer_id: params.layer_id.clone(),
+                    room_id: params.room_id.clone(),
+                    cwd: params.cwd.clone(),
+                    upstream_authority_scope: params.available_authority.clone(),
+                    contract: planned.contract,
+                    revision: None,
+                },
+                connection_id,
+            )
+            .await?;
+        let ClientResponsePayload::MemythosArenaCompositionProvision(composition) = provision
+        else {
+            return Err(invalid_params(
+                "native arena provisioning returned an unexpected response",
+            ));
+        };
+        let target_participant_id = composition
+            .contract
+            .coordination
+            .coordinator_participant_id
+            .as_ref()
+            .or(composition
+                .contract
+                .coordination
+                .concierge_participant_id
+                .as_ref())
+            .ok_or_else(|| invalid_params("arena composition has no coordinator or concierge"))?;
+        let target = composition
+            .leases
+            .iter()
+            .find(|lease| &lease.participant_id == target_participant_id)
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "arena composition has no live lease for intake target {}",
+                    target_participant_id
+                ))
+            })?;
+        let request_id = self.next_id("mem_arena_request", &self.next_delivery_id);
+        let room_message_ref = format!(
+            "app-server://rooms/{}/human-intake/{}",
+            params.room_id, request_id
+        );
+        let delivery_ref = format!("{room_message_ref}/delivery");
+        let prompt = format!(
+            "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nReceive this as the initial human request for the arena. Coordinate through the native room and preserve role authority.",
+            params.request_origin,
+            params.case_brief,
+            params.layer_objective,
+            params.expected_deliverable,
+            params.completion_criteria.join("\n- "),
+            params.closed_decisions.join("\n- "),
+            params.uncertainties.join("\n- "),
+            params.reality_evidence.join("\n- "),
+            params.cost_goal,
+        );
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "memythos_phase".to_string(),
+            serde_json::Value::String("arena_intake".to_string()),
+        );
+        metadata.insert(
+            "memythos_request_origin".to_string(),
+            serde_json::Value::String(params.request_origin.clone()),
+        );
+        let delivery = self
+            .room_send_input_on_connection(
+                MemythosRoomSendInputParams {
+                    room_id: params.room_id.clone(),
+                    room_message_ref,
+                    delivery_ref,
+                    from_parent_thread_id: None,
+                    via_concierge_thread_id: None,
+                    to_parent_thread_id: target.thread_id.clone(),
+                    source_parent_key: format!("human:{}", params.request_origin),
+                    target_parent_key: target.parent_key.clone(),
+                    message_kind: "human_intake".to_string(),
+                    message_authority: "human_delegated".to_string(),
+                    human_instruction: true,
+                    response_contract: params.expected_deliverable.clone(),
+                    client_user_message_id: Some(request_id.clone()),
+                    human_summary: params.case_brief.clone(),
+                    prompt,
+                    metadata,
+                    output_schema: None,
+                },
+                connection_id,
+            )
+            .await?;
+        let ClientResponsePayload::MemythosRoomSendInput(delivery) = delivery else {
+            return Err(invalid_params(
+                "native arena intake returned an unexpected response",
+            ));
+        };
+        Ok(MemythosArenaRequestResponse {
+            request_id,
+            planner_thread_id: planned.planner_thread_id,
+            planner_turn_id: planned.planner_turn_id,
+            composition,
+            initial_delivery: delivery.delivery,
+        }
+        .into())
     }
 
     pub(crate) async fn arena_composition_provision(
@@ -5787,6 +6180,31 @@ mod tests {
         rolled_back: Arc<Mutex<Vec<String>>>,
     }
 
+    struct FakeArenaCompositionPlanningAdapter {
+        contract: MemythosArenaCompositionContract,
+    }
+
+    impl ArenaCompositionPlanningAdapter for FakeArenaCompositionPlanningAdapter {
+        fn plan<'a>(
+            &'a self,
+            _params: &'a MemythosArenaRequestParams,
+            previous: Option<&'a MemythosArenaCompositionProvisionResponse>,
+            _connection_id: ConnectionId,
+        ) -> ArenaCompositionPlanningFuture<'a> {
+            let contract = self.contract.clone();
+            Box::pin(async move {
+                if previous.is_some() {
+                    return Err(invalid_params("test planner requires explicit revision"));
+                }
+                Ok(PlannedArenaComposition {
+                    planner_thread_id: "planner-thread".to_string(),
+                    planner_turn_id: "planner-turn".to_string(),
+                    contract,
+                })
+            })
+        }
+    }
+
     impl ArenaParentProvisioningAdapter for FakeArenaParentProvisioningAdapter {
         fn provision_parent<'a>(
             &'a self,
@@ -5926,6 +6344,70 @@ mod tests {
         }
     }
 
+    fn semantic_arena_request_params() -> MemythosArenaRequestParams {
+        MemythosArenaRequestParams {
+            case_id: "case-composition".to_string(),
+            layer_id: "bpm_e2e".to_string(),
+            arena_id: "arena-composition".to_string(),
+            room_id: "room-composition".to_string(),
+            cwd: None,
+            request_origin: "human".to_string(),
+            case_brief: "Decide whether the BPM node can move to tactical design".to_string(),
+            layer_objective: "Protect end-to-end business authority".to_string(),
+            expected_deliverable: "A supported arena decision".to_string(),
+            completion_criteria: vec!["Judge selects a supported position".to_string()],
+            closed_decisions: vec!["The BPM scope is already approved".to_string()],
+            available_authority: vec!["business_process".to_string()],
+            uncertainties: vec!["Operational ownership needs validation".to_string()],
+            reality_evidence: vec!["Current process map".to_string()],
+            cost_goal: "Use the smallest sufficient arena".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn arena_request_owns_planning_provisioning_and_initial_activation() {
+        let contract = competitive_composition_params().contract;
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(FakeArenaCompositionPlanningAdapter { contract }),
+        );
+
+        let response = processor
+            .arena_request(semantic_arena_request_params(), ConnectionId(7))
+            .await
+            .expect("semantic request should create and activate the arena internally");
+        let ClientResponsePayload::MemythosArenaRequest(response) = response else {
+            panic!("expected semantic arena request response");
+        };
+
+        assert_eq!(response.planner_thread_id, "planner-thread");
+        assert_eq!(response.planner_turn_id, "planner-turn");
+        assert_eq!(response.composition.leases.len(), 5);
+        assert_eq!(
+            response
+                .composition
+                .leases
+                .iter()
+                .filter(|lease| lease.role == "bettor")
+                .count(),
+            2
+        );
+        assert!(response.initial_delivery.human_instruction);
+        assert_eq!(
+            response.initial_delivery.thread_id,
+            "test::scrum_master::coordinator"
+        );
+        let state = processor.state.lock().await;
+        assert_eq!(state.arena_compositions.len(), 1);
+        assert_eq!(state.arena_message_deliveries.len(), 1);
+    }
+
     #[tokio::test]
     async fn arena_composition_provisions_plural_bettors_atomically() {
         let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
@@ -5936,6 +6418,7 @@ mod tests {
             Arc::new(RecordOnlyParentTurnResponseAdapter),
             Arc::new(CompositionParentConfigurationAdapter),
             Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
         );
         let response = processor
             .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
@@ -5977,6 +6460,7 @@ mod tests {
             Arc::new(RecordOnlyParentTurnResponseAdapter),
             Arc::new(CompositionParentConfigurationAdapter),
             Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
         );
         let first = processor
             .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
@@ -6062,6 +6546,7 @@ mod tests {
             Arc::new(RecordOnlyParentTurnResponseAdapter),
             Arc::new(CompositionParentConfigurationAdapter),
             provisioning.clone(),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
         );
 
         let error = processor
@@ -6091,6 +6576,7 @@ mod tests {
             Arc::new(RecordOnlyParentTurnResponseAdapter),
             Arc::new(CompositionParentConfigurationAdapter),
             Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
         );
         let error = processor
             .arena_composition_provision(params, ConnectionId(0))
@@ -7300,6 +7786,7 @@ mod tests {
             Arc::new(RecordOnlyParentTurnResponseAdapter),
             Arc::new(FakeParentConfigurationAdapter),
             Arc::new(RecordOnlyArenaParentProvisioningAdapter),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
         );
         processor
             .room_register(room_register_params())

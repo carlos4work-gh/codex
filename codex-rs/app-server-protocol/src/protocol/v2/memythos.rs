@@ -656,6 +656,43 @@ pub struct MemythosArenaCompositionProvisionResponse {
     pub event_refs: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaRequestParams {
+    pub case_id: String,
+    pub layer_id: String,
+    pub arena_id: String,
+    pub room_id: String,
+    #[ts(optional = nullable)]
+    pub cwd: Option<String>,
+    pub request_origin: String,
+    pub case_brief: String,
+    pub layer_objective: String,
+    pub expected_deliverable: String,
+    pub completion_criteria: Vec<String>,
+    #[serde(default)]
+    pub closed_decisions: Vec<String>,
+    #[serde(default)]
+    pub available_authority: Vec<String>,
+    #[serde(default)]
+    pub uncertainties: Vec<String>,
+    #[serde(default)]
+    pub reality_evidence: Vec<String>,
+    pub cost_goal: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaRequestResponse {
+    pub request_id: String,
+    pub planner_thread_id: String,
+    pub planner_turn_id: String,
+    pub composition: MemythosArenaCompositionProvisionResponse,
+    pub initial_delivery: MemythosRoomSendInputDelivery,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

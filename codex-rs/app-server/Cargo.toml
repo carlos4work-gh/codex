@@ -82,6 +82,7 @@ clap = { workspace = true, features = ["derive"] }
 futures = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+schemars = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
