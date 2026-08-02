@@ -18,6 +18,8 @@ use codex_app_server_protocol::MemythosArenaCompositionLease;
 use codex_app_server_protocol::MemythosArenaCompositionLifecycleState;
 use codex_app_server_protocol::MemythosArenaCompositionProvisionParams;
 use codex_app_server_protocol::MemythosArenaCompositionProvisionResponse;
+use codex_app_server_protocol::MemythosArenaCompositionRevision;
+use codex_app_server_protocol::MemythosArenaCompositionRevisionAction;
 use codex_app_server_protocol::MemythosArenaCompositionRevisionActionKind;
 use codex_app_server_protocol::MemythosArenaCreateParams;
 use codex_app_server_protocol::MemythosArenaCreateResponse;
@@ -278,7 +280,11 @@ impl NativeArenaCompositionPlanningAdapter {
         }
     }
 
-    fn planner_context(&self, params: &MemythosArenaRequestParams) -> serde_json::Value {
+    fn planner_context(
+        &self,
+        params: &MemythosArenaRequestParams,
+        previous: Option<&MemythosArenaCompositionProvisionResponse>,
+    ) -> serde_json::Value {
         let roles = codex_core::effective_role_catalog(&self.config)
             .into_iter()
             .map(|role| {
@@ -311,6 +317,8 @@ impl NativeArenaCompositionPlanningAdapter {
             "uncertainties": params.uncertainties,
             "realityEvidence": params.reality_evidence,
             "costGoal": params.cost_goal,
+            "compositionChangeSignal": params.composition_change_signal,
+            "previousComposition": previous,
             "nativeRoleCatalog": roles,
         })
     }
@@ -324,11 +332,6 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
         connection_id: ConnectionId,
     ) -> ArenaCompositionPlanningFuture<'a> {
         Box::pin(async move {
-            if previous.is_some() {
-                return Err(invalid_params(
-                    "memythos/arena/request recomposition requires an explicit native revision",
-                ));
-            }
             let mut config = (*self.config).clone();
             if let Some(cwd) = params.cwd.as_ref() {
                 config.cwd = AbsolutePathBuf::try_from(PathBuf::from(cwd)).map_err(|err| {
@@ -368,8 +371,8 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                 connection_id,
                 request_id: RequestId::String(format!("memythos-arena-plan:{}", params.arena_id)),
             };
-            let context =
-                serde_json::to_string_pretty(&self.planner_context(params)).map_err(|err| {
+            let context = serde_json::to_string_pretty(&self.planner_context(params, previous))
+                .map_err(|err| {
                     invalid_params(format!("failed to serialize arena planning context: {err}"))
                 })?;
             let turn = self
@@ -380,7 +383,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                         thread_id: planner_thread_id.clone(),
                         client_user_message_id: Some(format!("arena-plan:{}", params.arena_id)),
                         input: vec![UserInput::Text {
-                            text: format!("Plan the parent composition for this arena request. The client supplied semantic intent only; all runtime composition decisions belong here.\n\n{context}"),
+                            text: format!("Plan the parent composition for this arena request. The client supplied semantic intent only; all runtime composition decisions belong here. If previousComposition exists, preserve participant IDs only when role and stance remain identical; use new IDs for replacements and explain the change in rationale.\n\n{context}"),
                             text_elements: vec![],
                         }],
                         responsesapi_client_metadata: None,
@@ -2157,6 +2160,10 @@ impl MemythosRequestProcessor {
                 planned.contract.arena_id, params.arena_id
             )));
         }
+        let revision = previous
+            .as_ref()
+            .map(|previous| build_native_composition_revision(&params, previous, &planned.contract))
+            .transpose()?;
         let provision = self
             .arena_composition_provision(
                 MemythosArenaCompositionProvisionParams {
@@ -2166,7 +2173,7 @@ impl MemythosRequestProcessor {
                     cwd: params.cwd.clone(),
                     upstream_authority_scope: params.available_authority.clone(),
                     contract: planned.contract,
-                    revision: None,
+                    revision,
                 },
                 connection_id,
             )
@@ -5534,6 +5541,93 @@ fn validate_arena_composition_revision(
     Ok(())
 }
 
+fn build_native_composition_revision(
+    params: &MemythosArenaRequestParams,
+    previous: &MemythosArenaCompositionProvisionResponse,
+    next: &MemythosArenaCompositionContract,
+) -> Result<MemythosArenaCompositionRevision, JSONRPCErrorError> {
+    let trigger = params
+        .composition_change_signal
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            invalid_params(
+                "an active arena requires compositionChangeSignal for native agentic replanning",
+            )
+        })?;
+    let previous_by_id = previous
+        .contract
+        .participants
+        .iter()
+        .map(|participant| (participant.participant_id.as_str(), participant))
+        .collect::<HashMap<_, _>>();
+    let next_by_id = next
+        .participants
+        .iter()
+        .map(|participant| (participant.participant_id.as_str(), participant))
+        .collect::<HashMap<_, _>>();
+    let lease_by_id = previous
+        .leases
+        .iter()
+        .map(|lease| (lease.participant_id.as_str(), lease))
+        .collect::<HashMap<_, _>>();
+    let mut actions = Vec::new();
+    for participant in &previous.contract.participants {
+        let lease = lease_by_id
+            .get(participant.participant_id.as_str())
+            .ok_or_else(|| invalid_params("active composition participant has no lease"))?;
+        match next_by_id.get(participant.participant_id.as_str()) {
+            Some(next_participant)
+                if next_participant.agent_role == participant.agent_role
+                    && next_participant.stance == participant.stance =>
+            {
+                actions.push(MemythosArenaCompositionRevisionAction {
+                    action: MemythosArenaCompositionRevisionActionKind::Keep,
+                    participant_id: participant.participant_id.clone(),
+                    thread_id: Some(lease.thread_id.clone()),
+                    reason: "native planner preserved role and stance identity".to_string(),
+                });
+            }
+            Some(_) => {
+                return Err(invalid_params(format!(
+                    "native planner changed role or stance for live participant {}; replacements require retire plus a new participant id",
+                    participant.participant_id
+                )));
+            }
+            None => actions.push(MemythosArenaCompositionRevisionAction {
+                action: MemythosArenaCompositionRevisionActionKind::Retire,
+                participant_id: participant.participant_id.clone(),
+                thread_id: Some(lease.thread_id.clone()),
+                reason: format!("native replanning retired this contribution after: {trigger}"),
+            }),
+        }
+    }
+    for participant in &next.participants {
+        if !previous_by_id.contains_key(participant.participant_id.as_str()) {
+            actions.push(MemythosArenaCompositionRevisionAction {
+                action: MemythosArenaCompositionRevisionActionKind::Add,
+                participant_id: participant.participant_id.clone(),
+                thread_id: None,
+                reason: format!("native replanning added this contribution after: {trigger}"),
+            });
+        }
+    }
+    Ok(MemythosArenaCompositionRevision {
+        revision_id: format!(
+            "{}-revision-{}",
+            params.arena_id,
+            previous.composition_version + 1
+        ),
+        previous_version: previous.composition_version,
+        next_version: previous.composition_version + 1,
+        previous_contract_ref: previous.event_refs.first().cloned().unwrap_or_default(),
+        trigger: trigger.to_string(),
+        rationale: next.rationale.clone(),
+        actions,
+    })
+}
+
 fn native_token_usage_key(thread_id: &str, turn_id: &str) -> String {
     format!("{thread_id}::{turn_id}")
 }
@@ -6188,14 +6282,11 @@ mod tests {
         fn plan<'a>(
             &'a self,
             _params: &'a MemythosArenaRequestParams,
-            previous: Option<&'a MemythosArenaCompositionProvisionResponse>,
+            _previous: Option<&'a MemythosArenaCompositionProvisionResponse>,
             _connection_id: ConnectionId,
         ) -> ArenaCompositionPlanningFuture<'a> {
             let contract = self.contract.clone();
             Box::pin(async move {
-                if previous.is_some() {
-                    return Err(invalid_params("test planner requires explicit revision"));
-                }
                 Ok(PlannedArenaComposition {
                     planner_thread_id: "planner-thread".to_string(),
                     planner_turn_id: "planner-turn".to_string(),
@@ -6361,6 +6452,7 @@ mod tests {
             uncertainties: vec!["Operational ownership needs validation".to_string()],
             reality_evidence: vec!["Current process map".to_string()],
             cost_goal: "Use the smallest sufficient arena".to_string(),
+            composition_change_signal: None,
         }
     }
 
@@ -6406,6 +6498,56 @@ mod tests {
         let state = processor.state.lock().await;
         assert_eq!(state.arena_compositions.len(), 1);
         assert_eq!(state.arena_message_deliveries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn arena_request_replans_an_active_arena_from_a_semantic_change_signal() {
+        let contract = competitive_composition_params().contract;
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(FakeArenaCompositionPlanningAdapter { contract }),
+        );
+
+        processor
+            .arena_request(semantic_arena_request_params(), ConnectionId(7))
+            .await
+            .expect("initial semantic request should provision");
+        let mut update = semantic_arena_request_params();
+        update.composition_change_signal = Some(
+            "upstream contract changed; verify whether the current perspectives remain sufficient"
+                .to_string(),
+        );
+        let response = processor
+            .arena_request(update, ConnectionId(7))
+            .await
+            .expect("semantic change signal should replan inside app-server");
+        let ClientResponsePayload::MemythosArenaRequest(response) = response else {
+            panic!("expected semantic arena request response");
+        };
+
+        assert_eq!(response.composition.composition_version, 2);
+        let revision = response
+            .composition
+            .applied_revision
+            .expect("native revision should be recorded");
+        assert_eq!(revision.actions.len(), 5);
+        assert!(revision.actions.iter().all(|action| {
+            action.action == MemythosArenaCompositionRevisionActionKind::Keep
+                && action.thread_id.is_some()
+        }));
+        assert!(
+            response
+                .composition
+                .leases
+                .iter()
+                .all(|lease| lease.lease_source == "reused")
+        );
     }
 
     #[tokio::test]

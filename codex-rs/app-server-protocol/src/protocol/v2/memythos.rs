@@ -680,6 +680,8 @@ pub struct MemythosArenaRequestParams {
     #[serde(default)]
     pub reality_evidence: Vec<String>,
     pub cost_goal: String,
+    #[ts(optional = nullable)]
+    pub composition_change_signal: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
