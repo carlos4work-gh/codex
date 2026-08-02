@@ -143,7 +143,6 @@ use codex_core::config::Config;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -334,6 +333,30 @@ impl NativeArenaCompositionPlanningAdapter {
         }
     }
 
+    async fn read_planner_turn(
+        &self,
+        planner_thread_id: &str,
+        planner_turn_id: &str,
+    ) -> Result<Option<codex_app_server_protocol::Turn>, JSONRPCErrorError> {
+        let response = self
+            .thread_processor
+            .thread_turns_list(ThreadTurnsListParams {
+                thread_id: planner_thread_id.to_string(),
+                cursor: None,
+                limit: Some(10),
+                sort_direction: Some(SortDirection::Desc),
+                items_view: Some(TurnItemsView::Full),
+            })
+            .await?;
+        let Some(ClientResponsePayload::ThreadTurnsList(response)) = response else {
+            return Ok(None);
+        };
+        Ok(response
+            .data
+            .into_iter()
+            .find(|turn| turn.id == planner_turn_id))
+    }
+
     fn planner_context(
         &self,
         params: &MemythosArenaRequestParams,
@@ -470,8 +493,24 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
             let mut role_gap_repair_attempts = 0_u8;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
             loop {
-                match planner.thread.agent_status().await {
-                    AgentStatus::Completed(Some(text)) => {
+                let planner_turn = self
+                    .read_planner_turn(&planner_thread_id, &planner_turn_id)
+                    .await?;
+                match planner_turn.as_ref().map(|turn| &turn.status) {
+                    Some(TurnStatus::Completed) => {
+                        let text = planner_turn
+                            .as_ref()
+                            .and_then(|turn| {
+                                turn.items.iter().rev().find_map(|item| match item {
+                                    ThreadItem::AgentMessage { text, .. } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                            })
+                            .ok_or_else(|| {
+                                invalid_params(format!(
+                                    "native arena planner turn {planner_turn_id} completed without an OOTB final AgentMessage"
+                                ))
+                            })?;
                         let contract =
                             serde_json::from_str::<MemythosArenaCompositionContract>(&text)
                                 .map_err(|err| {
@@ -545,22 +584,22 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                             contract,
                         });
                     }
-                    AgentStatus::Completed(None) => {
-                        return Err(invalid_params(
-                            "native arena planner completed without an OOTB final AgentMessage",
-                        ));
-                    }
-                    AgentStatus::Errored(error) => {
+                    Some(TurnStatus::Failed) => {
+                        let error = planner_turn
+                            .as_ref()
+                            .and_then(|turn| turn.error.as_ref())
+                            .map(|error| error.message.as_str())
+                            .unwrap_or("unknown app-server turn failure");
                         return Err(invalid_params(format!(
                             "native arena planner turn {planner_turn_id} failed: {error}"
                         )));
                     }
-                    AgentStatus::Shutdown | AgentStatus::NotFound => {
+                    Some(TurnStatus::Interrupted) => {
                         return Err(invalid_params(format!(
-                            "native arena planner thread {planner_thread_id} closed before turn {planner_turn_id} produced a contract"
+                            "native arena planner turn {planner_turn_id} was interrupted"
                         )));
                     }
-                    AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted => {}
+                    Some(TurnStatus::InProgress) | None => {}
                 }
                 if tokio::time::Instant::now() >= deadline {
                     return Err(invalid_params(format!(
