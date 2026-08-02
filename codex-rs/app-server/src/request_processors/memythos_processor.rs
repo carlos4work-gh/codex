@@ -181,6 +181,13 @@ struct MemythosRuntimeState {
     telemetry_refs: Vec<MemythosTelemetryRef>,
 }
 
+#[derive(Debug, Clone)]
+struct ArenaClosureCandidate {
+    arena_id: String,
+    layer_id: String,
+    parent_thread_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ParentConfigurationSnapshot {
     agent_role: Option<String>,
@@ -4701,7 +4708,7 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosRoomActivityListParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
-        let (room, mut deliveries, room_activity_events, token_usage_refs) = {
+        let (room, arena_lifecycle_state, mut deliveries, room_activity_events, token_usage_refs) = {
             let state = self.state.lock().await;
             let room =
                 state.rooms.get(&params.room_id).cloned().ok_or_else(|| {
@@ -4743,7 +4750,17 @@ impl MemythosRequestProcessor {
                 })
                 .map(|(_, value)| value.clone())
                 .collect::<Vec<_>>();
-            (room, deliveries, room_activity_events, token_usage_refs)
+            let arena_lifecycle_state = state
+                .arenas
+                .get(&room.arena_id)
+                .map(|arena| arena.lifecycle_state);
+            (
+                room,
+                arena_lifecycle_state,
+                deliveries,
+                room_activity_events,
+                token_usage_refs,
+            )
         };
         deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
         if let Some(phase) = params.phase.as_ref() {
@@ -4816,7 +4833,9 @@ impl MemythosRequestProcessor {
                     || delivery.status == "receiver_turn_running"
             })
             .count();
-        let clean_close = active_turns == 0 && failed_turns == 0;
+        let clean_close = arena_lifecycle_state == Some(MemythosArenaLifecycleState::ClosedCleanly)
+            && active_turns == 0
+            && failed_turns == 0;
         let participants = room
             .participants
             .iter()
@@ -5299,103 +5318,189 @@ impl MemythosRequestProcessor {
         completed_at: Option<i64>,
         duration_ms: Option<i64>,
     ) -> bool {
-        let mut state = self.state.lock().await;
-        let Some((layer_id, arena_id)) = find_attachment_context(&state, thread_id) else {
-            return false;
-        };
-
-        let native_event_ref =
-            format!("app-server://threads/{thread_id}/turns/{turn_id}/completed");
-        let mut matched_delivery = false;
-        for delivery in state
-            .arena_message_deliveries
-            .iter_mut()
-            .filter(|delivery| {
-                delivery.receiver_thread_id == thread_id
-                    && delivery.receiver_turn_id.as_deref() == Some(turn_id)
-            })
-        {
-            matched_delivery = true;
-            delivery.status = match status {
-                "completed" => "receiver_turn_completed".to_string(),
-                "failed" => "receiver_turn_failed".to_string(),
-                "interrupted" => "receiver_turn_interrupted".to_string(),
-                _ => format!("receiver_turn_{status}"),
+        let (matched_delivery, closure_candidate) = {
+            let mut state = self.state.lock().await;
+            let Some((layer_id, arena_id)) = find_attachment_context(&state, thread_id) else {
+                return false;
             };
-            delivery.receiver_response_event_ref = Some(native_event_ref.clone());
-            if !delivery.event_refs.contains(&native_event_ref) {
-                delivery.event_refs.push(native_event_ref.clone());
-            }
-        }
 
-        let detail_ref = completed_at.map(|completed_at| {
-            format!("app-server://threads/{thread_id}/turns/{turn_id}/completed_at/{completed_at}")
-        });
-        let summary = match duration_ms {
-            Some(duration_ms) => format!(
-                "Native turn {turn_id} for thread {thread_id} completed with status {status} in {duration_ms}ms."
-            ),
-            None => format!(
-                "Native turn {turn_id} for thread {thread_id} completed with status {status}."
-            ),
-        };
-        self.push_telemetry_ref(
-            &mut state,
-            MemythosTelemetryRefKind::ArenaMessage,
-            MemythosTelemetrySource::AppServerNative,
-            Some(layer_id.clone()),
-            Some(arena_id.clone()),
-            Some(thread_id.to_string()),
-            Some(native_event_ref.clone()),
-            detail_ref.clone(),
-            MemythosEventChannel::StateTransition,
-            summary.clone(),
-        );
-        let room_activity_targets = state
-            .rooms
-            .values()
-            .filter(|room| room.arena_id == arena_id)
-            .filter_map(|room| {
-                room.participants
-                    .iter()
-                    .find(|participant| participant.thread_id == thread_id)
-                    .map(|participant| {
-                        (
-                            room.room_id.clone(),
-                            room.arena_id.clone(),
-                            participant.clone(),
-                        )
-                    })
-            })
-            .collect::<Vec<_>>();
-        for (room_id, room_arena_id, participant) in room_activity_targets {
-            self.push_room_activity_event(
+            let native_event_ref =
+                format!("app-server://threads/{thread_id}/turns/{turn_id}/completed");
+            let mut matched_delivery = false;
+            for delivery in state
+                .arena_message_deliveries
+                .iter_mut()
+                .filter(|delivery| {
+                    delivery.receiver_thread_id == thread_id
+                        && delivery.receiver_turn_id.as_deref() == Some(turn_id)
+                })
+            {
+                matched_delivery = true;
+                delivery.status = match status {
+                    "completed" => "receiver_turn_completed".to_string(),
+                    "failed" => "receiver_turn_failed".to_string(),
+                    "interrupted" => "receiver_turn_interrupted".to_string(),
+                    _ => format!("receiver_turn_{status}"),
+                };
+                delivery.receiver_response_event_ref = Some(native_event_ref.clone());
+                if !delivery.event_refs.contains(&native_event_ref) {
+                    delivery.event_refs.push(native_event_ref.clone());
+                }
+            }
+
+            let detail_ref = completed_at.map(|completed_at| {
+                format!(
+                    "app-server://threads/{thread_id}/turns/{turn_id}/completed_at/{completed_at}"
+                )
+            });
+            let summary = match duration_ms {
+                Some(duration_ms) => format!(
+                    "Native turn {turn_id} for thread {thread_id} completed with status {status} in {duration_ms}ms."
+                ),
+                None => format!(
+                    "Native turn {turn_id} for thread {thread_id} completed with status {status}."
+                ),
+            };
+            self.push_telemetry_ref(
                 &mut state,
-                room_id,
-                room_arena_id,
-                thread_id.to_string(),
-                Some(turn_id.to_string()),
-                None,
-                None,
-                participant.parent_role.clone(),
-                room_actor_ref_for_participant(&participant),
-                app_server_actor_ref(),
-                "turn_lifecycle".to_string(),
-                MemythosPromptOrigin::AppServerProtocol,
-                vec![MemythosPromptLineagePart {
-                    origin: MemythosPromptOrigin::AppServerProtocol,
-                    summary: "app-server observed parent turn completion".to_string(),
-                    source_ref: Some(native_event_ref.clone()),
-                }],
-                "lifecycle",
-                "turn_completed",
-                status,
-                summary.clone(),
+                MemythosTelemetryRefKind::ArenaMessage,
+                MemythosTelemetrySource::AppServerNative,
+                Some(layer_id.clone()),
+                Some(arena_id.clone()),
+                Some(thread_id.to_string()),
                 Some(native_event_ref.clone()),
+                detail_ref.clone(),
+                MemythosEventChannel::StateTransition,
+                summary.clone(),
             );
+            let room_activity_targets = state
+                .rooms
+                .values()
+                .filter(|room| room.arena_id == arena_id)
+                .filter_map(|room| {
+                    room.participants
+                        .iter()
+                        .find(|participant| participant.thread_id == thread_id)
+                        .map(|participant| {
+                            (
+                                room.room_id.clone(),
+                                room.arena_id.clone(),
+                                participant.clone(),
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
+            for (room_id, room_arena_id, participant) in room_activity_targets {
+                self.push_room_activity_event(
+                    &mut state,
+                    room_id,
+                    room_arena_id,
+                    thread_id.to_string(),
+                    Some(turn_id.to_string()),
+                    None,
+                    None,
+                    participant.parent_role.clone(),
+                    room_actor_ref_for_participant(&participant),
+                    app_server_actor_ref(),
+                    "turn_lifecycle".to_string(),
+                    MemythosPromptOrigin::AppServerProtocol,
+                    vec![MemythosPromptLineagePart {
+                        origin: MemythosPromptOrigin::AppServerProtocol,
+                        summary: "app-server observed parent turn completion".to_string(),
+                        source_ref: Some(native_event_ref.clone()),
+                    }],
+                    "lifecycle",
+                    "turn_completed",
+                    status,
+                    summary.clone(),
+                    Some(native_event_ref.clone()),
+                );
+            }
+
+            let closure_candidate = if status == "completed" {
+                arena_closure_candidate(&state, &arena_id, thread_id)
+            } else {
+                None
+            };
+            (matched_delivery, closure_candidate)
+        };
+
+        if let Some(candidate) = closure_candidate {
+            self.close_arena_parent_goals(candidate).await;
         }
 
         matched_delivery
+    }
+
+    async fn close_arena_parent_goals(&self, candidate: ArenaClosureCandidate) {
+        let mut original_goals = Vec::with_capacity(candidate.parent_thread_ids.len());
+        for parent_thread_id in &candidate.parent_thread_ids {
+            let Ok(Some(goal)) = self
+                .arena_parent_provisioning_adapter
+                .read_parent_goal(parent_thread_id)
+                .await
+            else {
+                return;
+            };
+            original_goals.push(goal);
+        }
+
+        let mut transitioned: Vec<ThreadGoal> = Vec::new();
+        for goal in &original_goals {
+            if goal.status != ThreadGoalStatus::Complete {
+                if self
+                    .arena_parent_provisioning_adapter
+                    .transition_parent_goal(
+                        &goal.thread_id,
+                        Some(&goal.objective),
+                        ThreadGoalStatus::Complete,
+                        false,
+                    )
+                    .await
+                    .is_err()
+                {
+                    for transitioned_goal in transitioned.iter().rev() {
+                        let _ = self
+                            .arena_parent_provisioning_adapter
+                            .transition_parent_goal(
+                                &transitioned_goal.thread_id,
+                                Some(&transitioned_goal.objective),
+                                transitioned_goal.status.clone(),
+                                false,
+                            )
+                            .await;
+                    }
+                    return;
+                }
+                transitioned.push(goal.clone());
+            }
+        }
+
+        let mut state = self.state.lock().await;
+        if let Some(arena) = state.arenas.get_mut(&candidate.arena_id) {
+            arena.lifecycle_state = MemythosArenaLifecycleState::ClosedCleanly;
+        }
+        if let Some(composition) = state.arena_compositions.get_mut(&candidate.arena_id) {
+            composition.lifecycle_state = MemythosArenaCompositionLifecycleState::Closed;
+        }
+        self.push_telemetry_ref(
+            &mut state,
+            MemythosTelemetryRefKind::ArenaState,
+            MemythosTelemetrySource::AppServerNative,
+            Some(candidate.layer_id),
+            Some(candidate.arena_id.clone()),
+            None,
+            Some(format!(
+                "app-server://memythos/arenas/{}/closed-cleanly",
+                candidate.arena_id
+            )),
+            None,
+            MemythosEventChannel::StateTransition,
+            format!(
+                "Arena {} closed cleanly after every native parent goal reached complete.",
+                candidate.arena_id
+            ),
+        );
     }
 
     pub(crate) async fn record_native_token_usage(&self, thread_id: &str, turn_id: &str) -> bool {
@@ -5891,6 +5996,77 @@ fn find_attachment_context(
 
 fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
     format!("{arena_id}::{thread_id}")
+}
+
+fn arena_closure_candidate(
+    state: &MemythosRuntimeState,
+    arena_id: &str,
+    completed_thread_id: &str,
+) -> Option<ArenaClosureCandidate> {
+    let arena = state.arenas.get(arena_id)?;
+    if arena.lifecycle_state == MemythosArenaLifecycleState::ClosedCleanly {
+        return None;
+    }
+    let composition = state.arena_compositions.get(arena_id)?;
+    let coordinator_id = composition
+        .contract
+        .coordination
+        .coordinator_participant_id
+        .as_ref()?;
+    let coordinator_thread_id = composition
+        .leases
+        .iter()
+        .find(|lease| &lease.participant_id == coordinator_id)?
+        .thread_id
+        .as_str();
+    if coordinator_thread_id != completed_thread_id {
+        return None;
+    }
+
+    let deliveries = state
+        .arena_message_deliveries
+        .iter()
+        .filter(|delivery| delivery.arena_id == arena_id)
+        .collect::<Vec<_>>();
+    if deliveries.is_empty()
+        || deliveries.iter().any(|delivery| {
+            delivery.status != "receiver_turn_completed" || delivery.rejection_reason.is_some()
+        })
+    {
+        return None;
+    }
+
+    if is_competitive_method(composition.contract.coordination.decision_method) {
+        let policy = composition.contract.coordination.round_policy.as_ref()?;
+        let minimum_positions = policy.minimum_competing_positions as usize;
+        let distinct_completed_targets = |phase: &str| {
+            deliveries
+                .iter()
+                .filter(|delivery| delivery.phase.as_deref() == Some(phase))
+                .map(|delivery| delivery.receiver_thread_id.as_str())
+                .collect::<HashSet<_>>()
+                .len()
+        };
+        if distinct_completed_targets("proposal") < minimum_positions
+            || distinct_completed_targets("cross_read") < minimum_positions
+            || (policy.objection_required
+                && distinct_completed_targets("objection") < minimum_positions)
+            || distinct_completed_targets("bet") < minimum_positions
+            || distinct_completed_targets("judge") < 1
+        {
+            return None;
+        }
+    }
+
+    Some(ArenaClosureCandidate {
+        arena_id: arena_id.to_string(),
+        layer_id: arena.layer_id.clone(),
+        parent_thread_ids: composition
+            .leases
+            .iter()
+            .map(|lease| lease.thread_id.clone())
+            .collect(),
+    })
 }
 
 fn arena_parent_reasoning_effort(
@@ -7422,6 +7598,116 @@ mod tests {
                 &[delivery("one", "bettor-a"), delivery("two", "bettor-b"),],
             )
             .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_completion_atomically_closes_every_parent_goal() {
+        let provisioning = Arc::new(FakeArenaParentProvisioningAdapter::default());
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            provisioning.clone(),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(9))
+            .await
+            .expect("competitive composition should provision");
+
+        let delivery =
+            |id: &str, phase: &str, receiver: &str, turn_id: &str| MemythosArenaMessageDelivery {
+                delivery_id: id.to_string(),
+                message_id: id.to_string(),
+                human_summary: phase.to_string(),
+                status: if phase == "arena_intake" {
+                    "receiver_turn_running".to_string()
+                } else {
+                    "receiver_turn_completed".to_string()
+                },
+                sender_thread_id: "test::room_concierge::concierge".to_string(),
+                receiver_thread_id: receiver.to_string(),
+                arena_id: "arena-composition".to_string(),
+                round_id: "round-1".to_string(),
+                phase: Some(phase.to_string()),
+                delivery_mechanism: "room_loopback_send_input".to_string(),
+                receiver_turn_id: Some(turn_id.to_string()),
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: phase == "arena_intake",
+                memory_replay_required: false,
+                event_refs: Vec::new(),
+                rejection_reason: None,
+            };
+        {
+            let mut state = processor.state.lock().await;
+            let bettor_growth = "test::bettor::bettor-growth";
+            let bettor_risk = "test::bettor::bettor-risk";
+            for phase in ["proposal", "cross_read", "objection", "bet"] {
+                state.arena_message_deliveries.push(delivery(
+                    &format!("{phase}-growth"),
+                    phase,
+                    bettor_growth,
+                    &format!("turn-{phase}-growth"),
+                ));
+                state.arena_message_deliveries.push(delivery(
+                    &format!("{phase}-risk"),
+                    phase,
+                    bettor_risk,
+                    &format!("turn-{phase}-risk"),
+                ));
+            }
+            state.arena_message_deliveries.push(delivery(
+                "judge",
+                "judge",
+                "test::judge::judge",
+                "turn-judge",
+            ));
+            state.arena_message_deliveries.push(delivery(
+                "intake",
+                "arena_intake",
+                "test::scrum_master::coordinator",
+                "turn-coordinator",
+            ));
+        }
+
+        assert!(
+            processor
+                .record_native_turn_completed(
+                    "test::scrum_master::coordinator",
+                    "turn-coordinator",
+                    "completed",
+                    Some(1),
+                    Some(100),
+                )
+                .await
+        );
+
+        let goals = provisioning.goals.lock().await;
+        assert_eq!(goals.len(), 5);
+        assert!(
+            goals
+                .values()
+                .all(|goal| goal.status == ThreadGoalStatus::Complete)
+        );
+        drop(goals);
+        let state = processor.state.lock().await;
+        assert_eq!(
+            state
+                .arenas
+                .get("arena-composition")
+                .map(|arena| arena.lifecycle_state),
+            Some(MemythosArenaLifecycleState::ClosedCleanly)
+        );
+        assert_eq!(
+            state
+                .arena_compositions
+                .get("arena-composition")
+                .map(|composition| composition.lifecycle_state),
+            Some(MemythosArenaCompositionLifecycleState::Closed)
         );
     }
 
@@ -9278,8 +9564,8 @@ mod tests {
         assert_eq!(response.participants.len(), 2);
         assert!(response.turns.is_empty());
         assert!(response.events.is_empty());
-        assert_eq!(response.lifecycle.room_state, "round_closed");
-        assert!(response.lifecycle.clean_close);
+        assert_eq!(response.lifecycle.room_state, "running");
+        assert!(!response.lifecycle.clean_close);
         assert_eq!(response.collab.send_input_count, 0);
     }
 
@@ -9414,7 +9700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn room_activity_list_summarizes_delivery_completion_and_usage() {
+    async fn room_activity_list_summarizes_delivery_without_closing_arena() {
         let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
             AppServerRpcTransport::Websocket,
             Arc::new(FakeLivePeerParentDeliveryAdapter),
@@ -9500,7 +9786,8 @@ mod tests {
         assert_eq!(response.turns[0].phase.as_deref(), Some("bet"));
         assert_eq!(response.lifecycle.completed_turns, 1);
         assert_eq!(response.lifecycle.failed_turns, 0);
-        assert!(response.lifecycle.clean_close);
+        assert_eq!(response.lifecycle.room_state, "running");
+        assert!(!response.lifecycle.clean_close);
         assert_eq!(response.collab.completed_send_input_count, 1);
         assert_eq!(response.usage.token_usage_events, 1);
         assert!(response.blockers.is_empty());
