@@ -3684,7 +3684,7 @@ impl MemythosRequestProcessor {
             && !eligible_winner_ids.is_empty()
         {
             format!(
-                "{}\n\nNative verdict boundary: the eligible winner participant ids are [{}]. Name exactly one with `winner_participant_id: <exact-id>`, then rank the alternatives, preserve dissent, and state reopening signals.",
+                "{}\n\nNative verdict boundary: the eligible winner participant ids are [{}]. Name exactly one with `winner_participant_id: <exact-id>`, then rank the alternatives, preserve dissent, and state reopening signals. Report `closed_decisions_status: preserved` unless new evidence materially invalidates a declared closed decision; in that exceptional case report `closed_decisions_status: reopened` and identify the evidence and authority required.",
                 args.message,
                 eligible_winner_ids.join(", ")
             )
@@ -5383,9 +5383,8 @@ fn room_activity_turn_from_delivery(
 fn phase_from_message_kind(message_kind: &str) -> Option<String> {
     match message_kind {
         "dispatch_proposals" | "peer_proposal" => Some("proposal".to_string()),
-        "dispatch_cross_read" | "peer_cross_read" | "peer_objection" => {
-            Some("cross_read".to_string())
-        }
+        "dispatch_cross_read" | "peer_cross_read" => Some("cross_read".to_string()),
+        "peer_objection" => Some("objection".to_string()),
         "dispatch_bets" | "peer_bet" => Some("bet".to_string()),
         "request_judge" | "verdict_request" | "judge_verdict" => Some("judge".to_string()),
         "notify_coordinator" => Some("learning".to_string()),
@@ -5426,7 +5425,7 @@ fn build_arena_intake_prompt(
         })
         .unwrap_or_else(|| "not required by the selected method".to_string());
     format!(
-        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. As coordinator, own the complete method through the Room Concierge; the client will only observe. Begin by asking the Room Concierge to coordinate the selected method with message kind notify_coordinator. For a competitive method, the Room Concierge must obtain independent proposals from every proposal-bearing bettor with peer_proposal, require each bettor to cross-read and object with peer_cross_read or peer_objection, and then obtain one explicit revised commitment from every bettor with peer_bet. Only after those commitments exist, the Room Concierge must send exactly one verdict_request to the configured judge. That request must require the judge to identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, and state reopening signals. Never use verdict_request for peer comparison and never use judge_verdict to request a verdict. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. As coordinator, own the complete method through the Room Concierge; the client will only observe. Begin by asking the Room Concierge to coordinate the selected method with message kind notify_coordinator. For a competitive method, the Room Concierge must obtain independent proposals from every proposal-bearing bettor with peer_proposal. After all proposals complete, require every bettor to read a competing proposal with peer_cross_read. After all cross-reads complete, require every bettor to state a concrete objection with peer_objection. Only after all required objections complete, obtain one explicit revised commitment from every bettor with peer_bet. Only after those commitments exist, the Room Concierge must send exactly one verdict_request to the configured judge. That request must require the judge to identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never use verdict_request for peer comparison and never use judge_verdict to request a verdict. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
         params.request_origin,
         params.case_brief,
         params.layer_objective,
@@ -5521,9 +5520,14 @@ fn validate_competitive_round_progress(
             .len()
     };
 
+    let objection_required = composition
+        .and_then(|composition| composition.contract.coordination.round_policy.as_ref())
+        .is_some_and(|policy| policy.objection_required);
     let prerequisite = match message_kind {
-        "peer_cross_read" | "peer_objection" => Some(("proposal", "peer proposals")),
-        "peer_bet" => Some(("cross_read", "peer cross-reads or objections")),
+        "peer_cross_read" => Some(("proposal", "peer proposals")),
+        "peer_objection" => Some(("cross_read", "peer cross-reads")),
+        "peer_bet" if objection_required => Some(("objection", "peer objections")),
+        "peer_bet" => Some(("cross_read", "peer cross-reads")),
         "verdict_request" => Some(("bet", "explicit peer bets")),
         _ => None,
     };
@@ -7106,11 +7110,24 @@ mod tests {
         assert!(prompt.contains("the client will only observe"));
         assert!(prompt.contains("peer_proposal"));
         assert!(prompt.contains("peer_cross_read"));
+        assert!(prompt.contains("peer_objection"));
         assert!(prompt.contains("peer_bet"));
         assert!(prompt.contains("judge_verdict"));
         assert!(prompt.contains("bettor-growth"));
         assert!(prompt.contains("bettor-risk"));
         assert!(prompt.contains("Do not ask the client to activate phases"));
+    }
+
+    #[test]
+    fn competitive_method_preserves_cross_read_and_objection_as_distinct_phases() {
+        assert_eq!(
+            phase_from_message_kind("peer_cross_read").as_deref(),
+            Some("cross_read")
+        );
+        assert_eq!(
+            phase_from_message_kind("peer_objection").as_deref(),
+            Some("objection")
+        );
     }
 
     #[tokio::test]
