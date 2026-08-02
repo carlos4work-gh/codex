@@ -551,9 +551,6 @@ impl MessageProcessor {
                 Arc::clone(&config),
                 thread_processor.clone(),
                 turn_processor.clone(),
-                Arc::new(ThreadTurnsParentResponseAdapter::new(
-                    thread_processor.clone(),
-                )),
             )),
         );
         *memythos_processor_holder

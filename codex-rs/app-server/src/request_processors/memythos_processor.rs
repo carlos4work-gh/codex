@@ -262,7 +262,51 @@ pub(crate) struct NativeArenaCompositionPlanningAdapter {
     config: Arc<Config>,
     thread_processor: ThreadRequestProcessor,
     turn_processor: TurnRequestProcessor,
-    parent_turn_response_adapter: Arc<dyn ParentTurnResponseAdapter>,
+}
+
+const ARENA_COMPOSITION_PLANNER_ROLE: &str = "arena_composition_planner";
+
+fn arena_composition_output_schema() -> Result<serde_json::Value, JSONRPCErrorError> {
+    let mut schema = serde_json::to_value(schemars::schema_for!(MemythosArenaCompositionContract))
+        .map_err(|err| invalid_params(format!("failed to build composition schema: {err}")))?;
+    close_json_schema_objects(&mut schema);
+    Ok(schema)
+}
+
+fn close_json_schema_objects(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(serde_json::Value::as_str) == Some("object") {
+                object
+                    .entry("additionalProperties")
+                    .or_insert(serde_json::Value::Bool(false));
+                if let Some(properties) = object
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                {
+                    object.insert(
+                        "required".to_string(),
+                        serde_json::Value::Array(
+                            properties
+                                .keys()
+                                .cloned()
+                                .map(serde_json::Value::String)
+                                .collect(),
+                        ),
+                    );
+                }
+            }
+            for value in object.values_mut() {
+                close_json_schema_objects(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                close_json_schema_objects(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 impl NativeArenaCompositionPlanningAdapter {
@@ -271,14 +315,12 @@ impl NativeArenaCompositionPlanningAdapter {
         config: Arc<Config>,
         thread_processor: ThreadRequestProcessor,
         turn_processor: TurnRequestProcessor,
-        parent_turn_response_adapter: Arc<dyn ParentTurnResponseAdapter>,
     ) -> Self {
         Self {
             thread_manager,
             config,
             thread_processor,
             turn_processor,
-            parent_turn_response_adapter,
         }
     }
 
@@ -347,9 +389,9 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                 .thread_manager
                 .start_thread_with_options(StartThreadOptions {
                     config,
-                    agent_role: None,
+                    agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
                     root_developer_instructions: Some(
-                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. For a competitive arena, create at least two proposal-bearing bettors with materially different stances, plus coordination and judging roles required by the catalog. Propose an effort intent for every participant. Set a positive token budget only when the semantic cost goal and work uncertainty justify a cap; otherwise leave it null. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Optimize team size only after preserving this invariant. Propose an effort intent for every participant. Set a positive token budget only when the semantic cost goal and work uncertainty justify a cap; otherwise leave it null. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
                             .to_string(),
                     ),
                     initial_history: InitialHistory::New,
@@ -402,10 +444,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                         effort: None,
                         summary: None,
                         personality: None,
-                        output_schema: Some(
-                            serde_json::to_value(schemars::schema_for!(MemythosArenaCompositionContract))
-                                .map_err(|err| invalid_params(format!("failed to build composition schema: {err}")))?,
-                        ),
+                        output_schema: Some(arena_composition_output_schema()?),
                         collaboration_mode: None,
                         multi_agent_mode: None,
                     },
@@ -2234,18 +2273,7 @@ impl MemythosRequestProcessor {
             params.room_id, request_id
         );
         let delivery_ref = format!("{room_message_ref}/delivery");
-        let prompt = format!(
-            "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nReceive this as the initial human request for the arena. Coordinate through the native room and preserve role authority.",
-            params.request_origin,
-            params.case_brief,
-            params.layer_objective,
-            params.expected_deliverable,
-            params.completion_criteria.join("\n- "),
-            params.closed_decisions.join("\n- "),
-            params.uncertainties.join("\n- "),
-            params.reality_evidence.join("\n- "),
-            params.cost_goal,
-        );
+        let prompt = build_arena_intake_prompt(&params, &composition.contract);
         let mut metadata = serde_json::Map::new();
         metadata.insert(
             "memythos_phase".to_string(),
@@ -5247,13 +5275,64 @@ fn room_activity_turn_from_delivery(
 
 fn phase_from_message_kind(message_kind: &str) -> Option<String> {
     match message_kind {
-        "dispatch_proposals" => Some("proposal".to_string()),
-        "dispatch_cross_read" => Some("cross_read".to_string()),
-        "dispatch_bets" => Some("bet".to_string()),
-        "request_judge" => Some("judge".to_string()),
+        "dispatch_proposals" | "peer_proposal" => Some("proposal".to_string()),
+        "dispatch_cross_read" | "peer_cross_read" | "peer_objection" => {
+            Some("cross_read".to_string())
+        }
+        "dispatch_bets" | "peer_bet" => Some("bet".to_string()),
+        "request_judge" | "judge_verdict" => Some("judge".to_string()),
         "notify_coordinator" => Some("learning".to_string()),
         _ => None,
     }
+}
+
+fn build_arena_intake_prompt(
+    params: &MemythosArenaRequestParams,
+    contract: &MemythosArenaCompositionContract,
+) -> String {
+    let participants = contract
+        .participants
+        .iter()
+        .map(|participant| {
+            format!(
+                "- {}: role={}, stance={}, objective={}",
+                participant.participant_id,
+                participant.agent_role,
+                participant.stance,
+                participant.role_objective
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let round_policy = contract
+        .coordination
+        .round_policy
+        .as_ref()
+        .map(|policy| {
+            format!(
+                "minimum_competing_positions={}, cross_read_required={}, objection_required={}, explicit_bet_required={}",
+                policy.minimum_competing_positions,
+                policy.cross_read_required,
+                policy.objection_required,
+                policy.explicit_bet_required
+            )
+        })
+        .unwrap_or_else(|| "not required by the selected method".to_string());
+    format!(
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. As coordinator, own the complete method through the Room Concierge; the client will only observe. For a competitive method, obtain independent proposals, require each proposal-bearing parent to cross-read and object to a peer, obtain explicit revised bets, then request an independent judge verdict. Use semantic room message kinds peer_proposal, peer_cross_read or peer_objection, peer_bet, and judge_verdict so native activity preserves phase evidence. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        params.request_origin,
+        params.case_brief,
+        params.layer_objective,
+        params.expected_deliverable,
+        params.completion_criteria.join("\n- "),
+        params.closed_decisions.join("\n- "),
+        params.uncertainties.join("\n- "),
+        params.reality_evidence.join("\n- "),
+        params.cost_goal,
+        contract.coordination.decision_method,
+        round_policy,
+        participants,
+    )
 }
 
 const MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS: usize = 240;
@@ -6239,6 +6318,57 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    #[test]
+    fn arena_composition_schema_closes_every_object_for_strict_output() {
+        fn assert_closed(value: &serde_json::Value, object_count: &mut usize) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if object.get("type").and_then(serde_json::Value::as_str) == Some("object") {
+                        *object_count += 1;
+                        assert_eq!(
+                            object.get("additionalProperties"),
+                            Some(&serde_json::Value::Bool(false))
+                        );
+                        if let Some(properties) = object
+                            .get("properties")
+                            .and_then(serde_json::Value::as_object)
+                        {
+                            let required = object
+                                .get("required")
+                                .and_then(serde_json::Value::as_array)
+                                .expect("strict object must require every property");
+                            let required = required
+                                .iter()
+                                .map(|value| {
+                                    value.as_str().expect("required property must be a string")
+                                })
+                                .collect::<std::collections::BTreeSet<_>>();
+                            let properties = properties
+                                .keys()
+                                .map(String::as_str)
+                                .collect::<std::collections::BTreeSet<_>>();
+                            assert_eq!(required, properties);
+                        }
+                    }
+                    for nested in object.values() {
+                        assert_closed(nested, object_count);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for nested in values {
+                        assert_closed(nested, object_count);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let schema = arena_composition_output_schema().expect("composition schema");
+        let mut object_count = 0;
+        assert_closed(&schema, &mut object_count);
+        assert!(object_count >= 4, "expected nested composition objects");
+    }
+
     #[derive(Debug)]
     struct FakeLivePeerParentDeliveryAdapter;
 
@@ -6594,6 +6724,24 @@ mod tests {
         let state = processor.state.lock().await;
         assert_eq!(state.arena_compositions.len(), 1);
         assert_eq!(state.arena_message_deliveries.len(), 1);
+    }
+
+    #[test]
+    fn arena_intake_makes_app_server_the_only_activation_authority() {
+        let params = semantic_arena_request_params();
+        let contract = competitive_composition_params().contract;
+
+        let prompt = build_arena_intake_prompt(&params, &contract);
+
+        assert!(prompt.contains("one autonomous native arena run"));
+        assert!(prompt.contains("the client will only observe"));
+        assert!(prompt.contains("peer_proposal"));
+        assert!(prompt.contains("peer_cross_read"));
+        assert!(prompt.contains("peer_bet"));
+        assert!(prompt.contains("judge_verdict"));
+        assert!(prompt.contains("bettor-growth"));
+        assert!(prompt.contains("bettor-risk"));
+        assert!(prompt.contains("Do not ask the client to activate phases"));
     }
 
     #[tokio::test]
