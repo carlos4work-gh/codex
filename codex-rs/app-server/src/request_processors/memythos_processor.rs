@@ -277,6 +277,16 @@ fn room_delivery_goal_transition(status: &ThreadGoalStatus) -> RoomDeliveryGoalT
 }
 
 fn room_delivery_goal_objective(room: &MemythosRoom, message: &MemythosArenaMessage) -> String {
+    let materialization_requirement = if message.message_kind == "human_intake" {
+        concat!(
+            " This intake is not complete until you invoke the native ",
+            "memythos_room_send_message tool and deliver notify_coordinator to the Room ",
+            "Concierge. A prose statement that you activated or will activate the arena is not ",
+            "materialized progress and must not be reported as completion."
+        )
+    } else {
+        ""
+    };
     format!(
         concat!(
             "Complete only room assignment {message_id} in arena {arena_id}, round {round_id}. ",
@@ -284,7 +294,7 @@ fn room_delivery_goal_objective(room: &MemythosRoom, message: &MemythosArenaMess
             "{message_kind}: {human_summary} Required response contract: {response_contract}. ",
             "Use your existing role, stance, memory, and native room tools. Do not advance to ",
             "another arena phase on your own. When this response contract is fully satisfied, ",
-            "call update_goal with status complete."
+            "call update_goal with status complete.{materialization_requirement}"
         ),
         message_id = message.message_id,
         arena_id = room.arena_id,
@@ -293,6 +303,7 @@ fn room_delivery_goal_objective(room: &MemythosRoom, message: &MemythosArenaMess
         message_kind = message.message_kind,
         human_summary = message.human_summary,
         response_contract = message.response_contract.as_deref().unwrap_or("none"),
+        materialization_requirement = materialization_requirement,
     )
 }
 
@@ -2646,6 +2657,13 @@ impl MemythosRequestProcessor {
             "memythos_request_origin".to_string(),
             serde_json::Value::String(params.request_origin.clone()),
         );
+        metadata.insert(
+            "memythos_round_id".to_string(),
+            serde_json::Value::String(format!(
+                "{}-round-{}",
+                params.arena_id, composition.composition_version
+            )),
+        );
         let delivery = self
             .room_send_input_on_connection(
                 MemythosRoomSendInputParams {
@@ -4484,6 +4502,7 @@ impl MemythosRequestProcessor {
             delivery: MemythosRoomSendInputDelivery {
                 thread_id: params.to_parent_thread_id,
                 turn_id: target_turn_id,
+                round_id: message.round_id,
                 event_refs,
                 room_id: params.room_id,
                 room_message_ref: params.room_message_ref,
@@ -5912,7 +5931,7 @@ fn build_arena_intake_prompt(
         })
         .unwrap_or_else(|| "not required by the selected method".to_string());
     format!(
-        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. As coordinator, own the complete method through the Room Concierge; the client will only observe. Begin by asking the Room Concierge to coordinate the selected method with message kind notify_coordinator. For a competitive method, the Room Concierge must obtain independent proposals from every proposal-bearing bettor with peer_proposal. After all proposals complete, require every bettor to read a competing proposal with peer_cross_read. After all cross-reads complete, require every bettor to state a concrete objection with peer_objection. Only after all required objections complete, obtain one explicit revised commitment from every bettor with peer_bet. Only after those commitments exist, the Room Concierge must send exactly one verdict_request to the configured judge. That request must require the judge to identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never use verdict_request for peer comparison and never use judge_verdict to request a verdict. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. As coordinator, own the complete method through the Room Concierge; the client will only observe. Your first materialized act must be a native memythos_room_send_message tool call that delivers notify_coordinator to the Room Concierge. Do not merely say that you activated, will activate, or asked the Room Concierge: without the tool call the arena has not advanced. For a competitive method, the Room Concierge must obtain independent proposals from every proposal-bearing bettor with peer_proposal. After all proposals complete, require every bettor to read a competing proposal with peer_cross_read. After all cross-reads complete, require every bettor to state a concrete objection with peer_objection. Only after all required objections complete, obtain one explicit revised commitment from every bettor with peer_bet. Only after those commitments exist, the Room Concierge must send exactly one verdict_request to the configured judge. That request must require the judge to identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never use verdict_request for peer comparison and never use judge_verdict to request a verdict. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
         params.request_origin,
         params.case_brief,
         params.layer_objective,
@@ -6081,10 +6100,21 @@ fn arena_closure_candidate(
         return None;
     }
 
+    let active_round_id = state
+        .arena_message_deliveries
+        .iter()
+        .rev()
+        .find(|delivery| {
+            delivery.arena_id == arena_id
+                && delivery.receiver_thread_id == coordinator_thread_id
+                && delivery.delivered_as_human_instruction
+        })?
+        .round_id
+        .as_str();
     let deliveries = state
         .arena_message_deliveries
         .iter()
-        .filter(|delivery| delivery.arena_id == arena_id)
+        .filter(|delivery| delivery.arena_id == arena_id && delivery.round_id == active_round_id)
         .collect::<Vec<_>>();
     if deliveries.is_empty()
         || deliveries.iter().any(|delivery| {
@@ -7952,6 +7982,10 @@ mod tests {
         );
         assert!(response.initial_delivery.human_instruction);
         assert_eq!(
+            response.initial_delivery.round_id,
+            "arena-composition-round-1"
+        );
+        assert_eq!(
             response.initial_delivery.thread_id,
             "test::scrum_master::coordinator"
         );
@@ -8000,6 +8034,8 @@ mod tests {
                 && transition.1.as_deref().is_some_and(|objective| {
                     objective.contains("Complete only room assignment")
                         && objective.contains("call update_goal with status complete")
+                        && objective.contains("memythos_room_send_message")
+                        && objective.contains("not materialized progress")
                 })
                 && transition.2 == ThreadGoalStatus::Active
                 && transition.3
@@ -8032,6 +8068,9 @@ mod tests {
         assert!(prompt.contains("bettor-growth"));
         assert!(prompt.contains("bettor-risk"));
         assert!(prompt.contains("Do not ask the client to activate phases"));
+        assert!(prompt.contains("first materialized act"));
+        assert!(prompt.contains("memythos_room_send_message"));
+        assert!(prompt.contains("without the tool call the arena has not advanced"));
     }
 
     #[test]
@@ -8084,10 +8123,13 @@ mod tests {
             Arc::new(FakeArenaCompositionPlanningAdapter { contract }),
         );
 
-        processor
+        let first = processor
             .arena_request(semantic_arena_request_params(), ConnectionId(7))
             .await
             .expect("initial semantic request should provision");
+        let ClientResponsePayload::MemythosArenaRequest(first) = first else {
+            panic!("expected initial semantic arena request response");
+        };
         let mut update = semantic_arena_request_params();
         update.composition_change_signal = Some(
             "upstream contract changed; verify whether the current perspectives remain sufficient"
@@ -8102,6 +8144,15 @@ mod tests {
         };
 
         assert_eq!(response.composition.composition_version, 2);
+        assert_eq!(first.initial_delivery.round_id, "arena-composition-round-1");
+        assert_eq!(
+            response.initial_delivery.round_id,
+            "arena-composition-round-2"
+        );
+        assert_ne!(
+            first.initial_delivery.round_id,
+            response.initial_delivery.round_id
+        );
         let revision = response
             .composition
             .applied_revision

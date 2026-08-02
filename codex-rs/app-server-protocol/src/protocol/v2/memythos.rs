@@ -1411,6 +1411,7 @@ pub struct MemythosRoomSendInputParams {
 pub struct MemythosRoomSendInputDelivery {
     pub thread_id: String,
     pub turn_id: String,
+    pub round_id: String,
     pub event_refs: Vec<String>,
     pub room_id: String,
     pub room_message_ref: String,
