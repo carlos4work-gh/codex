@@ -218,6 +218,8 @@ pub(crate) type ArenaParentProvisionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ProvisionedArenaParent, JSONRPCErrorError>> + Send + 'a>>;
 pub(crate) type ArenaParentGoalTransitionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ThreadGoal, JSONRPCErrorError>> + Send + 'a>>;
+pub(crate) type ArenaParentGoalReadFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<ThreadGoal>, JSONRPCErrorError>> + Send + 'a>>;
 
 pub(crate) trait ArenaParentProvisioningAdapter: Send + Sync {
     fn validate_role_stance(
@@ -243,7 +245,26 @@ pub(crate) trait ArenaParentProvisioningAdapter: Send + Sync {
         arm_for_next_turn: bool,
     ) -> ArenaParentGoalTransitionFuture<'a>;
 
+    fn read_parent_goal<'a>(&'a self, thread_id: &'a str) -> ArenaParentGoalReadFuture<'a>;
+
     fn rollback_parent<'a>(&'a self, thread_id: &'a str) -> ArenaParentProvisionFuture<'a>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomDeliveryGoalTransition {
+    ArmPausedGoal,
+    PreserveGoal,
+}
+
+fn room_delivery_goal_transition(status: &ThreadGoalStatus) -> RoomDeliveryGoalTransition {
+    match status {
+        ThreadGoalStatus::Paused => RoomDeliveryGoalTransition::ArmPausedGoal,
+        ThreadGoalStatus::Active
+        | ThreadGoalStatus::Blocked
+        | ThreadGoalStatus::UsageLimited
+        | ThreadGoalStatus::BudgetLimited
+        | ThreadGoalStatus::Complete => RoomDeliveryGoalTransition::PreserveGoal,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -891,6 +912,14 @@ impl ArenaParentProvisioningAdapter for NativeArenaParentProvisioningAdapter {
         })
     }
 
+    fn read_parent_goal<'a>(&'a self, thread_id: &'a str) -> ArenaParentGoalReadFuture<'a> {
+        Box::pin(async move {
+            self.thread_goal_processor
+                .thread_goal_get_internal(thread_id.to_string())
+                .await
+        })
+    }
+
     fn rollback_parent<'a>(&'a self, thread_id: &'a str) -> ArenaParentProvisionFuture<'a> {
         Box::pin(async move {
             let parsed = ThreadId::from_string(thread_id)
@@ -982,6 +1011,21 @@ impl ArenaParentProvisioningAdapter for RecordOnlyArenaParentProvisioningAdapter
                 created_at: 0,
                 updated_at: 0,
             })
+        })
+    }
+
+    fn read_parent_goal<'a>(&'a self, thread_id: &'a str) -> ArenaParentGoalReadFuture<'a> {
+        Box::pin(async move {
+            Ok(Some(ThreadGoal {
+                thread_id: thread_id.to_string(),
+                objective: String::new(),
+                status: ThreadGoalStatus::Paused,
+                token_budget: None,
+                tokens_used: 0,
+                time_used_seconds: 0,
+                created_at: 0,
+                updated_at: 0,
+            }))
         })
     }
 
@@ -4143,33 +4187,68 @@ impl MemythosRequestProcessor {
             arena_parent_reasoning_effort(&state, &room.arena_id, &target.thread_id)
         };
         let delivery_id = self.next_id("mem_room_delivery", &self.next_delivery_id);
-        let armed_goal = self
+        let current_goal = self
             .arena_parent_provisioning_adapter
-            .transition_parent_goal(&params.to_parent_thread_id, ThreadGoalStatus::Active, true)
+            .read_parent_goal(&params.to_parent_thread_id)
             .await
             .map_err(|error| {
                 invalid_params(format!(
-                    "failed to arm parent goal for room delivery to {}: {}",
+                    "failed to read parent goal for room delivery to {}: {}",
                     params.to_parent_thread_id, error.message
                 ))
+            })?
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "parent thread {} has no provisioned goal",
+                    params.to_parent_thread_id
+                ))
             })?;
+        let (delivery_goal, armed_for_delivery) = match room_delivery_goal_transition(
+            &current_goal.status,
+        ) {
+            RoomDeliveryGoalTransition::ArmPausedGoal => {
+                let armed = self
+                    .arena_parent_provisioning_adapter
+                    .transition_parent_goal(
+                        &params.to_parent_thread_id,
+                        ThreadGoalStatus::Active,
+                        true,
+                    )
+                    .await
+                    .map_err(|error| {
+                        invalid_params(format!(
+                            "failed to arm paused parent goal for first room delivery to {}: {}",
+                            params.to_parent_thread_id, error.message
+                        ))
+                    })?;
+                (armed, true)
+            }
+            RoomDeliveryGoalTransition::PreserveGoal => (current_goal, false),
+        };
         let delivery_attempt = self
             .peer_parent_delivery_adapter
             .deliver_peer_parent_message(&message, target_reasoning_effort, connection_id)
             .await;
         let Some(target_turn_id) = delivery_attempt.receiver_turn_id.clone() else {
-            let pause_result = self
-                .arena_parent_provisioning_adapter
-                .transition_parent_goal(
-                    &params.to_parent_thread_id,
-                    ThreadGoalStatus::Paused,
-                    false,
-                )
-                .await;
-            let rollback_detail = pause_result
-                .err()
-                .map(|error| format!("; goal rollback to paused also failed: {}", error.message))
-                .unwrap_or_default();
+            let rollback_detail = if armed_for_delivery {
+                self.arena_parent_provisioning_adapter
+                    .transition_parent_goal(
+                        &params.to_parent_thread_id,
+                        ThreadGoalStatus::Paused,
+                        false,
+                    )
+                    .await
+                    .err()
+                    .map(|error| {
+                        format!(
+                            "; first-delivery goal rollback to paused also failed: {}",
+                            error.message
+                        )
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             return Err(invalid_params(format!(
                 "room sendInput failed to create target turn: {}{}",
                 delivery_attempt
@@ -4235,7 +4314,7 @@ impl MemythosRequestProcessor {
                 .iter_mut()
                 .find(|lease| lease.thread_id == params.to_parent_thread_id)
         {
-            lease.goal_status = armed_goal.status;
+            lease.goal_status = delivery_goal.status;
         }
         state.arena_message_deliveries.push(delivery);
         self.push_telemetry_ref(
@@ -6937,6 +7016,7 @@ mod tests {
         fail_participant: Option<String>,
         rolled_back: Arc<Mutex<Vec<String>>>,
         goal_transitions: Arc<Mutex<Vec<(String, ThreadGoalStatus, bool)>>>,
+        goals: Arc<Mutex<HashMap<String, ThreadGoal>>>,
     }
 
     struct FakeArenaCompositionPlanningAdapter {
@@ -7007,22 +7087,27 @@ mod tests {
                         participant.agent_role, participant.participant_id
                     )
                 });
+                let goal = ThreadGoal {
+                    thread_id: thread_id.clone(),
+                    objective: participant.role_objective.clone(),
+                    status: ThreadGoalStatus::Paused,
+                    token_budget: participant.token_budget,
+                    tokens_used: 0,
+                    time_used_seconds: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                };
+                self.goals
+                    .lock()
+                    .await
+                    .insert(thread_id.clone(), goal.clone());
                 Ok(ProvisionedArenaParent {
                     participant_id: participant.participant_id.clone(),
                     goal_ref: format!("app-server://threads/{thread_id}/goals/test"),
                     lease_id: format!("lease::{}", participant.participant_id),
                     lease_source: if newly_created { "created" } else { "reused" }.to_string(),
                     memory_scope: format!("arena:{}", params.contract.arena_id),
-                    goal: ThreadGoal {
-                        thread_id: thread_id.clone(),
-                        objective: participant.role_objective.clone(),
-                        status: ThreadGoalStatus::Paused,
-                        token_budget: participant.token_budget,
-                        tokens_used: 0,
-                        time_used_seconds: 0,
-                        created_at: 0,
-                        updated_at: 0,
-                    },
+                    goal,
                     thread_id,
                     newly_created,
                 })
@@ -7041,7 +7126,7 @@ mod tests {
                     status.clone(),
                     arm_for_next_turn,
                 ));
-                Ok(ThreadGoal {
+                let goal = ThreadGoal {
                     thread_id: thread_id.to_string(),
                     objective: String::new(),
                     status,
@@ -7050,8 +7135,17 @@ mod tests {
                     time_used_seconds: 0,
                     created_at: 0,
                     updated_at: 0,
-                })
+                };
+                self.goals
+                    .lock()
+                    .await
+                    .insert(thread_id.to_string(), goal.clone());
+                Ok(goal)
             })
+        }
+
+        fn read_parent_goal<'a>(&'a self, thread_id: &'a str) -> ArenaParentGoalReadFuture<'a> {
+            Box::pin(async move { Ok(self.goals.lock().await.get(thread_id).cloned()) })
         }
 
         fn rollback_parent<'a>(&'a self, thread_id: &'a str) -> ArenaParentProvisionFuture<'a> {
@@ -7469,6 +7563,44 @@ mod tests {
             response.initial_delivery.thread_id,
             "test::scrum_master::coordinator"
         );
+        provisioning
+            .goals
+            .lock()
+            .await
+            .get_mut("test::scrum_master::coordinator")
+            .expect("coordinator goal should exist")
+            .status = ThreadGoalStatus::Complete;
+        processor
+            .room_send_input(MemythosRoomSendInputParams {
+                room_id: "room-composition".to_string(),
+                room_message_ref: "app-server://rooms/room-composition/human-intake/follow-up"
+                    .to_string(),
+                delivery_ref: "app-server://rooms/room-composition/human-intake/follow-up/delivery"
+                    .to_string(),
+                from_parent_thread_id: None,
+                via_concierge_thread_id: None,
+                to_parent_thread_id: "test::scrum_master::coordinator".to_string(),
+                source_parent_key: "human:test".to_string(),
+                target_parent_key: response
+                    .composition
+                    .leases
+                    .iter()
+                    .find(|lease| lease.participant_id == "coordinator")
+                    .expect("coordinator lease should exist")
+                    .parent_key
+                    .clone(),
+                message_kind: "human_intake".to_string(),
+                message_authority: "human_delegated".to_string(),
+                human_instruction: true,
+                response_contract: "Respond to the follow-up.".to_string(),
+                client_user_message_id: Some("follow-up".to_string()),
+                human_summary: "Clarify the arena outcome.".to_string(),
+                prompt: "Clarify the arena outcome.".to_string(),
+                metadata: serde_json::Map::new(),
+                output_schema: None,
+            })
+            .await
+            .expect("a later room turn should not reopen a completed role goal");
         assert_eq!(
             *provisioning.goal_transitions.lock().await,
             vec![(
@@ -7479,7 +7611,7 @@ mod tests {
         );
         let state = processor.state.lock().await;
         assert_eq!(state.arena_compositions.len(), 1);
-        assert_eq!(state.arena_message_deliveries.len(), 1);
+        assert_eq!(state.arena_message_deliveries.len(), 2);
     }
 
     #[test]
@@ -7511,6 +7643,27 @@ mod tests {
             phase_from_message_kind("peer_objection").as_deref(),
             Some("objection")
         );
+    }
+
+    #[test]
+    fn room_delivery_only_arms_a_paused_goal() {
+        assert_eq!(
+            room_delivery_goal_transition(&ThreadGoalStatus::Paused),
+            RoomDeliveryGoalTransition::ArmPausedGoal
+        );
+        for status in [
+            ThreadGoalStatus::Active,
+            ThreadGoalStatus::Blocked,
+            ThreadGoalStatus::UsageLimited,
+            ThreadGoalStatus::BudgetLimited,
+            ThreadGoalStatus::Complete,
+        ] {
+            assert_eq!(
+                room_delivery_goal_transition(&status),
+                RoomDeliveryGoalTransition::PreserveGoal,
+                "room delivery must not reopen {status:?} goals"
+            );
+        }
     }
 
     #[tokio::test]

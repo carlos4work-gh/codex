@@ -126,6 +126,15 @@ impl ThreadGoalRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn thread_goal_get_internal(
+        &self,
+        thread_id: String,
+    ) -> Result<Option<ThreadGoal>, JSONRPCErrorError> {
+        self.thread_goal_get_inner(ThreadGoalGetParams { thread_id })
+            .await
+            .map(|response| response.goal)
+    }
+
     pub(crate) async fn thread_goal_clear(
         &self,
         request_id: ConnectionRequestId,
