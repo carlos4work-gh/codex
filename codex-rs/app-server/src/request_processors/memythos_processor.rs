@@ -391,7 +391,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     config,
                     agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
                     root_developer_instructions: Some(
-                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Native method authorities such as coordinate and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent for every participant. Set a positive token budget only when the semantic cost goal and work uncertainty justify a cap; otherwise leave it null. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Native method authorities such as coordinate and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the scrum_master coordinator; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent for every participant. Set a positive token budget only when the semantic cost goal and work uncertainty justify a cap; otherwise leave it null. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
                             .to_string(),
                     ),
                     initial_history: InitialHistory::New,
@@ -494,7 +494,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                                         )),
                                         input: vec![UserInput::Text {
                                             text: format!(
-                                                "Native contract validation rejected unresolvedRoleGap: {role_gap}. Review attempt {role_gap_repair_attempts} of 2 on this same planner thread. Re-read nativeRoleCatalog in the original planning context below. Generic roles are intentionally domain-independent: express business specialization through stance and roleObjective, not a new role. A competitive arena already has native coordination and decision authority through scrum_master, room_concierge, and judge. Unless the catalog truly lacks one of those structural capabilities, return unresolvedRoleGap as null. Preserve method integrity and emit the complete corrected contract only.\n\nOriginal planning context:\n{context}"
+                                                "Native contract validation rejected unresolvedRoleGap: {role_gap}. Review attempt {role_gap_repair_attempts} of 2 on this same planner thread. Re-read nativeRoleCatalog in the original planning context below. Generic roles are intentionally domain-independent: express business specialization through stance and roleObjective, not a new role. A competitive arena already has native coordination and decision authority through scrum_master, room_concierge, and judge. If delegate is available and the catalog grants it to scrum_master, use that coordinator for post-verdict downstream promotion instead of inventing a proposal-independent delegation role. Unless the catalog truly lacks one of those structural capabilities, return unresolvedRoleGap as null. Preserve method integrity and emit the complete corrected contract only.\n\nOriginal planning context:\n{context}"
                                             ),
                                             text_elements: vec![],
                                         }],
@@ -7045,6 +7045,26 @@ mod tests {
             .find(|participant| participant.agent_role == "bettor")
             .expect("bettor")
             .authority_scope = vec!["decide_business_policy".to_string()];
+        assert!(validate_arena_composition_contract(&params).is_err());
+    }
+
+    #[test]
+    fn downstream_delegate_authority_belongs_to_the_scrum_master_coordinator() {
+        let mut params = competitive_composition_params();
+        params.upstream_authority_scope = vec!["recommend".to_string(), "delegate".to_string()];
+        for participant in &mut params.contract.participants {
+            participant.authority_scope = match participant.agent_role.as_str() {
+                "room_concierge" => vec!["coordinate".to_string()],
+                "scrum_master" => vec!["coordinate".to_string(), "delegate".to_string()],
+                "judge" => vec!["judge".to_string()],
+                _ => vec!["recommend".to_string()],
+            };
+        }
+
+        validate_arena_composition_contract(&params)
+            .expect("the coordinator may promote an approved contract within upstream authority");
+
+        params.upstream_authority_scope = vec!["recommend".to_string()];
         assert!(validate_arena_composition_contract(&params).is_err());
     }
 
