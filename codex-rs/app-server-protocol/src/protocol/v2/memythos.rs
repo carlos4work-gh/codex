@@ -522,8 +522,7 @@ pub struct MemythosArenaCompositionParticipant {
     pub effort_intent: String,
     /// Native app-server effort applied to every turn for this parent in the arena.
     /// The composition planner selects it from the OOTB ReasoningEffort values.
-    #[ts(optional = nullable)]
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: ReasoningEffort,
     #[ts(optional = nullable, type = "number | null")]
     pub token_budget: Option<i64>,
 }
@@ -649,8 +648,7 @@ pub struct MemythosArenaCompositionLease {
     pub memory_scope: String,
     pub goal_ref: String,
     pub effort_intent: String,
-    #[ts(optional = nullable)]
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: ReasoningEffort,
     #[ts(optional = nullable, type = "number | null")]
     pub token_budget: Option<i64>,
     pub goal_status: ThreadGoalStatus,

@@ -5686,7 +5686,7 @@ fn arena_parent_reasoning_effort(
         .leases
         .iter()
         .find(|lease| lease.thread_id == thread_id)
-        .and_then(|lease| lease.reasoning_effort.clone())
+        .map(|lease| lease.reasoning_effort.clone())
 }
 
 fn is_competitive_method(method: MemythosArenaDecisionMethod) -> bool {
@@ -6978,7 +6978,7 @@ mod tests {
                 expected_contribution: format!("Independent contribution from {participant_id}"),
                 exit_condition: format!("{participant_id} has delivered its position"),
                 effort_intent: "proportionate to uncertainty and decision impact".to_string(),
-                reasoning_effort: Some(ReasoningEffort::Low),
+                reasoning_effort: ReasoningEffort::Low,
                 token_budget: Some(20_000),
             }
         };
@@ -7217,6 +7217,28 @@ mod tests {
 
         params.upstream_authority_scope = vec!["recommend".to_string()];
         assert!(validate_arena_composition_contract(&params).is_err());
+    }
+
+    #[test]
+    fn arena_composition_participant_requires_native_reasoning_effort() {
+        let participant = competitive_composition_params()
+            .contract
+            .participants
+            .into_iter()
+            .next()
+            .expect("competitive composition has a participant");
+        let mut value = serde_json::to_value(participant).expect("participant should serialize");
+        value
+            .as_object_mut()
+            .expect("participant should be an object")
+            .remove("reasoningEffort");
+
+        let error = serde_json::from_value::<
+            codex_app_server_protocol::MemythosArenaCompositionParticipant,
+        >(value)
+        .expect_err("reasoningEffort must not be omitted by the native planner");
+
+        assert!(error.to_string().contains("reasoningEffort"));
     }
 
     #[tokio::test]
