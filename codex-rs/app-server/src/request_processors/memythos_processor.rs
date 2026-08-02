@@ -456,7 +456,8 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
             let Some(ClientResponsePayload::TurnStart(turn)) = turn else {
                 return Err(invalid_params("native arena planner did not start a turn"));
             };
-            let planner_turn_id = turn.turn.id;
+            let mut planner_turn_id = turn.turn.id;
+            let mut role_gap_repair_attempted = false;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
             loop {
                 match planner.thread.agent_status().await {
@@ -468,6 +469,63 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                                         "native arena planner returned invalid contract JSON: {err}"
                                     ))
                                 })?;
+                        if let Some(role_gap) = contract.unresolved_role_gap.as_deref()
+                            && !role_gap_repair_attempted
+                        {
+                            role_gap_repair_attempted = true;
+                            let repair = self
+                                .turn_processor
+                                .turn_start(
+                                    ConnectionRequestId {
+                                        connection_id,
+                                        request_id: RequestId::String(format!(
+                                            "memythos-arena-plan-repair:{}",
+                                            params.arena_id
+                                        )),
+                                    },
+                                    TurnStartParams {
+                                        thread_id: planner_thread_id.clone(),
+                                        client_user_message_id: Some(format!(
+                                            "arena-plan-repair:{}",
+                                            params.arena_id
+                                        )),
+                                        input: vec![UserInput::Text {
+                                            text: format!(
+                                                "Native contract validation rejected unresolvedRoleGap: {role_gap}. Re-plan on this same thread. Generic native roles plus domain-specific stances are sufficient unless the catalog structurally lacks coordination or decision authority. Preserve competitive method integrity, return unresolvedRoleGap as null, and emit the complete corrected contract only."
+                                            ),
+                                            text_elements: vec![],
+                                        }],
+                                        responsesapi_client_metadata: None,
+                                        additional_context: None,
+                                        environments: None,
+                                        cwd: None,
+                                        runtime_workspace_roots: None,
+                                        approval_policy: None,
+                                        approvals_reviewer: None,
+                                        sandbox_policy: None,
+                                        permissions: None,
+                                        model: None,
+                                        service_tier: None,
+                                        effort: None,
+                                        summary: None,
+                                        personality: None,
+                                        output_schema: Some(arena_composition_output_schema()?),
+                                        collaboration_mode: None,
+                                        multi_agent_mode: None,
+                                    },
+                                    Some("memythos".to_string()),
+                                    None,
+                                    false,
+                                )
+                                .await?;
+                            let Some(ClientResponsePayload::TurnStart(repair)) = repair else {
+                                return Err(invalid_params(
+                                    "native arena planner role-gap repair did not start a turn",
+                                ));
+                            };
+                            planner_turn_id = repair.turn.id;
+                            continue;
+                        }
                         return Ok(PlannedArenaComposition {
                             planner_thread_id,
                             planner_turn_id,
@@ -1256,6 +1314,10 @@ fn failed_live_delivery_attempt(
 }
 
 fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> String {
+    let execution_prompt = message
+        .execution_prompt
+        .as_deref()
+        .unwrap_or(&message.human_summary);
     if message.from_parent_role == "human" {
         return format!(
             concat!(
@@ -1287,7 +1349,7 @@ fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> String {
             round_id = message.round_id,
             to_parent_role = message.to_parent_role,
             message_kind = message.message_kind,
-            human_summary = message.human_summary,
+            human_summary = execution_prompt,
             context_packet_ref = message.context_packet_ref,
             response_contract = message.response_contract.as_deref().unwrap_or("none")
         );
@@ -1324,7 +1386,7 @@ fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> String {
         from_parent_role = message.from_parent_role,
         to_parent_role = message.to_parent_role,
         message_kind = message.message_kind,
-        human_summary = message.human_summary,
+        human_summary = execution_prompt,
         context_packet_ref = message.context_packet_ref,
         response_contract = message.response_contract.as_deref().unwrap_or("none")
     )
@@ -3891,6 +3953,7 @@ impl MemythosRequestProcessor {
             to_parent_role: target.parent_role.clone(),
             message_kind: params.message_kind.clone(),
             human_summary: params.human_summary.clone(),
+            execution_prompt: Some(params.prompt.clone()),
             context_packet_ref: params.room_message_ref.clone(),
             artifact_refs: vec![params.delivery_ref.clone()],
             requires_response: true,
@@ -6933,6 +6996,33 @@ mod tests {
     }
 
     #[test]
+    fn peer_parent_envelope_uses_execution_prompt_without_rewriting_human_summary() {
+        let message = MemythosArenaMessage {
+            message_id: "message-1".to_string(),
+            case_id: "case-1".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-1".to_string(),
+            from_parent_thread_id: "concierge".to_string(),
+            from_parent_role: "room_concierge".to_string(),
+            to_parent_thread_id: "judge".to_string(),
+            to_parent_role: "judge".to_string(),
+            message_kind: "verdict_request".to_string(),
+            human_summary: "Evaluate the alternatives.".to_string(),
+            execution_prompt: Some(
+                "Evaluate the alternatives and return winner_participant_id: exact-id.".to_string(),
+            ),
+            context_packet_ref: "app-server://rooms/room-1/messages/message-1".to_string(),
+            artifact_refs: Vec::new(),
+            requires_response: true,
+            response_contract: Some("judge_verdict".to_string()),
+        };
+
+        let envelope = build_peer_parent_envelope(&message);
+        assert!(envelope.contains("winner_participant_id: exact-id"));
+        assert_eq!(message.human_summary, "Evaluate the alternatives.");
+    }
+
+    #[test]
     fn native_method_authority_does_not_consume_upstream_business_authority() {
         let mut params = competitive_composition_params();
         params.upstream_authority_scope = vec!["recommend".to_string()];
@@ -9498,6 +9588,7 @@ mod tests {
                     message_kind: "peer_objection".to_string(),
                     human_summary: "Challenge ambiguous ownership before tactical execution."
                         .to_string(),
+                    execution_prompt: None,
                     context_packet_ref: "artifact://context/minimal".to_string(),
                     artifact_refs: vec!["arena-contract.json".to_string()],
                     requires_response: true,
@@ -9648,6 +9739,7 @@ mod tests {
                     message_kind: "peer_objection".to_string(),
                     human_summary: "Challenge ambiguous ownership before tactical execution."
                         .to_string(),
+                    execution_prompt: None,
                     context_packet_ref: "artifact://context/minimal".to_string(),
                     artifact_refs: vec!["arena-contract.json".to_string()],
                     requires_response: true,
@@ -9777,6 +9869,7 @@ mod tests {
                     message_kind: "peer_objection".to_string(),
                     human_summary: "Challenge ambiguous ownership before tactical execution."
                         .to_string(),
+                    execution_prompt: None,
                     context_packet_ref: "artifact://context/minimal".to_string(),
                     artifact_refs: vec!["arena-contract.json".to_string()],
                     requires_response: true,
@@ -9941,6 +10034,7 @@ mod tests {
                         message_kind: "peer_objection".to_string(),
                         human_summary: "Challenge ambiguous ownership before tactical execution."
                             .to_string(),
+                        execution_prompt: None,
                         context_packet_ref: "artifact://context/minimal".to_string(),
                         artifact_refs: vec!["arena-contract.json".to_string()],
                         requires_response: true,
@@ -10056,6 +10150,7 @@ mod tests {
                         message_kind: "peer_objection".to_string(),
                         human_summary: "Challenge ambiguous ownership before tactical execution."
                             .to_string(),
+                        execution_prompt: None,
                         context_packet_ref: "artifact://context/minimal".to_string(),
                         artifact_refs: vec!["arena-contract.json".to_string()],
                         requires_response: true,

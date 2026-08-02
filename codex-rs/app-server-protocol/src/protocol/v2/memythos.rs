@@ -891,6 +891,11 @@ pub struct MemythosArenaMessage {
     pub to_parent_role: String,
     pub message_kind: String,
     pub human_summary: String,
+    /// Prompt delivered to the target parent turn. When absent, human_summary is used.
+    /// Keeping it separate prevents protocol-only constraints from polluting room dialogue.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub execution_prompt: Option<String>,
     pub context_packet_ref: String,
     #[serde(default)]
     pub artifact_refs: Vec<String>,
