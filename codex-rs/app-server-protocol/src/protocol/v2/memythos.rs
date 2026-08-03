@@ -1308,12 +1308,62 @@ pub struct MemythosRoomActivitySubagents {
     pub interrupted_count: usize,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosTokenUsageBreakdown {
+    #[ts(type = "number")]
+    pub total_tokens: i64,
+    #[ts(type = "number")]
+    pub input_tokens: i64,
+    #[ts(type = "number")]
+    pub cached_input_tokens: i64,
+    #[ts(type = "number")]
+    pub non_cached_input_tokens: i64,
+    #[ts(type = "number")]
+    pub output_tokens: i64,
+    #[ts(type = "number")]
+    pub reasoning_output_tokens: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosTurnUsageAttribution {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub arena_id: String,
+    #[ts(optional = nullable)]
+    pub round_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub phase: Option<String>,
+    #[ts(optional = nullable)]
+    pub parent_role: Option<String>,
+    #[ts(optional = nullable)]
+    pub stance_profile: Option<String>,
+    #[ts(optional = nullable)]
+    pub goal_ref: Option<String>,
+    #[ts(optional = nullable)]
+    pub activation_reason: Option<String>,
+    pub usage: MemythosTokenUsageBreakdown,
+    #[ts(optional = nullable)]
+    pub cost_weighted_usage: Option<u64>,
+    pub evidence_outcome: String,
+    pub event_ref: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct MemythosRoomActivityUsage {
     pub token_usage_events: usize,
     pub refs: Vec<String>,
+    #[serde(default)]
+    pub total: MemythosTokenUsageBreakdown,
+    #[serde(default)]
+    pub turns: Vec<MemythosTurnUsageAttribution>,
+    #[ts(optional = nullable)]
+    pub cost_weighted_usage: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

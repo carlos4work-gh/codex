@@ -1686,14 +1686,14 @@ async fn handle_token_count_event(
         let notification = ThreadTokenUsageUpdatedNotification {
             thread_id: native_thread_id.clone(),
             turn_id,
-            token_usage,
+            token_usage: token_usage.clone(),
         };
         outgoing
             .send_server_notification(ServerNotification::ThreadTokenUsageUpdated(notification))
             .await;
         if let Some(memythos_processor) = memythos_processor {
             memythos_processor
-                .record_native_token_usage(&native_thread_id, &native_turn_id)
+                .record_native_token_usage(&native_thread_id, &native_turn_id, &token_usage)
                 .await;
         }
     }

@@ -125,6 +125,8 @@ use codex_app_server_protocol::MemythosThreadContractReadParams;
 use codex_app_server_protocol::MemythosThreadContractReadResponse;
 use codex_app_server_protocol::MemythosThreadListParams;
 use codex_app_server_protocol::MemythosThreadListResponse;
+use codex_app_server_protocol::MemythosTokenUsageBreakdown;
+use codex_app_server_protocol::MemythosTurnUsageAttribution;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadGoal;
@@ -132,6 +134,7 @@ use codex_app_server_protocol::ThreadGoalGetParams;
 use codex_app_server_protocol::ThreadGoalSetParams;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
@@ -178,6 +181,8 @@ struct MemythosRuntimeState {
     room_activity_events: HashMap<String, Vec<MemythosRoomActivityEvent>>,
     structured_contracts: HashMap<String, MemythosStructuredContract>,
     native_token_usage_refs: HashMap<String, String>,
+    native_thread_usage_totals: HashMap<String, MemythosTokenUsageBreakdown>,
+    native_turn_usage: HashMap<String, MemythosTurnUsageAttribution>,
     telemetry_refs: Vec<MemythosTelemetryRef>,
 }
 
@@ -2334,6 +2339,8 @@ impl MemythosRequestProcessor {
                 room_activity_events: HashMap::new(),
                 structured_contracts: HashMap::new(),
                 native_token_usage_refs: HashMap::new(),
+                native_thread_usage_totals: HashMap::new(),
+                native_turn_usage: HashMap::new(),
                 telemetry_refs: Vec::new(),
             })),
             peer_parent_delivery_adapter,
@@ -4792,7 +4799,14 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosRoomActivityListParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
-        let (room, arena_lifecycle_state, mut deliveries, room_activity_events, token_usage_refs) = {
+        let (
+            room,
+            arena_lifecycle_state,
+            mut deliveries,
+            room_activity_events,
+            token_usage_refs,
+            turn_usage,
+        ) = {
             let state = self.state.lock().await;
             let room =
                 state.rooms.get(&params.room_id).cloned().ok_or_else(|| {
@@ -4834,6 +4848,13 @@ impl MemythosRequestProcessor {
                 })
                 .map(|(_, value)| value.clone())
                 .collect::<Vec<_>>();
+            let turn_usage = state
+                .native_turn_usage
+                .values()
+                .filter(|usage| usage.arena_id == room.arena_id)
+                .filter(|usage| participant_thread_ids.contains(usage.thread_id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
             let arena_lifecycle_state = state
                 .arenas
                 .get(&room.arena_id)
@@ -4844,6 +4865,7 @@ impl MemythosRequestProcessor {
                 deliveries,
                 room_activity_events,
                 token_usage_refs,
+                turn_usage,
             )
         };
         deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
@@ -5100,6 +5122,9 @@ impl MemythosRequestProcessor {
             usage: MemythosRoomActivityUsage {
                 token_usage_events: token_usage_refs.len(),
                 refs: token_usage_refs,
+                total: sum_memythos_usage(turn_usage.iter().map(|usage| &usage.usage)),
+                turns: turn_usage,
+                cost_weighted_usage: None,
             },
             blockers,
         }
@@ -5595,7 +5620,12 @@ impl MemythosRequestProcessor {
         );
     }
 
-    pub(crate) async fn record_native_token_usage(&self, thread_id: &str, turn_id: &str) -> bool {
+    pub(crate) async fn record_native_token_usage(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        token_usage: &ThreadTokenUsage,
+    ) -> bool {
         let mut state = self.state.lock().await;
         let Some((layer_id, arena_id)) = find_attachment_context(&state, thread_id) else {
             return false;
@@ -5607,6 +5637,60 @@ impl MemythosRequestProcessor {
             native_token_usage_key(thread_id, turn_id),
             native_event_ref.clone(),
         );
+        let current_total = memythos_usage_breakdown(&token_usage.total);
+        let previous_total = state
+            .native_thread_usage_totals
+            .insert(thread_id.to_string(), current_total.clone())
+            .unwrap_or_default();
+        let delta = subtract_memythos_usage(&current_total, &previous_total);
+        let usage_key = native_token_usage_key(thread_id, turn_id);
+        let (round_id, phase, activation_reason) = state
+            .arena_message_deliveries
+            .iter()
+            .rev()
+            .find(|delivery| {
+                delivery.receiver_thread_id == thread_id
+                    && delivery.receiver_turn_id.as_deref() == Some(turn_id)
+            })
+            .map(|delivery| {
+                (
+                    Some(delivery.round_id.clone()),
+                    delivery.phase.clone(),
+                    delivery.phase.clone(),
+                )
+            })
+            .unwrap_or((None, None, None));
+        let parent = state
+            .arena_parents
+            .get(&arena_parent_key(&arena_id, thread_id));
+        let parent_role = parent.map(|parent| parent.parent_role.clone());
+        let stance_profile = parent.map(|parent| parent.stance_profile.clone());
+        let goal_ref = state
+            .rooms
+            .values()
+            .filter(|room| room.arena_id == arena_id)
+            .flat_map(|room| room.participants.iter())
+            .find(|participant| participant.thread_id == thread_id)
+            .and_then(|participant| participant.goal_ref.clone());
+        state
+            .native_turn_usage
+            .entry(usage_key)
+            .and_modify(|usage| add_memythos_usage(&mut usage.usage, &delta))
+            .or_insert_with(|| MemythosTurnUsageAttribution {
+                thread_id: thread_id.to_string(),
+                turn_id: turn_id.to_string(),
+                arena_id: arena_id.clone(),
+                round_id,
+                phase,
+                parent_role,
+                stance_profile,
+                goal_ref,
+                activation_reason,
+                usage: delta,
+                cost_weighted_usage: None,
+                evidence_outcome: "not_available".to_string(),
+                event_ref: native_event_ref.clone(),
+            });
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::ArenaMessage,
@@ -6601,6 +6685,58 @@ fn native_token_usage_key(thread_id: &str, turn_id: &str) -> String {
     format!("{thread_id}::{turn_id}")
 }
 
+fn memythos_usage_breakdown(
+    usage: &codex_app_server_protocol::TokenUsageBreakdown,
+) -> MemythosTokenUsageBreakdown {
+    MemythosTokenUsageBreakdown {
+        total_tokens: usage.total_tokens,
+        input_tokens: usage.input_tokens,
+        cached_input_tokens: usage.cached_input_tokens,
+        non_cached_input_tokens: (usage.input_tokens - usage.cached_input_tokens).max(0),
+        output_tokens: usage.output_tokens,
+        reasoning_output_tokens: usage.reasoning_output_tokens,
+    }
+}
+
+fn subtract_memythos_usage(
+    current: &MemythosTokenUsageBreakdown,
+    previous: &MemythosTokenUsageBreakdown,
+) -> MemythosTokenUsageBreakdown {
+    MemythosTokenUsageBreakdown {
+        total_tokens: (current.total_tokens - previous.total_tokens).max(0),
+        input_tokens: (current.input_tokens - previous.input_tokens).max(0),
+        cached_input_tokens: (current.cached_input_tokens - previous.cached_input_tokens).max(0),
+        non_cached_input_tokens: (current.non_cached_input_tokens
+            - previous.non_cached_input_tokens)
+            .max(0),
+        output_tokens: (current.output_tokens - previous.output_tokens).max(0),
+        reasoning_output_tokens: (current.reasoning_output_tokens
+            - previous.reasoning_output_tokens)
+            .max(0),
+    }
+}
+
+fn add_memythos_usage(
+    total: &mut MemythosTokenUsageBreakdown,
+    delta: &MemythosTokenUsageBreakdown,
+) {
+    total.total_tokens += delta.total_tokens;
+    total.input_tokens += delta.input_tokens;
+    total.cached_input_tokens += delta.cached_input_tokens;
+    total.non_cached_input_tokens += delta.non_cached_input_tokens;
+    total.output_tokens += delta.output_tokens;
+    total.reasoning_output_tokens += delta.reasoning_output_tokens;
+}
+
+fn sum_memythos_usage<'a>(
+    usage: impl Iterator<Item = &'a MemythosTokenUsageBreakdown>,
+) -> MemythosTokenUsageBreakdown {
+    usage.fold(MemythosTokenUsageBreakdown::default(), |mut total, item| {
+        add_memythos_usage(&mut total, item);
+        total
+    })
+}
+
 fn build_parent_thread_continuity(
     parent: &MemythosArenaParent,
     deliveries: &[MemythosArenaMessageDelivery],
@@ -7165,8 +7301,28 @@ mod tests {
     use codex_app_server_protocol::MemythosArenaKind;
     use codex_app_server_protocol::MemythosArenaMessage;
     use codex_app_server_protocol::MemythosLayerKind;
+    use codex_app_server_protocol::TokenUsageBreakdown;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+
+    fn native_usage(
+        total_tokens: i64,
+        input_tokens: i64,
+        cached_input_tokens: i64,
+    ) -> ThreadTokenUsage {
+        let total = TokenUsageBreakdown {
+            total_tokens,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens: total_tokens - input_tokens,
+            reasoning_output_tokens: 0,
+        };
+        ThreadTokenUsage {
+            total: total.clone(),
+            last: total,
+            model_context_window: Some(200_000),
+        }
+    }
 
     #[test]
     fn judge_verdict_schema_constrains_winner_to_native_participant_ids() {
@@ -9927,7 +10083,20 @@ mod tests {
         );
         assert!(
             processor
-                .record_native_token_usage("thread_risk", "turn_for_thread_risk_message-003")
+                .record_native_token_usage(
+                    "thread_risk",
+                    "turn_for_thread_risk_message-003",
+                    &native_usage(1_200, 1_000, 600),
+                )
+                .await
+        );
+        assert!(
+            processor
+                .record_native_token_usage(
+                    "thread_risk",
+                    "turn_for_thread_risk_message-003",
+                    &native_usage(1_200, 1_000, 600),
+                )
                 .await
         );
 
@@ -9961,6 +10130,21 @@ mod tests {
         assert!(!response.lifecycle.clean_close);
         assert_eq!(response.collab.completed_send_input_count, 1);
         assert_eq!(response.usage.token_usage_events, 1);
+        assert_eq!(response.usage.total.total_tokens, 1_200);
+        assert_eq!(response.usage.total.cached_input_tokens, 600);
+        assert_eq!(response.usage.total.non_cached_input_tokens, 400);
+        assert_eq!(response.usage.turns.len(), 1);
+        assert_eq!(
+            response.usage.turns[0].round_id.as_deref(),
+            Some("round-001")
+        );
+        assert_eq!(response.usage.turns[0].phase.as_deref(), Some("bet"));
+        assert_eq!(
+            response.usage.turns[0].activation_reason.as_deref(),
+            Some("bet")
+        );
+        assert_eq!(response.usage.turns[0].usage.total_tokens, 1_200);
+        assert!(response.usage.cost_weighted_usage.is_none());
         assert!(response.blockers.is_empty());
         assert_eq!(response.turns[0].items.len(), 3);
         let delivery_item = &response.turns[0].items[0];
@@ -11374,7 +11558,11 @@ mod tests {
             )
             .await;
         processor
-            .record_native_token_usage("thread_risk", "turn_for_thread_risk_message-live-002")
+            .record_native_token_usage(
+                "thread_risk",
+                "turn_for_thread_risk_message-live-002",
+                &native_usage(900, 700, 500),
+            )
             .await;
 
         let continuity_response = processor
