@@ -1042,8 +1042,38 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .send_server_notification(ServerNotification::ItemCompleted(completed))
                 .await;
         }
+        EventMsg::ItemCompleted(completed) => {
+            if let codex_protocol::items::TurnItem::AgentMessage(message) = &completed.item
+                && let Some(processor) = memythos_processor
+                    .lock()
+                    .ok()
+                    .and_then(|processor| processor.clone())
+            {
+                let text = message
+                    .content
+                    .iter()
+                    .map(|content| match content {
+                        codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                processor
+                    .record_native_parent_agent_message(
+                        &conversation_id.to_string(),
+                        &completed.turn_id,
+                        &message.id,
+                        text,
+                    )
+                    .await;
+            }
+            let notification = item_event_to_server_notification(
+                EventMsg::ItemCompleted(completed),
+                &conversation_id.to_string(),
+                &event_turn_id,
+            );
+            outgoing.send_server_notification(notification).await;
+        }
         msg @ (EventMsg::ItemStarted(_)
-        | EventMsg::ItemCompleted(_)
         | EventMsg::PatchApplyUpdated(_)
         | EventMsg::TerminalInteraction(_)) => {
             let notification = item_event_to_server_notification(

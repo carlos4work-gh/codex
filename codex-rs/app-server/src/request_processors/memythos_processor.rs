@@ -190,6 +190,7 @@ struct MemythosRuntimeState {
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
     arena_message_aggregates: HashMap<String, NativeArenaMessageAggregate>,
     room_activity_events: HashMap<String, Vec<MemythosRoomActivityEvent>>,
+    native_parent_turn_responses: HashMap<String, ParentTurnResponse>,
     structured_contracts: HashMap<String, MemythosStructuredContract>,
     native_token_usage_refs: HashMap<String, String>,
     native_thread_usage_totals: HashMap<String, MemythosTokenUsageBreakdown>,
@@ -2990,6 +2991,7 @@ impl MemythosRequestProcessor {
                 arena_message_deliveries: Vec::new(),
                 arena_message_aggregates: HashMap::new(),
                 room_activity_events: HashMap::new(),
+                native_parent_turn_responses: HashMap::new(),
                 structured_contracts: HashMap::new(),
                 native_token_usage_refs: HashMap::new(),
                 native_thread_usage_totals: HashMap::new(),
@@ -5947,12 +5949,23 @@ impl MemythosRequestProcessor {
             .parent_turn_response_adapter
             .read_responses(requested_turns)
             .await;
+        let recorded_native_turn_responses = {
+            let state = self.state.lock().await;
+            state.native_parent_turn_responses.clone()
+        };
         let turns = deliveries
             .iter()
             .filter_map(|delivery| {
                 let native_response = delivery.receiver_turn_id.as_ref().and_then(|turn_id| {
-                    native_turn_responses
-                        .get(&(delivery.receiver_thread_id.clone(), turn_id.clone()))
+                    recorded_native_turn_responses
+                        .get(&native_token_usage_key(
+                            &delivery.receiver_thread_id,
+                            turn_id,
+                        ))
+                        .or_else(|| {
+                            native_turn_responses
+                                .get(&(delivery.receiver_thread_id.clone(), turn_id.clone()))
+                        })
                 });
                 if delivery.status == "receiver_turn_completed"
                     && native_response.and_then(|response| response.text.as_ref()).is_none()
@@ -6482,6 +6495,49 @@ impl MemythosRequestProcessor {
         }
 
         matched_delivery
+    }
+
+    pub(crate) async fn record_native_parent_agent_message(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        text: String,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        let matched_delivery = state.arena_message_deliveries.iter().any(|delivery| {
+            delivery.receiver_thread_id == thread_id
+                && delivery.receiver_turn_id.as_deref() == Some(turn_id)
+        });
+        if !matched_delivery {
+            return false;
+        }
+
+        let item_ref = format!("app-server://threads/{thread_id}/turns/{turn_id}/items/{item_id}");
+        state.native_parent_turn_responses.insert(
+            native_token_usage_key(thread_id, turn_id),
+            ParentTurnResponse {
+                status: Some(TurnStatus::Completed),
+                request_item_ref: None,
+                request_text: None,
+                item_ref: Some(item_ref.clone()),
+                text: Some(text),
+            },
+        );
+        for delivery in state
+            .arena_message_deliveries
+            .iter_mut()
+            .filter(|delivery| {
+                delivery.receiver_thread_id == thread_id
+                    && delivery.receiver_turn_id.as_deref() == Some(turn_id)
+            })
+        {
+            delivery.receiver_response_event_ref = Some(item_ref.clone());
+            if !delivery.event_refs.contains(&item_ref) {
+                delivery.event_refs.push(item_ref.clone());
+            }
+        }
+        true
     }
 
     async fn close_arena_parent_goals(&self, candidate: ArenaClosureCandidate) {
@@ -12381,6 +12437,90 @@ mod tests {
                 .iter()
                 .any(|blocker| { blocker.contains("has no readable native AgentMessage") })
         );
+    }
+
+    #[tokio::test]
+    async fn room_activity_list_uses_native_agent_message_completion_projection() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+        );
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+        processor
+            .room_send_input(MemythosRoomSendInputParams {
+                room_id: "room-001".to_string(),
+                room_message_ref: "app-server://rooms/room-001/messages/message-native".to_string(),
+                delivery_ref: "app-server://rooms/room-001/deliveries/delivery-native".to_string(),
+                from_parent_thread_id: Some("thread_growth".to_string()),
+                via_concierge_thread_id: None,
+                to_parent_thread_id: "thread_risk".to_string(),
+                source_parent_key: "case/bpm_e2e/arena/bettor/growth".to_string(),
+                target_parent_key: "case/bpm_e2e/arena/bettor/risk".to_string(),
+                message_kind: "peer_bet".to_string(),
+                message_authority: "peer_debate".to_string(),
+                human_instruction: false,
+                response_contract: "peer_response_contract".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
+                client_user_message_id: Some("message-native".to_string()),
+                human_summary: "Respond with your conversational close.".to_string(),
+                prompt: "Respond with your conversational close.".to_string(),
+                metadata: serde_json::Map::new(),
+                output_schema: None,
+            })
+            .await
+            .unwrap();
+        let turn_id = "turn_for_thread_risk_message-native";
+        assert!(
+            processor
+                .record_native_parent_agent_message(
+                    "thread_risk",
+                    turn_id,
+                    "agent-message-native",
+                    "Native parent response.".to_string(),
+                )
+                .await
+        );
+        assert!(
+            processor
+                .record_native_turn_completed(
+                    "thread_risk",
+                    turn_id,
+                    "completed",
+                    None,
+                    None,
+                    None,
+                )
+                .await
+        );
+
+        let response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: None,
+                phase: None,
+                since_cursor: None,
+                after_cursor: None,
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(response) = response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+
+        assert!(response.blockers.is_empty());
+        assert_eq!(response.turns.len(), 1);
+        assert!(response.turns[0].items.iter().any(|item| {
+            item.kind == "agent_message" && item.text.as_deref() == Some("Native parent response.")
+        }));
     }
 
     #[tokio::test]
