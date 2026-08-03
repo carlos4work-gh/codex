@@ -5281,7 +5281,11 @@ impl MemythosRequestProcessor {
                 },
                 source_ref: Some(params.room_message_ref.clone()),
             }],
-            "human_like",
+            if params.human_instruction {
+                "human_like"
+            } else {
+                "parent_mailbox"
+            },
             if params.human_instruction {
                 "human_intake_delivered"
             } else {
@@ -5765,6 +5769,7 @@ impl MemythosRequestProcessor {
                         event.channel == "agent_activity"
                             || event.channel == "lifecycle"
                             || event.channel == "human_like"
+                            || event.channel == "parent_mailbox"
                     })
                     .map(|event| event.summary.clone())
                     .or_else(|| {
@@ -5993,7 +5998,7 @@ impl MemythosRequestProcessor {
                 .into_iter()
                 .flatten()
                 .filter(|event| {
-                    event.channel == "human_like"
+                    matches!(event.channel.as_str(), "human_like" | "parent_mailbox")
                         && matches!(
                             event.event_kind.as_str(),
                             "human_intake_delivered" | "input_delivered"
@@ -6621,6 +6626,7 @@ impl MemythosRequestProcessor {
             .map_or(1, |events| events.len() as u64 + 1);
         let event = MemythosRoomActivityEvent {
             cursor: cursor.clone(),
+            created_at: Utc::now().to_rfc3339(),
             iteration: 0,
             sequence,
             room_id: room_id.clone(),
@@ -11564,6 +11570,7 @@ mod tests {
         );
         assert_eq!(delivered.recipient.role, Some(MemythosParentRole::Bettor));
         assert_eq!(delivered.authority, "peer_debate");
+        assert_eq!(delivered.channel, "parent_mailbox");
         assert_eq!(delivered.phase.as_deref(), Some("proposal"));
         assert_eq!(
             delivered.prompt_origin,

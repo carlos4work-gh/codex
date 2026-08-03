@@ -1557,6 +1557,7 @@ pub struct MemythosRoomActivityUsage {
 #[ts(export_to = "v2/")]
 pub struct MemythosRoomActivityEvent {
     pub cursor: String,
+    pub created_at: String,
     pub iteration: u64,
     pub sequence: u64,
     pub room_id: String,
