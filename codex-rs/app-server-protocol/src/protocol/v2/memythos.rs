@@ -1270,6 +1270,9 @@ pub struct MemythosRoomActivityTurn {
     #[ts(optional = nullable)]
     pub phase: Option<String>,
     pub status: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub failure_reason: Option<String>,
     pub items: Vec<MemythosRoomActivityItem>,
 }
 

@@ -397,8 +397,8 @@ fn normalize_arena_composition_output_schema(schema: &mut serde_json::Value) {
             {
                 *reasoning_effort = serde_json::json!({
                     "type": "string",
-                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh"],
-                    "description": "Native app-server reasoning effort for this arena parent."
+                    "enum": ["low", "medium", "high", "xhigh"],
+                    "description": "Native app-server reasoning effort for this arena parent. The active arena parent toolset is incompatible with none/minimal."
                 });
             }
             for value in object.values_mut() {
@@ -595,7 +595,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     config,
                     agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
                     root_developer_instructions: Some(
-                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Native method authorities such as coordinate and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the scrum_master coordinator; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent and select a native reasoningEffort for every participant. reasoningEffort must be one of the OOTB app-server values and should be proportionate to uncertainty and decision impact; routine room coordination and concise phase responses normally need less effort than final judgment of material uncertainty. tokenBudget is a cumulative hard limit over the complete parent objective, including every arena phase and all input/output tokens. A qualitative request for efficiency, a small team, brevity, speed, or lower cost is not an explicit numeric hard limit: in those cases tokenBudget must be null. Set tokenBudget only when the caller supplied an explicit numeric token cap or previous measured evidence supports a calibrated cap that funds the full round. Never invent a small numeric cap from qualitative cost language. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Native method authorities such as coordinate and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the scrum_master coordinator; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent and select a native reasoningEffort for every participant. The active arena parent toolset requires reasoningEffort low, medium, high, or xhigh; none and minimal are invalid for this runtime. Within that compatible range, choose effort proportionate to uncertainty and decision impact; routine room coordination and concise phase responses normally need less effort than final judgment of material uncertainty. tokenBudget is a cumulative hard limit over the complete parent objective, including every arena phase and all input/output tokens. A qualitative request for efficiency, a small team, brevity, speed, or lower cost is not an explicit numeric hard limit: in those cases tokenBudget must be null. Set tokenBudget only when the caller supplied an explicit numeric token cap or previous measured evidence supports a calibrated cap that funds the full round. Never invent a small numeric cap from qualitative cost language. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
                             .to_string(),
                     ),
                     initial_history: InitialHistory::New,
@@ -4106,10 +4106,25 @@ impl MemythosRequestProcessor {
                 }
             }
 
+            let mut native_failure_reason = None;
+            {
+                let state = self.state.lock().await;
+                if let Some(delivery) = state.arena_message_deliveries.iter().find(|delivery| {
+                    delivery.receiver_thread_id == target_thread_id
+                        && delivery.receiver_turn_id.as_deref() == Some(target_turn_id)
+                }) {
+                    native_failure_reason = delivery.failure_reason.clone();
+                }
+            }
+
             match native_delivery_status.as_deref() {
                 Some("receiver_turn_failed") => {
                     return Err(invalid_params(format!(
-                        "parent turn {target_turn_id} failed"
+                        "parent turn {target_turn_id} failed{}",
+                        native_failure_reason
+                            .as_deref()
+                            .map(|reason| format!(": {reason}"))
+                            .unwrap_or_default()
                     )));
                 }
                 Some("receiver_turn_interrupted") => {
@@ -5882,6 +5897,7 @@ fn room_activity_turn_from_delivery(
         round_id: Some(delivery.round_id.clone()),
         phase,
         status: status.to_string(),
+        failure_reason: delivery.failure_reason.clone(),
         items,
     })
 }
@@ -6252,6 +6268,16 @@ fn validate_arena_composition_contract(
             return Err(invalid_params(format!(
                 "participant {} reasoning effort must use a native app-server value",
                 participant.participant_id
+            )));
+        }
+        if matches!(
+            participant.reasoning_effort,
+            ReasoningEffort::None | ReasoningEffort::Minimal
+        ) {
+            return Err(invalid_params(format!(
+                "participant {} reasoning effort {} is incompatible with the active arena parent toolset; use low or greater",
+                participant.participant_id,
+                participant.reasoning_effort.as_str()
             )));
         }
         if !params.upstream_authority_scope.is_empty()
@@ -7247,9 +7273,7 @@ mod tests {
             find_reasoning_effort(&schema)
                 .and_then(|value| value.get("enum"))
                 .cloned(),
-            Some(serde_json::json!([
-                "none", "minimal", "low", "medium", "high", "xhigh"
-            ]))
+            Some(serde_json::json!(["low", "medium", "high", "xhigh"]))
         );
     }
 
@@ -7923,6 +7947,20 @@ mod tests {
             .expect_err("arena participants must use known app-server effort values");
 
         assert!(error.message.contains("reasoning effort"));
+    }
+
+    #[test]
+    fn arena_composition_rejects_effort_incompatible_with_active_parent_toolset() {
+        for effort in [ReasoningEffort::None, ReasoningEffort::Minimal] {
+            let mut params = competitive_composition_params();
+            params.contract.participants[0].reasoning_effort = effort.clone();
+
+            let error = validate_arena_composition_contract(&params)
+                .expect_err("active arena parent tools require low or greater reasoning effort");
+
+            assert!(error.message.contains(effort.as_str()));
+            assert!(error.message.contains("active arena parent toolset"));
+        }
     }
 
     #[tokio::test]
