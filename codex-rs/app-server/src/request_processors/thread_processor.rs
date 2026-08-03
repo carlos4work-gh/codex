@@ -70,7 +70,9 @@ pub(crate) fn with_memythos_room_tools(
                 name: "send_message".to_string(),
                 description: concat!(
                     "Initiate a separate natural-language room act with another independent parent. ",
-                    "For non-concierge parents the destination is always Room Concierge. ",
+                    "For non-concierge parents the destination is Room Concierge except when a ",
+                    "group contribution uses aggregate_then_trigger for an explicitly selected ",
+                    "consumer such as Judge. ",
                     "The call waits for the destination parent turn to close and returns its ",
                     "final OOTB AgentMessage. Do not call this tool to answer the room message ",
                     "that opened your current turn: complete the current turn with your final ",
@@ -109,6 +111,27 @@ pub(crate) fn with_memythos_room_tools(
                         "responseContract": {
                             "type": "string",
                             "description": "Natural-language expectation for the response."
+                        },
+                        "deliveryPolicy": {
+                            "type": "string",
+                            "enum": ["immediate", "queue_only", "aggregate_then_trigger"],
+                            "description": "Native mailbox policy. Use aggregate_then_trigger when the target must see a complete group before it runs."
+                        },
+                        "aggregateContract": {
+                            "type": "object",
+                            "description": "Required only for aggregate_then_trigger. Defines the native mailbox barrier without changing conversational content.",
+                            "properties": {
+                                "aggregateId": { "type": "string" },
+                                "recipientThreadId": { "type": "string" },
+                                "expectedSourceThreadIds": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                                "quorum": { "type": "integer", "minimum": 1 },
+                                "phaseId": { "type": "string" },
+                                "deadlineRef": { "type": ["string", "null"] },
+                                "completionCriteriaRef": { "type": "string" },
+                                "lateArrivalPolicy": { "type": "string", "enum": ["reject", "queue_without_retrigger"] }
+                            },
+                            "required": ["aggregateId", "recipientThreadId", "expectedSourceThreadIds", "quorum", "phaseId", "completionCriteriaRef", "lateArrivalPolicy"],
+                            "additionalProperties": false
                         }
                     },
                     "required": ["message", "authority", "messageKind"],

@@ -1272,6 +1272,10 @@ pub(crate) struct MemythosRoomToolSendMessageArgs {
     pub(crate) message_kind: String,
     #[serde(default = "default_room_tool_response_contract")]
     pub(crate) response_contract: String,
+    #[serde(default)]
+    pub(crate) delivery_policy: Option<MemythosArenaDeliveryPolicy>,
+    #[serde(default)]
+    pub(crate) aggregate_contract: Option<MemythosArenaAggregateContract>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3061,6 +3065,8 @@ impl MemythosRequestProcessor {
                     message_authority: "human_delegated".to_string(),
                     human_instruction: true,
                     response_contract: params.expected_deliverable.clone(),
+                    delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                    aggregate_contract: None,
                     client_user_message_id: Some(request_id.clone()),
                     human_summary: params.case_brief.clone(),
                     prompt,
@@ -4272,6 +4278,8 @@ impl MemythosRequestProcessor {
                 message_authority: args.authority,
                 human_instruction: false,
                 response_contract: args.response_contract,
+                delivery_policy: None,
+                aggregate_contract: None,
                 client_user_message_id: Some(message_id),
                 human_summary: args.message.clone(),
                 prompt: args.message,
@@ -4284,7 +4292,9 @@ impl MemythosRequestProcessor {
                 "native cross-room tool received an unexpected delivery response".to_string(),
             ));
         };
-        let target_turn_id = delivery_response.delivery.turn_id.clone();
+        let target_turn_id = delivery_response.delivery.turn_id.clone().ok_or_else(|| {
+            invalid_params("cross-room delivery did not start a target turn".to_string())
+        })?;
         let (response_item_ref, response_text, event_refs) = self
             .await_parent_turn_response(&target.thread_id, &target_turn_id)
             .await?;
@@ -4342,7 +4352,11 @@ impl MemythosRequestProcessor {
                         room.room_id
                     ))
                 })?;
-            let target = if source.parent_role == "room_concierge" {
+            let direct_aggregate_target = matches!(
+                args.delivery_policy,
+                Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger)
+            ) && args.target_parent_key.is_some();
+            let target = if source.parent_role == "room_concierge" || direct_aggregate_target {
                 let target_parent_key = args.target_parent_key.as_deref().ok_or_else(|| {
                     invalid_params(
                         "Room Concierge must select targetParentKey before sending".to_string(),
@@ -4478,6 +4492,8 @@ impl MemythosRequestProcessor {
                 message_authority: args.authority,
                 human_instruction: false,
                 response_contract: args.response_contract,
+                delivery_policy: args.delivery_policy,
+                aggregate_contract: args.aggregate_contract,
                 client_user_message_id: Some(message_id),
                 human_summary: args.message.clone(),
                 prompt: execution_prompt,
@@ -4491,7 +4507,29 @@ impl MemythosRequestProcessor {
             ));
         };
 
-        let target_turn_id = delivery_response.delivery.turn_id.clone();
+        if matches!(
+            delivery_response.delivery.delivery_policy,
+            Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger)
+        ) {
+            return Ok(MemythosRoomToolResponse {
+                room_id: room.room_id,
+                target_parent_key: target.parent_key,
+                target_thread_id: target.thread_id,
+                target_turn_id: delivery_response
+                    .delivery
+                    .turn_id
+                    .unwrap_or_else(|| "mailbox_queued".to_string()),
+                response_item_ref: delivery_response.delivery.delivery_ref,
+                response_text: format!(
+                    "Contribution accepted by aggregate mailbox with status {}. The recipient will run once when the checkpoint is sealed.",
+                    delivery_response.delivery.status
+                ),
+                event_refs: delivery_response.delivery.event_refs,
+            });
+        }
+        let target_turn_id = delivery_response.delivery.turn_id.clone().ok_or_else(|| {
+            invalid_params("room delivery did not start a target turn".to_string())
+        })?;
         let (response_item_ref, response_text, event_refs) = self
             .await_parent_turn_response(&target.thread_id, &target_turn_id)
             .await?;
@@ -4722,10 +4760,45 @@ impl MemythosRequestProcessor {
             context_packet_ref: params.room_message_ref.clone(),
             artifact_refs: vec![params.delivery_ref.clone()],
             requires_response: true,
-            delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
-            aggregate_contract: None,
+            delivery_policy: params.delivery_policy,
+            aggregate_contract: params.aggregate_contract.clone(),
             response_contract: Some(params.response_contract.clone()),
         };
+        if !params.human_instruction
+            && !matches!(
+                message.delivery_policy,
+                None | Some(MemythosArenaDeliveryPolicy::Immediate)
+            )
+        {
+            let payload = self
+                .arena_message_send(MemythosArenaMessageSendParams {
+                    message: message.clone(),
+                })
+                .await?;
+            let ClientResponsePayload::MemythosArenaMessageSend(response) = payload else {
+                return Err(invalid_params(
+                    "native mailbox delivery returned an unexpected response".to_string(),
+                ));
+            };
+            return Ok(MemythosRoomSendInputResponse {
+                delivery: MemythosRoomSendInputDelivery {
+                    thread_id: params.to_parent_thread_id,
+                    turn_id: response.delivery.receiver_turn_id,
+                    round_id: message.round_id,
+                    event_refs: response.delivery.event_refs,
+                    room_id: params.room_id,
+                    room_message_ref: params.room_message_ref,
+                    delivery_ref: params.delivery_ref,
+                    delivery_mechanism: response.delivery.delivery_mechanism,
+                    human_instruction: false,
+                    message_authority: params.message_authority,
+                    status: response.delivery.status,
+                    delivery_policy: response.delivery.delivery_policy,
+                    aggregate_state: response.delivery.aggregate_state,
+                },
+            }
+            .into());
+        }
         let target_reasoning_effort = {
             let state = self.state.lock().await;
             arena_parent_reasoning_effort(&state, &room.arena_id, &target.thread_id)
@@ -4943,7 +5016,7 @@ impl MemythosRequestProcessor {
         Ok(MemythosRoomSendInputResponse {
             delivery: MemythosRoomSendInputDelivery {
                 thread_id: params.to_parent_thread_id,
-                turn_id: target_turn_id,
+                turn_id: Some(target_turn_id),
                 round_id: message.round_id,
                 event_refs,
                 room_id: params.room_id,
@@ -4952,6 +5025,9 @@ impl MemythosRequestProcessor {
                 delivery_mechanism: "room_loopback_send_input".to_string(),
                 human_instruction: params.human_instruction,
                 message_authority: params.message_authority,
+                status: "delivered_to_live_thread".to_string(),
+                delivery_policy: message.delivery_policy,
+                aggregate_state: None,
             },
         }
         .into())
@@ -6535,6 +6611,7 @@ fn validate_room_message_route(
         | "peer_bet" => {
             (source_role == "room_concierge" && target_role == "bettor")
                 || (source_role == "bettor" && target_role == "room_concierge")
+                || (message_kind == "peer_bet" && source_role == "bettor" && target_role == "judge")
         }
         "verdict_request" => source_role == "room_concierge" && target_role == "judge",
         "judge_verdict" => source_role == "judge" && target_role == "room_concierge",
@@ -7951,28 +8028,43 @@ mod tests {
             _connection_id: ConnectionId,
         ) -> PeerParentDeliveryFuture<'a> {
             Box::pin(async move {
-                PeerParentDeliveryAttempt {
-                    status: "delivered_to_live_thread".to_string(),
-                    delivery_mechanism: "turn_start".to_string(),
-                    receiver_turn_id: Some(format!(
+                let receiver_turn_id = message.requires_response.then(|| {
+                    format!(
                         "turn_for_{}_{}",
                         message.to_parent_thread_id, message.message_id
-                    )),
+                    )
+                });
+                let mut event_refs = vec![format!(
+                    "memythos://arenas/{}/rounds/{}/messages/{}",
+                    message.arena_id, message.round_id, message.message_id
+                )];
+                if let Some(turn_id) = receiver_turn_id.as_deref() {
+                    event_refs.push(format!(
+                        "app-server://threads/{}/turns/{turn_id}",
+                        message.to_parent_thread_id
+                    ));
+                } else {
+                    event_refs.push(format!(
+                        "app-server://threads/{}/mailbox/{}",
+                        message.to_parent_thread_id, message.message_id
+                    ));
+                }
+                PeerParentDeliveryAttempt {
+                    status: if message.requires_response {
+                        "delivered_to_live_thread".to_string()
+                    } else {
+                        "queued_in_native_mailbox".to_string()
+                    },
+                    delivery_mechanism: if message.requires_response {
+                        "turn_start".to_string()
+                    } else {
+                        "native_mailbox_queue_only".to_string()
+                    },
+                    receiver_turn_id,
                     receiver_response_event_ref: None,
                     delivered_as_human_instruction: false,
                     memory_replay_required: false,
-                    event_refs: vec![
-                        format!(
-                            "memythos://arenas/{}/rounds/{}/messages/{}",
-                            message.arena_id, message.round_id, message.message_id
-                        ),
-                        format!(
-                            "app-server://threads/{}/turns/turn_for_{}_{}",
-                            message.to_parent_thread_id,
-                            message.to_parent_thread_id,
-                            message.message_id
-                        ),
-                    ],
+                    event_refs,
                     rejection_reason: None,
                     telemetry_channel: MemythosEventChannel::StateTransition,
                     telemetry_summary: format!(
@@ -8859,6 +8951,8 @@ mod tests {
                 message_authority: "human_delegated".to_string(),
                 human_instruction: true,
                 response_contract: "Respond to the follow-up.".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
                 client_user_message_id: Some("follow-up".to_string()),
                 human_summary: "Clarify the arena outcome.".to_string(),
                 prompt: "Clarify the arena outcome.".to_string(),
@@ -9502,6 +9596,76 @@ mod tests {
         params
     }
 
+    fn room_register_params_with_concierge_and_judge() -> MemythosRoomRegisterParams {
+        let mut params = room_register_params_with_concierge();
+        params.participants.push(MemythosRoomParticipant {
+            parent_key: "case/bpm_e2e/arena/judge/fitness".to_string(),
+            thread_id: "thread_judge".to_string(),
+            parent_role: "judge".to_string(),
+            stance_profile: "business_fitness".to_string(),
+            goal_ref: Some("app-server://threads/thread_judge/goals/current".to_string()),
+            authority_scope: vec!["judge".to_string()],
+        });
+        params
+    }
+
+    async fn register_room_with_native_arena(
+        processor: &MemythosRequestProcessor,
+        mut params: MemythosRoomRegisterParams,
+    ) {
+        let layer = processor
+            .layer_create(MemythosLayerCreateParams {
+                name: "Room test layer".to_string(),
+                kind: MemythosLayerKind::BpmEndToEnd,
+                parent_layer_id: None,
+                objective: "Exercise native room delivery.".to_string(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosLayerCreate(layer) = layer else {
+            panic!("expected MemythosLayerCreate response");
+        };
+        let arena = processor
+            .arena_create(MemythosArenaCreateParams {
+                layer_id: layer.layer.layer_id.clone(),
+                name: "Room test arena".to_string(),
+                kind: MemythosArenaKind::Debate,
+                objective: "Exercise native room delivery.".to_string(),
+                participant_ids: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaCreate(arena) = arena else {
+            panic!("expected MemythosArenaCreate response");
+        };
+        params.layer_id = layer.layer.layer_id;
+        params.arena_id = arena.arena.arena_id.clone();
+        for participant in &params.participants {
+            processor
+                .thread_attach(MemythosThreadAttachParams {
+                    arena_id: params.arena_id.clone(),
+                    thread_id: participant.thread_id.clone(),
+                    role_id: Some(participant.parent_role.clone()),
+                    stance_id: Some(participant.stance_profile.clone()),
+                    objective: Some("Exercise native room delivery.".to_string()),
+                    contract_ref: None,
+                })
+                .await
+                .unwrap();
+            processor
+                .arena_parent_register(MemythosArenaParentRegisterParams {
+                    arena_id: params.arena_id.clone(),
+                    thread_id: participant.thread_id.clone(),
+                    parent_role: participant.parent_role.clone(),
+                    stance_profile: participant.stance_profile.clone(),
+                    authority_scope: participant.authority_scope.clone(),
+                })
+                .await
+                .unwrap();
+        }
+        processor.room_register(params).await.unwrap();
+    }
+
     fn second_room_register_params_with_concierge() -> MemythosRoomRegisterParams {
         MemythosRoomRegisterParams {
             room_id: "room-002".to_string(),
@@ -9718,6 +9882,8 @@ mod tests {
                     authority: "peer".to_string(),
                     message_kind: "consultation".to_string(),
                     response_contract: "Devuelve tesis, limites y proximo paso.".to_string(),
+                    delivery_policy: None,
+                    aggregate_contract: None,
                 },
             )
             .await
@@ -9767,6 +9933,8 @@ mod tests {
                     authority: "peer".to_string(),
                     message_kind: "consultation".to_string(),
                     response_contract: "Return the native final AgentMessage.".to_string(),
+                    delivery_policy: None,
+                    aggregate_contract: None,
                 },
             )
             .await
@@ -9802,6 +9970,8 @@ mod tests {
                     authority: "peer".to_string(),
                     message_kind: "consultation".to_string(),
                     response_contract: "Devuelve tesis, limites y proximo paso.".to_string(),
+                    delivery_policy: None,
+                    aggregate_contract: None,
                 },
             )
             .await
@@ -9867,6 +10037,8 @@ mod tests {
                     authority: "peer".to_string(),
                     message_kind: "consultation".to_string(),
                     response_contract: "Devuelve tesis, limites y proximo paso.".to_string(),
+                    delivery_policy: None,
+                    aggregate_contract: None,
                 },
             )
             .await
@@ -9907,6 +10079,8 @@ mod tests {
                             authority: "peer".to_string(),
                             message_kind: "objection".to_string(),
                             response_contract: "Devuelve la decision coordinada.".to_string(),
+                            delivery_policy: None,
+                            aggregate_contract: None,
                         },
                     )
                     .await
@@ -9981,6 +10155,8 @@ mod tests {
                             message_kind: "consultation".to_string(),
                             response_contract: "Devuelve tesis, limites y proximo paso."
                                 .to_string(),
+                            delivery_policy: None,
+                            aggregate_contract: None,
                         },
                     )
                     .await
@@ -10021,6 +10197,158 @@ mod tests {
             response
                 .response_text
                 .contains("Cierre conversacional OOTB de thread_risk")
+        );
+    }
+
+    #[tokio::test]
+    async fn room_tool_aggregates_bets_and_starts_exactly_one_judge_turn() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(FakeParentTurnResponseAdapter),
+        );
+        register_room_with_native_arena(
+            &processor,
+            room_register_params_with_concierge_and_judge(),
+        )
+        .await;
+        let contract = MemythosArenaAggregateContract {
+            aggregate_id: "judge-bets-round-1".to_string(),
+            recipient_thread_id: "thread_judge".to_string(),
+            expected_source_thread_ids: vec![
+                "thread_growth".to_string(),
+                "thread_risk".to_string(),
+            ],
+            quorum: 2,
+            phase_id: "bet".to_string(),
+            deadline_ref: None,
+            completion_criteria_ref: "criteria://all-bettors-committed".to_string(),
+            late_arrival_policy: MemythosArenaLateArrivalPolicy::Reject,
+        };
+
+        let first = processor
+            .room_tool_send_message(
+                "thread_growth",
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: Some("case/bpm_e2e/arena/judge/fitness".to_string()),
+                    message: "Growth commits to option A.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "peer_bet".to_string(),
+                    response_contract: "Judge the complete bet set once sealed.".to_string(),
+                    delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                    aggregate_contract: Some(contract.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        let second = processor
+            .room_tool_send_message(
+                "thread_risk",
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: Some("case/bpm_e2e/arena/judge/fitness".to_string()),
+                    message: "Risk commits to option B.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "peer_bet".to_string(),
+                    response_contract: "Judge the complete bet set once sealed.".to_string(),
+                    delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                    aggregate_contract: Some(contract),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.target_turn_id, "mailbox_queued");
+        assert!(second.target_turn_id.starts_with("turn_for_thread_judge_"));
+        let state = processor.state.lock().await;
+        let deliveries = state
+            .arena_message_deliveries
+            .iter()
+            .filter(|delivery| delivery.aggregate_id.as_deref() == Some("judge-bets-round-1"))
+            .collect::<Vec<_>>();
+        assert_eq!(deliveries.len(), 2);
+        assert_eq!(
+            deliveries
+                .iter()
+                .filter(|delivery| delivery.receiver_turn_id.is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            deliveries[1].aggregate_state,
+            Some(MemythosArenaAggregateState::RecipientTriggered)
+        );
+    }
+
+    #[tokio::test]
+    async fn room_tool_aggregate_policy_is_generic_for_non_judge_consumers() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(FakeParentTurnResponseAdapter),
+        );
+        register_room_with_native_arena(&processor, room_register_params_with_concierge()).await;
+        let contract = MemythosArenaAggregateContract {
+            aggregate_id: "planner-inputs-round-1".to_string(),
+            recipient_thread_id: "thread_risk".to_string(),
+            expected_source_thread_ids: vec![
+                "thread_growth".to_string(),
+                "thread_concierge".to_string(),
+            ],
+            quorum: 2,
+            phase_id: "planning".to_string(),
+            deadline_ref: None,
+            completion_criteria_ref: "criteria://all-planning-inputs".to_string(),
+            late_arrival_policy: MemythosArenaLateArrivalPolicy::Reject,
+        };
+
+        let first = processor
+            .room_tool_send_message(
+                "thread_growth",
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: Some("case/bpm_e2e/arena/bettor/risk".to_string()),
+                    message: "Provide the first planning input.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "planning_input".to_string(),
+                    response_contract: "Plan once all inputs are available.".to_string(),
+                    delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                    aggregate_contract: Some(contract.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        let second = processor
+            .room_tool_send_message(
+                "thread_concierge",
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: Some("case/bpm_e2e/arena/bettor/risk".to_string()),
+                    message: "Provide the final planning constraint.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "planning_input".to_string(),
+                    response_contract: "Plan once all inputs are available.".to_string(),
+                    delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                    aggregate_contract: Some(contract),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.target_turn_id, "mailbox_queued");
+        assert!(second.target_turn_id.starts_with("turn_for_thread_risk_"));
+        let state = processor.state.lock().await;
+        assert_eq!(
+            state
+                .arena_message_deliveries
+                .iter()
+                .filter(|delivery| {
+                    delivery.aggregate_id.as_deref() == Some("planner-inputs-round-1")
+                        && delivery.receiver_turn_id.is_some()
+                })
+                .count(),
+            1
         );
     }
 
@@ -10244,6 +10572,8 @@ mod tests {
                 message_authority: "peer_debate".to_string(),
                 human_instruction: false,
                 response_contract: "peer_response_contract".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
                 client_user_message_id: Some("message-001".to_string()),
                 human_summary: "Challenge my proposal as an arena peer.".to_string(),
                 prompt: "I am not a human; I am an arena peer. Challenge my proposal.".to_string(),
@@ -10272,8 +10602,8 @@ mod tests {
         assert!(!send_response.delivery.human_instruction);
         assert_eq!(send_response.delivery.thread_id, "thread_risk");
         assert_eq!(
-            send_response.delivery.turn_id,
-            "turn_for_thread_risk_message-001"
+            send_response.delivery.turn_id.as_deref(),
+            Some("turn_for_thread_risk_message-001")
         );
         assert!(send_response.delivery.event_refs.iter().any(|event_ref| {
             event_ref == "app-server://rooms/room-001/messages/message-001/delivered"
@@ -10314,6 +10644,8 @@ mod tests {
                 message_authority: "peer_debate".to_string(),
                 human_instruction: false,
                 response_contract: "peer_response_contract".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
                 client_user_message_id: Some("message-002".to_string()),
                 human_summary: "The concierge delivers a message between peers.".to_string(),
                 prompt: "The concierge delivers a message between peers.".to_string(),
@@ -10408,6 +10740,8 @@ mod tests {
                 human_instruction: true,
                 response_contract: "respond conversationally and ask for missing context if needed"
                     .to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
                 client_user_message_id: Some("human-intake-001".to_string()),
                 human_summary:
                     "Assess whether the BPM node can become a tactical PID without reopening business decisions."
@@ -10497,6 +10831,8 @@ mod tests {
                 message_authority: "peer_debate".to_string(),
                 human_instruction: false,
                 response_contract: "peer_response_contract".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
                 client_user_message_id: Some("message-003".to_string()),
                 human_summary: "Challenge my proposal as an arena peer.".to_string(),
                 prompt: "I am not a human; I am an arena peer. Challenge my proposal.".to_string(),
@@ -10702,6 +11038,8 @@ mod tests {
                 message_authority: "peer_debate".to_string(),
                 human_instruction: false,
                 response_contract: "peer_response_contract".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
                 client_user_message_id: Some("message-003".to_string()),
                 human_summary: "Place a bet and state execution conditions.".to_string(),
                 prompt: "Place a bet and state execution conditions.".to_string(),
@@ -10954,6 +11292,8 @@ mod tests {
                 message_authority: "peer_debate".to_string(),
                 human_instruction: false,
                 response_contract: "peer_response_contract".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
                 client_user_message_id: Some("message-missing".to_string()),
                 human_summary: "Respond with your conversational close.".to_string(),
                 prompt: "Respond with your conversational close.".to_string(),
@@ -11032,6 +11372,8 @@ mod tests {
                     message_authority: "peer_debate".to_string(),
                     human_instruction: false,
                     response_contract: "peer_response_contract".to_string(),
+                    delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                    aggregate_contract: None,
                     client_user_message_id: Some(message_id.to_string()),
                     human_summary: format!("Incremental bet {message_id}."),
                     prompt: format!("Incremental bet {message_id}."),

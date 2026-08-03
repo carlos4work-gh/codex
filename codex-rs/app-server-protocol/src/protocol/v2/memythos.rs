@@ -1530,6 +1530,12 @@ pub struct MemythosRoomSendInputParams {
     pub message_authority: String,
     pub human_instruction: bool,
     pub response_contract: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub delivery_policy: Option<MemythosArenaDeliveryPolicy>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub aggregate_contract: Option<MemythosArenaAggregateContract>,
     #[ts(optional = nullable)]
     pub client_user_message_id: Option<String>,
     pub human_summary: String,
@@ -1547,7 +1553,8 @@ pub struct MemythosRoomSendInputParams {
 #[ts(export_to = "v2/")]
 pub struct MemythosRoomSendInputDelivery {
     pub thread_id: String,
-    pub turn_id: String,
+    #[ts(optional = nullable)]
+    pub turn_id: Option<String>,
     pub round_id: String,
     pub event_refs: Vec<String>,
     pub room_id: String,
@@ -1556,6 +1563,11 @@ pub struct MemythosRoomSendInputDelivery {
     pub delivery_mechanism: String,
     pub human_instruction: bool,
     pub message_authority: String,
+    pub status: String,
+    #[ts(optional = nullable)]
+    pub delivery_policy: Option<MemythosArenaDeliveryPolicy>,
+    #[ts(optional = nullable)]
+    pub aggregate_state: Option<MemythosArenaAggregateState>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
