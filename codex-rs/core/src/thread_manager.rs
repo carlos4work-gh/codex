@@ -43,6 +43,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ResumedHistory;
@@ -511,6 +512,20 @@ impl ThreadManager {
 
     pub async fn get_thread(&self, thread_id: ThreadId) -> CodexResult<Arc<CodexThread>> {
         self.state.get_thread(thread_id).await
+    }
+
+    /// Deliver a native mailbox message to an independently owned thread.
+    ///
+    /// This preserves the app-server inter-agent queue and pending-work semantics
+    /// without requiring callers to model the target as a child of the sender.
+    pub async fn send_inter_agent_communication(
+        &self,
+        thread_id: ThreadId,
+        communication: InterAgentCommunication,
+    ) -> CodexResult<String> {
+        self.agent_control()
+            .send_inter_agent_communication(thread_id, communication)
+            .await
     }
 
     /// Updates metadata for loaded and cold threads through one entrypoint.

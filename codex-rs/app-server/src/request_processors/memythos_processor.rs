@@ -144,9 +144,12 @@ use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_extension_api::ExtensionDataInit;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::InitialHistory;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
@@ -1469,17 +1472,24 @@ impl PeerParentDeliveryAdapter for RecordOnlyPeerParentDeliveryAdapter {
 }
 
 #[derive(Clone)]
-pub(crate) struct TurnStartPeerParentDeliveryAdapter {
+pub(crate) struct NativeMailboxPeerParentDeliveryAdapter {
     turn_processor: TurnRequestProcessor,
+    thread_manager: Arc<ThreadManager>,
 }
 
-impl TurnStartPeerParentDeliveryAdapter {
-    pub(crate) fn new(turn_processor: TurnRequestProcessor) -> Self {
-        Self { turn_processor }
+impl NativeMailboxPeerParentDeliveryAdapter {
+    pub(crate) fn new(
+        turn_processor: TurnRequestProcessor,
+        thread_manager: Arc<ThreadManager>,
+    ) -> Self {
+        Self {
+            turn_processor,
+            thread_manager,
+        }
     }
 }
 
-impl PeerParentDeliveryAdapter for TurnStartPeerParentDeliveryAdapter {
+impl PeerParentDeliveryAdapter for NativeMailboxPeerParentDeliveryAdapter {
     fn deliver_peer_parent_message<'a>(
         &'a self,
         message: &'a MemythosArenaMessage,
@@ -1487,6 +1497,9 @@ impl PeerParentDeliveryAdapter for TurnStartPeerParentDeliveryAdapter {
         connection_id: ConnectionId,
     ) -> PeerParentDeliveryFuture<'a> {
         Box::pin(async move {
+            if message.from_parent_role != "human" {
+                return deliver_native_parent_mailbox_message(&self.thread_manager, message).await;
+            }
             let request_id = ConnectionRequestId {
                 connection_id,
                 request_id: RequestId::String(format!(
@@ -1600,6 +1613,121 @@ impl PeerParentDeliveryAdapter for TurnStartPeerParentDeliveryAdapter {
                 ),
             }
         })
+    }
+}
+
+async fn deliver_native_parent_mailbox_message(
+    thread_manager: &ThreadManager,
+    message: &MemythosArenaMessage,
+) -> PeerParentDeliveryAttempt {
+    let event_ref = format!(
+        "memythos://arenas/{}/rounds/{}/messages/{}",
+        message.arena_id, message.round_id, message.message_id
+    );
+    let target_thread_id = match ThreadId::from_string(&message.to_parent_thread_id) {
+        Ok(thread_id) => thread_id,
+        Err(error) => {
+            return failed_native_mailbox_delivery_attempt(
+                message,
+                &format!("invalid target parent thread id: {error}"),
+            );
+        }
+    };
+    let target_thread = match thread_manager.get_thread(target_thread_id).await {
+        Ok(thread) => thread,
+        Err(error) => {
+            return failed_native_mailbox_delivery_attempt(message, &error.to_string());
+        }
+    };
+    let target_status = target_thread.agent_status().await;
+    let trigger_turn = match native_mailbox_wake_policy(&target_status, message.requires_response) {
+        Ok(trigger_turn) => trigger_turn,
+        Err(reason) => return failed_native_mailbox_delivery_attempt(message, &reason),
+    };
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root(),
+        Vec::new(),
+        build_peer_parent_envelope(message),
+        trigger_turn,
+    );
+    match thread_manager
+        .send_inter_agent_communication(target_thread_id, communication)
+        .await
+    {
+        Ok(submission_id) => {
+            let mechanism = if trigger_turn {
+                "native_mailbox_trigger_turn"
+            } else {
+                "native_mailbox_queue_only"
+            };
+            PeerParentDeliveryAttempt {
+                status: if trigger_turn {
+                    "delivered_to_native_mailbox_turn".to_string()
+                } else {
+                    "queued_in_native_mailbox".to_string()
+                },
+                delivery_mechanism: mechanism.to_string(),
+                receiver_turn_id: trigger_turn.then_some(submission_id.clone()),
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: vec![
+                    event_ref,
+                    format!(
+                        "app-server://threads/{}/mailbox/{}",
+                        message.to_parent_thread_id, submission_id
+                    ),
+                ],
+                rejection_reason: None,
+                telemetry_channel: MemythosEventChannel::StateTransition,
+                telemetry_summary: format!(
+                    "Arena message {} delivered through the native app-server mailbox to parent thread {} (trigger_turn={trigger_turn}).",
+                    message.message_id, message.to_parent_thread_id
+                ),
+            }
+        }
+        Err(error) => failed_native_mailbox_delivery_attempt(message, &error.to_string()),
+    }
+}
+
+fn native_mailbox_wake_policy(
+    target_status: &AgentStatus,
+    requires_response: bool,
+) -> Result<bool, String> {
+    if !requires_response {
+        return Ok(false);
+    }
+    match target_status {
+        AgentStatus::Running => Ok(false),
+        AgentStatus::PendingInit | AgentStatus::Interrupted | AgentStatus::Completed(_) => Ok(true),
+        AgentStatus::Errored(reason) => Err(format!("target parent is errored: {reason}")),
+        AgentStatus::Shutdown => Err("target parent is shutdown".to_string()),
+        AgentStatus::NotFound => Err("target parent is not found".to_string()),
+    }
+}
+
+fn failed_native_mailbox_delivery_attempt(
+    message: &MemythosArenaMessage,
+    reason: &str,
+) -> PeerParentDeliveryAttempt {
+    PeerParentDeliveryAttempt {
+        status: "failed_native_mailbox_delivery".to_string(),
+        delivery_mechanism: "native_inter_agent_communication".to_string(),
+        receiver_turn_id: None,
+        receiver_response_event_ref: None,
+        delivered_as_human_instruction: false,
+        memory_replay_required: false,
+        event_refs: vec![format!(
+            "memythos://arenas/{}/rounds/{}/messages/{}",
+            message.arena_id, message.round_id, message.message_id
+        )],
+        rejection_reason: Some(reason.to_string()),
+        telemetry_channel: MemythosEventChannel::TechnicalDetail,
+        telemetry_summary: format!(
+            "Arena message {} failed native mailbox delivery to {}: {}.",
+            message.message_id, message.to_parent_thread_id, reason
+        ),
     }
 }
 
@@ -7322,6 +7450,40 @@ mod tests {
             last: total,
             model_context_window: Some(200_000),
         }
+    }
+
+    #[test]
+    fn native_mailbox_wake_policy_never_starts_a_concurrent_parent_turn() {
+        assert_eq!(
+            native_mailbox_wake_policy(&AgentStatus::Running, true),
+            Ok(false)
+        );
+        assert_eq!(
+            native_mailbox_wake_policy(&AgentStatus::Completed(None), true),
+            Ok(true)
+        );
+        assert_eq!(
+            native_mailbox_wake_policy(&AgentStatus::Interrupted, true),
+            Ok(true)
+        );
+        assert_eq!(
+            native_mailbox_wake_policy(&AgentStatus::Completed(None), false),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn native_mailbox_wake_policy_rejects_closed_parent_threads() {
+        assert!(
+            native_mailbox_wake_policy(&AgentStatus::Shutdown, true)
+                .expect_err("shutdown parent must be rejected")
+                .contains("shutdown")
+        );
+        assert!(
+            native_mailbox_wake_policy(&AgentStatus::Errored("boom".to_string()), true)
+                .expect_err("errored parent must be rejected")
+                .contains("boom")
+        );
     }
 
     #[test]

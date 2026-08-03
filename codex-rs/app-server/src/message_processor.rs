@@ -35,6 +35,7 @@ use crate::request_processors::McpRequestProcessor;
 use crate::request_processors::MemythosRequestProcessor;
 use crate::request_processors::NativeArenaCompositionPlanningAdapter;
 use crate::request_processors::NativeArenaParentProvisioningAdapter;
+use crate::request_processors::NativeMailboxPeerParentDeliveryAdapter;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
@@ -45,7 +46,6 @@ use crate::request_processors::ThreadManagerParentConfigurationAdapter;
 use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::ThreadTurnsParentResponseAdapter;
 use crate::request_processors::TurnRequestProcessor;
-use crate::request_processors::TurnStartPeerParentDeliveryAdapter;
 use crate::request_processors::TurnStartThreadConsolidationAdapter;
 use crate::request_processors::WindowsSandboxRequestProcessor;
 use crate::request_serialization::QueuedInitializedRequest;
@@ -524,8 +524,9 @@ impl MessageProcessor {
         );
         let memythos_processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
             rpc_transport,
-            Arc::new(TurnStartPeerParentDeliveryAdapter::new(
+            Arc::new(NativeMailboxPeerParentDeliveryAdapter::new(
                 turn_processor.clone(),
+                Arc::clone(&thread_manager),
             )),
             Arc::new(ThreadGoalParentSnapshotAdapter::new(
                 thread_goal_processor.clone(),
