@@ -537,6 +537,42 @@ pub struct MemythosArenaRoundPolicy {
     pub explicit_bet_required: bool,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosArenaCostEnvelopeMode {
+    Open,
+    Calibrated,
+    ExplicitCap,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosArenaCostExhaustionPolicy {
+    WrapUpThenReplan,
+    RequestExpansion,
+    ChangeMethod,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCostEnvelope {
+    pub mode: MemythosArenaCostEnvelopeMode,
+    pub rationale: String,
+    #[serde(default)]
+    pub baseline_refs: Vec<String>,
+    #[ts(optional = nullable, type = "number | null")]
+    pub total_token_budget: Option<i64>,
+    #[ts(optional = nullable, type = "number | null")]
+    pub coordination_token_budget: Option<i64>,
+    #[ts(optional = nullable, type = "number | null")]
+    pub substantive_token_budget: Option<i64>,
+    pub method_integrity_funded: bool,
+    pub exhaustion_policy: MemythosArenaCostExhaustionPolicy,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -562,10 +598,31 @@ pub struct MemythosArenaCompositionContract {
     pub completion_criteria: Vec<String>,
     pub participants: Vec<MemythosArenaCompositionParticipant>,
     pub coordination: MemythosArenaCompositionCoordination,
+    pub cost_envelope: MemythosArenaCostEnvelope,
     pub effort_rationale: String,
     pub rationale: String,
     #[ts(optional = nullable)]
     pub unresolved_role_gap: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaComparableCostEvidence {
+    pub evidence_ref: String,
+    pub tokens_used: i64,
+    pub accepted_result: bool,
+    pub comparability_rationale: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCostContext {
+    #[ts(optional = nullable, type = "number | null")]
+    pub explicit_token_cap: Option<i64>,
+    #[serde(default)]
+    pub comparable_evidence: Vec<MemythosArenaComparableCostEvidence>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -733,6 +790,9 @@ pub struct MemythosArenaRequestParams {
     #[serde(default)]
     pub reality_evidence: Vec<String>,
     pub cost_goal: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub cost_context: Option<MemythosArenaCostContext>,
     #[ts(optional = nullable)]
     pub composition_change_signal: Option<String>,
     #[ts(optional = nullable)]

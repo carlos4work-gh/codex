@@ -303,6 +303,16 @@ fn room_delivery_goal_transition(status: &ThreadGoalStatus) -> RoomDeliveryGoalT
     }
 }
 
+fn validate_parent_goal_accepts_delivery(goal: &ThreadGoal) -> Result<(), JSONRPCErrorError> {
+    if goal.status == ThreadGoalStatus::BudgetLimited {
+        return Err(invalid_params(format!(
+            "parent thread {} exhausted its OOTB goal token budget after {} tokens; preserve the completed work and submit material cost evidence or an explicit expansion through memythos/arena/request so the native planner can choose wrap-up, expansion, or method change",
+            goal.thread_id, goal.tokens_used
+        )));
+    }
+    Ok(())
+}
+
 fn room_delivery_goal_objective(room: &MemythosRoom, message: &MemythosArenaMessage) -> String {
     let materialization_requirement = if message.message_kind == "human_intake" {
         concat!(
@@ -623,6 +633,7 @@ impl NativeArenaCompositionPlanningAdapter {
             "uncertainties": params.uncertainties,
             "realityEvidence": params.reality_evidence,
             "costGoal": params.cost_goal,
+            "costContext": params.cost_context,
             "compositionChangeSignal": params.composition_change_signal,
             "previousComposition": previous,
             "nativeRoleCatalog": roles,
@@ -833,7 +844,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     config,
                     agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
                     root_developer_instructions: Some(
-                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances plus one room_concierge and one judge. The Room Concierge owns technical coordination, checkpoints, dependencies, exception routing, and communication; it is not a proposer or business authority. coordinatorParticipantId must be null for an ordinary arena. Select an additional coordinator/process steward only for an explicit regulatory, method-conflict, or exceptional-governance requirement and explain that exception in rationale. Native method authorities such as coordinate, delegate, and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the room_concierge; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent and select a native reasoningEffort for every participant. The active arena parent toolset requires reasoningEffort low, medium, high, or xhigh; none and minimal are invalid for this runtime. Within that compatible range, choose effort proportionate to uncertainty and decision impact; routine room coordination and concise phase responses normally need less effort than final judgment of material uncertainty. tokenBudget is a cumulative hard limit over the complete parent objective, including every arena phase and all input/output tokens. A qualitative request for efficiency, a small team, brevity, speed, or lower cost is not an explicit numeric hard limit: in those cases tokenBudget must be null. Set tokenBudget only when the caller supplied an explicit numeric token cap or previous measured evidence supports a calibrated cap that funds the full round. Never invent a small numeric cap from qualitative cost language. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances plus one room_concierge and one judge. The Room Concierge owns technical coordination, checkpoints, dependencies, exception routing, and communication; it is not a proposer or business authority. coordinatorParticipantId must be null for an ordinary arena. Select an additional coordinator/process steward only for an explicit regulatory, method-conflict, or exceptional-governance requirement and explain that exception in rationale. Native method authorities such as coordinate, delegate, and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the room_concierge; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent and select a native reasoningEffort for every participant. The active arena parent toolset requires reasoningEffort low, medium, high, or xhigh; none and minimal are invalid for this runtime. Within that compatible range, choose effort proportionate to uncertainty and decision impact; routine room coordination and concise phase responses normally need less effort than final judgment of material uncertainty. tokenBudget is a cumulative hard limit over the complete parent objective, including every arena phase and all input/output tokens. Produce a costEnvelope before runtime. Use mode open and null budgets when costContext has neither an explicit numeric cap nor accepted comparable evidence. Use calibrated only from cited accepted comparable evidence, and explicit_cap only from costContext.explicitTokenCap. For calibrated or explicit_cap, assign every participant a positive tokenBudget, make their sum equal totalTokenBudget, and separately report the concierge coordination budget and all other substantive budgets. Funding must preserve the selected method, completion criteria, cross-read, objections, bets, and judge. If the available explicit cap cannot fund method integrity, do not pretend it can: select change_method with an honest compatible method or request_expansion while preserving the competitive composition. A qualitative request for efficiency, a small team, brevity, speed, or lower cost is not an explicit numeric hard limit. Never invent a numeric cap from qualitative cost language. The exhaustion policy is an agentic plan consumed through OOTB goals: exhaustion means wrap-up/replan, justified expansion, or explicit method change, never blind kill. Return only the requested structured contract."
                             .to_string(),
                     ),
                     initial_history: InitialHistory::New,
@@ -3197,6 +3208,7 @@ impl MemythosRequestProcessor {
                 "arena request requires semantic case, layer, arena, room, origin, objective, deliverable, completion criteria, and cost goal",
             ));
         }
+        validate_arena_cost_context(params.cost_context.as_ref())?;
         let previous = {
             let state = self.state.lock().await;
             state.arena_compositions.get(&params.arena_id).cloned()
@@ -3235,6 +3247,7 @@ impl MemythosRequestProcessor {
                 planned.contract.arena_id, params.arena_id
             )));
         }
+        validate_planned_arena_cost_context(&params, &planned.contract)?;
         let mut revision_params = params.clone();
         if revision_params.composition_change_signal.is_none()
             && let Some(resume) = resume.as_ref()
@@ -5111,7 +5124,10 @@ impl MemythosRequestProcessor {
                         })?;
                     (armed, true)
                 }
-                RoomDeliveryGoalTransition::PreserveGoal => (current_goal, false),
+                RoomDeliveryGoalTransition::PreserveGoal => {
+                    validate_parent_goal_accepts_delivery(&current_goal)?;
+                    (current_goal, false)
+                }
             };
         let delivery_attempt = self
             .peer_parent_delivery_adapter
@@ -7248,6 +7264,19 @@ fn validate_arena_composition_contract(
                 "competitive arena requires at least two competing positions",
             ));
         }
+        let proposal_bearing_positions = contract
+            .participants
+            .iter()
+            .filter(|participant| participant.agent_role == "bettor")
+            .map(|participant| participant.stance.as_str())
+            .collect::<HashSet<_>>()
+            .len();
+        if proposal_bearing_positions < round_policy.minimum_competing_positions as usize {
+            return Err(invalid_params(format!(
+                "competitive arena requires at least {} proposal-bearing parents with independent threads and stances",
+                round_policy.minimum_competing_positions
+            )));
+        }
         if contract.coordination.concierge_participant_id.is_none()
             || contract.coordination.judge_participant_id.is_none()
         {
@@ -7255,6 +7284,180 @@ fn validate_arena_composition_contract(
                 "competitive arena requires independent Room Concierge and judge participants",
             ));
         }
+    }
+    validate_arena_cost_envelope(contract)?;
+    Ok(())
+}
+
+fn validate_arena_cost_envelope(
+    contract: &MemythosArenaCompositionContract,
+) -> Result<(), JSONRPCErrorError> {
+    let envelope = &contract.cost_envelope;
+    if envelope.rationale.trim().is_empty() {
+        return Err(invalid_params("arena cost envelope requires rationale"));
+    }
+    let participant_budgets = contract
+        .participants
+        .iter()
+        .map(|participant| participant.token_budget)
+        .collect::<Vec<_>>();
+    match envelope.mode {
+        codex_app_server_protocol::MemythosArenaCostEnvelopeMode::Open => {
+            if envelope.total_token_budget.is_some()
+                || envelope.coordination_token_budget.is_some()
+                || envelope.substantive_token_budget.is_some()
+                || participant_budgets.iter().any(Option::is_some)
+            {
+                return Err(invalid_params(
+                    "open arena cost envelope requires null native token budgets",
+                ));
+            }
+        }
+        codex_app_server_protocol::MemythosArenaCostEnvelopeMode::Calibrated => {
+            if envelope.baseline_refs.is_empty() {
+                return Err(invalid_params(
+                    "calibrated arena cost envelope requires comparable baseline refs",
+                ));
+            }
+            validate_bounded_arena_cost_envelope(contract)?;
+        }
+        codex_app_server_protocol::MemythosArenaCostEnvelopeMode::ExplicitCap => {
+            validate_bounded_arena_cost_envelope(contract)?;
+        }
+    }
+    if is_competitive_method(contract.coordination.decision_method)
+        && !envelope.method_integrity_funded
+    {
+        return Err(invalid_params(
+            "competitive arena cost envelope must fund method integrity or select a different method",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_planned_arena_cost_context(
+    params: &MemythosArenaRequestParams,
+    contract: &MemythosArenaCompositionContract,
+) -> Result<(), JSONRPCErrorError> {
+    let context = params.cost_context.as_ref();
+    match contract.cost_envelope.mode {
+        codex_app_server_protocol::MemythosArenaCostEnvelopeMode::Open => Ok(()),
+        codex_app_server_protocol::MemythosArenaCostEnvelopeMode::ExplicitCap => {
+            let explicit_cap = context
+                .and_then(|context| context.explicit_token_cap)
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    invalid_params(
+                        "planner selected explicit_cap without a positive caller token cap",
+                    )
+                })?;
+            if contract.cost_envelope.total_token_budget != Some(explicit_cap) {
+                return Err(invalid_params(format!(
+                    "explicit arena cost envelope must equal caller cap {explicit_cap}"
+                )));
+            }
+            Ok(())
+        }
+        codex_app_server_protocol::MemythosArenaCostEnvelopeMode::Calibrated => {
+            let accepted_refs = context
+                .into_iter()
+                .flat_map(|context| context.comparable_evidence.iter())
+                .filter(|evidence| evidence.accepted_result && evidence.tokens_used > 0)
+                .map(|evidence| evidence.evidence_ref.as_str())
+                .collect::<HashSet<_>>();
+            if contract
+                .cost_envelope
+                .baseline_refs
+                .iter()
+                .any(|reference| !accepted_refs.contains(reference.as_str()))
+                || contract.cost_envelope.baseline_refs.is_empty()
+            {
+                return Err(invalid_params(
+                    "calibrated arena cost envelope must cite only accepted comparable evidence supplied by the caller",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_arena_cost_context(
+    context: Option<&codex_app_server_protocol::MemythosArenaCostContext>,
+) -> Result<(), JSONRPCErrorError> {
+    let Some(context) = context else {
+        return Ok(());
+    };
+    if context.explicit_token_cap.is_some_and(|cap| cap <= 0) {
+        return Err(invalid_params(
+            "explicit arena token cap must be positive when supplied",
+        ));
+    }
+    for evidence in &context.comparable_evidence {
+        if evidence.evidence_ref.trim().is_empty()
+            || evidence.tokens_used <= 0
+            || evidence.comparability_rationale.trim().is_empty()
+        {
+            return Err(invalid_params(
+                "comparable cost evidence requires a ref, positive token usage, and comparability rationale",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_bounded_arena_cost_envelope(
+    contract: &MemythosArenaCompositionContract,
+) -> Result<(), JSONRPCErrorError> {
+    let envelope = &contract.cost_envelope;
+    let total = envelope
+        .total_token_budget
+        .filter(|value| *value > 0)
+        .ok_or_else(|| invalid_params("bounded arena cost envelope requires a positive total"))?;
+    let coordination = envelope
+        .coordination_token_budget
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            invalid_params("bounded arena cost envelope requires coordination budget")
+        })?;
+    let substantive = envelope
+        .substantive_token_budget
+        .filter(|value| *value > 0)
+        .ok_or_else(|| invalid_params("bounded arena cost envelope requires substantive budget"))?;
+    let participant_total = contract
+        .participants
+        .iter()
+        .map(|participant| {
+            participant.token_budget.ok_or_else(|| {
+                invalid_params(format!(
+                    "bounded arena cost envelope requires participant {} token budget",
+                    participant.participant_id
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .sum::<i64>();
+    if participant_total != total || coordination + substantive != total {
+        return Err(invalid_params(format!(
+            "arena cost envelope totals are inconsistent: participant={participant_total}, coordination+substantive={}, total={total}",
+            coordination + substantive
+        )));
+    }
+    let coordination_participant_total = contract
+        .participants
+        .iter()
+        .filter(|participant| {
+            matches!(
+                participant.agent_role.as_str(),
+                "room_concierge" | "scrum_master" | "coordinator"
+            )
+        })
+        .map(|participant| participant.token_budget.unwrap_or_default())
+        .sum::<i64>();
+    if coordination_participant_total != coordination {
+        return Err(invalid_params(
+            "coordination token budget must equal the native goal budgets of the Room Concierge and any justified process steward",
+        ));
     }
     Ok(())
 }
@@ -8785,6 +8988,16 @@ mod tests {
                         explicit_bet_required: true,
                     }),
                 },
+                cost_envelope: codex_app_server_protocol::MemythosArenaCostEnvelope {
+                    mode: codex_app_server_protocol::MemythosArenaCostEnvelopeMode::ExplicitCap,
+                    rationale: "The fixture supplies a measured bounded allocation".to_string(),
+                    baseline_refs: Vec::new(),
+                    total_token_budget: Some(80_000),
+                    coordination_token_budget: Some(20_000),
+                    substantive_token_budget: Some(60_000),
+                    method_integrity_funded: true,
+                    exhaustion_policy: codex_app_server_protocol::MemythosArenaCostExhaustionPolicy::WrapUpThenReplan,
+                },
                 effort_rationale:
                     "Allocate bounded effort while preserving both independent positions"
                         .to_string(),
@@ -8811,6 +9024,10 @@ mod tests {
             uncertainties: vec!["Operational ownership needs validation".to_string()],
             reality_evidence: vec!["Current process map".to_string()],
             cost_goal: "Use the smallest sufficient arena".to_string(),
+            cost_context: Some(codex_app_server_protocol::MemythosArenaCostContext {
+                explicit_token_cap: Some(80_000),
+                comparable_evidence: Vec::new(),
+            }),
             composition_change_signal: None,
             resume_context: None,
         }
@@ -9241,6 +9458,8 @@ mod tests {
 
         params.contract.rationale =
             "Regulatory exception requires an independent process steward".to_string();
+        params.contract.cost_envelope.total_token_budget = Some(100_000);
+        params.contract.cost_envelope.coordination_token_budget = Some(40_000);
         validate_arena_composition_contract(&params)
             .expect("an explicit governance exception may add a process steward");
     }
@@ -9479,6 +9698,109 @@ mod tests {
         }
     }
 
+    #[test]
+    fn open_cost_envelope_preserves_method_without_inventing_limits() {
+        let mut contract = competitive_composition_params().contract;
+        for participant in &mut contract.participants {
+            participant.token_budget = None;
+        }
+        contract.cost_envelope = codex_app_server_protocol::MemythosArenaCostEnvelope {
+            mode: codex_app_server_protocol::MemythosArenaCostEnvelopeMode::Open,
+            rationale: "No accepted comparable run or explicit caller cap exists".to_string(),
+            baseline_refs: Vec::new(),
+            total_token_budget: None,
+            coordination_token_budget: None,
+            substantive_token_budget: None,
+            method_integrity_funded: true,
+            exhaustion_policy:
+                codex_app_server_protocol::MemythosArenaCostExhaustionPolicy::WrapUpThenReplan,
+        };
+
+        validate_arena_cost_envelope(&contract).expect("open envelope should remain valid");
+    }
+
+    #[test]
+    fn bounded_cost_envelope_preserves_coordination_and_substantive_work() {
+        let contract = competitive_composition_params().contract;
+
+        validate_arena_cost_envelope(&contract).expect("bounded fixture should be valid");
+        assert_eq!(
+            contract.cost_envelope.coordination_token_budget,
+            Some(20_000)
+        );
+        assert_eq!(
+            contract.cost_envelope.substantive_token_budget,
+            Some(60_000)
+        );
+        assert!(contract.cost_envelope.method_integrity_funded);
+    }
+
+    #[test]
+    fn calibrated_cost_envelope_requires_accepted_comparable_evidence() {
+        let mut params = semantic_arena_request_params();
+        params.cost_context = Some(codex_app_server_protocol::MemythosArenaCostContext {
+            explicit_token_cap: None,
+            comparable_evidence: vec![
+                codex_app_server_protocol::MemythosArenaComparableCostEvidence {
+                    evidence_ref: "cost://prior-bpm-round".to_string(),
+                    tokens_used: 80_000,
+                    accepted_result: true,
+                    comparability_rationale: "Same decision method and uncertainty class"
+                        .to_string(),
+                },
+            ],
+        });
+        let mut contract = competitive_composition_params().contract;
+        contract.cost_envelope.mode =
+            codex_app_server_protocol::MemythosArenaCostEnvelopeMode::Calibrated;
+        contract.cost_envelope.baseline_refs = vec!["cost://prior-bpm-round".to_string()];
+
+        validate_planned_arena_cost_context(&params, &contract)
+            .expect("accepted comparable evidence should calibrate the envelope");
+        contract.cost_envelope.baseline_refs = vec!["cost://unrelated-run".to_string()];
+        assert!(validate_planned_arena_cost_context(&params, &contract).is_err());
+    }
+
+    #[test]
+    fn explicit_cost_cap_must_match_the_native_envelope() {
+        let mut params = semantic_arena_request_params();
+        params
+            .cost_context
+            .as_mut()
+            .expect("fixture cost context")
+            .explicit_token_cap = Some(70_000);
+        let contract = competitive_composition_params().contract;
+
+        assert!(validate_planned_arena_cost_context(&params, &contract).is_err());
+    }
+
+    #[test]
+    fn budget_limited_parent_requires_native_replan_instead_of_blind_delivery() {
+        let goal = ThreadGoal {
+            thread_id: "thread-risk".to_string(),
+            objective: "Assess operational risk".to_string(),
+            status: ThreadGoalStatus::BudgetLimited,
+            token_budget: Some(20_000),
+            tokens_used: 20_000,
+            time_used_seconds: 42,
+            created_at: 0,
+            updated_at: 1,
+        };
+
+        let error = validate_parent_goal_accepts_delivery(&goal)
+            .expect_err("budget-limited parents must not receive blind follow-up work");
+        assert!(error.message.contains("preserve the completed work"));
+        assert!(error.message.contains("memythos/arena/request"));
+    }
+
+    #[test]
+    fn competitive_envelope_rejects_underfunded_method_integrity() {
+        let mut contract = competitive_composition_params().contract;
+        contract.cost_envelope.method_integrity_funded = false;
+
+        assert!(validate_arena_cost_envelope(&contract).is_err());
+    }
+
     #[tokio::test]
     async fn arena_request_replans_an_active_arena_from_a_semantic_change_signal() {
         let contract = competitive_composition_params().contract;
@@ -9648,6 +9970,20 @@ mod tests {
         reality.effort_intent = "Focused validation of the material evidence gap".to_string();
         reality.token_budget = None;
         expanded_contract.participants.push(reality);
+        for participant in &mut expanded_contract.participants {
+            participant.token_budget = None;
+        }
+        expanded_contract.cost_envelope =
+            codex_app_server_protocol::MemythosArenaCostEnvelope {
+                mode: codex_app_server_protocol::MemythosArenaCostEnvelopeMode::Open,
+                rationale: "A material evidence gap changes the method and has no accepted comparable cost baseline".to_string(),
+                baseline_refs: Vec::new(),
+                total_token_budget: None,
+                coordination_token_budget: None,
+                substantive_token_budget: None,
+                method_integrity_funded: true,
+                exhaustion_policy: codex_app_server_protocol::MemythosArenaCostExhaustionPolicy::WrapUpThenReplan,
+            };
         expanded_contract.effort_rationale =
             "Keep the valid parents and add one open-budget reality check".to_string();
 
