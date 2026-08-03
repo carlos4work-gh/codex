@@ -1964,6 +1964,40 @@ fn native_mailbox_wake_policy(
     }
 }
 
+fn canonical_native_judge_bet_contract(
+    room: &MemythosRoom,
+    round_id: &str,
+    judge: &MemythosRoomParticipant,
+) -> Result<MemythosArenaAggregateContract, JSONRPCErrorError> {
+    let mut expected_source_thread_ids = room
+        .participants
+        .iter()
+        .filter(|participant| participant.parent_role == "bettor")
+        .map(|participant| participant.thread_id.clone())
+        .collect::<Vec<_>>();
+    expected_source_thread_ids.sort();
+    expected_source_thread_ids.dedup();
+    if expected_source_thread_ids.len() < 2 {
+        return Err(invalid_params(format!(
+            "competitive room {} requires at least two bettor parents before judge aggregation",
+            room.room_id
+        )));
+    }
+    Ok(MemythosArenaAggregateContract {
+        aggregate_id: format!("{}::{round_id}::judge_bets", room.room_id),
+        recipient_thread_id: judge.thread_id.clone(),
+        quorum: expected_source_thread_ids.len() as u32,
+        expected_source_thread_ids,
+        phase_id: "bet".to_string(),
+        deadline_ref: None,
+        completion_criteria_ref: format!(
+            "app-server://rooms/{}/rounds/{round_id}/checkpoints/all-peer-bets",
+            room.room_id
+        ),
+        late_arrival_policy: MemythosArenaLateArrivalPolicy::Reject,
+    })
+}
+
 fn prepare_native_aggregate_delivery(
     state: &mut MemythosRuntimeState,
     message: &mut MemythosArenaMessage,
@@ -3908,6 +3942,16 @@ impl MemythosRequestProcessor {
             native_aggregate_checkpoint_projection(&state, &message);
         let telemetry_channel = delivery_attempt.telemetry_channel;
         let telemetry_summary = delivery_attempt.telemetry_summary.clone();
+        let delivery_phase = if message.to_parent_role == "judge"
+            && message.requires_response
+            && matches!(
+                message.delivery_policy,
+                Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger)
+            ) {
+            Some("judge".to_string())
+        } else {
+            phase_from_message_kind(&message.message_kind)
+        };
         let delivery = MemythosArenaMessageDelivery {
             delivery_id,
             message_id: message.message_id.clone(),
@@ -3917,7 +3961,7 @@ impl MemythosRequestProcessor {
             receiver_thread_id: message.to_parent_thread_id,
             arena_id: message.arena_id,
             round_id: message.round_id,
-            phase: phase_from_message_kind(&message.message_kind),
+            phase: delivery_phase,
             delivery_mechanism: delivery_attempt.delivery_mechanism,
             delivery_policy: message.delivery_policy,
             aggregate_id: message
@@ -4594,7 +4638,7 @@ impl MemythosRequestProcessor {
     pub(crate) async fn room_tool_send_message(
         &self,
         current_thread_id: &str,
-        args: MemythosRoomToolSendMessageArgs,
+        mut args: MemythosRoomToolSendMessageArgs,
     ) -> Result<MemythosRoomToolResponse, JSONRPCErrorError> {
         if args.message.trim().is_empty() {
             return Err(invalid_params("room message must not be empty".to_string()));
@@ -4634,11 +4678,32 @@ impl MemythosRequestProcessor {
                         room.room_id
                     ))
                 })?;
-            let direct_aggregate_target = matches!(
-                args.delivery_policy,
-                Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger)
-            ) && args.target_parent_key.is_some();
-            let target = if source.parent_role == "room_concierge" || direct_aggregate_target {
+            let decision_method = state
+                .arena_compositions
+                .get(&room.arena_id)
+                .map(|composition| composition.contract.coordination.decision_method.clone());
+            let native_judge_bet = source.parent_role == "bettor"
+                && args.message_kind == "peer_bet"
+                && decision_method
+                    .as_ref()
+                    .is_some_and(|method| is_competitive_method(*method));
+            let direct_aggregate_target = native_judge_bet
+                || matches!(
+                    args.delivery_policy,
+                    Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger)
+                ) && args.target_parent_key.is_some();
+            let target = if native_judge_bet {
+                room.participants
+                    .iter()
+                    .find(|participant| participant.parent_role == "judge")
+                    .cloned()
+                    .ok_or_else(|| {
+                        invalid_params(format!(
+                            "room {} has no judge parent for native bet aggregation",
+                            room.room_id
+                        ))
+                    })?
+            } else if source.parent_role == "room_concierge" || direct_aggregate_target {
                 let target_parent_key = args.target_parent_key.as_deref().ok_or_else(|| {
                     invalid_params(
                         "Room Concierge must select targetParentKey before sending".to_string(),
@@ -4677,10 +4742,6 @@ impl MemythosRequestProcessor {
                 .map(|delivery| (delivery.round_id.clone(), delivery.phase.clone()));
             let (inherited_round_id, inherited_phase) =
                 inherited_context.unwrap_or_else(|| ("agentic_room_turn".to_string(), None));
-            let decision_method = state
-                .arena_compositions
-                .get(&room.arena_id)
-                .map(|composition| composition.contract.coordination.decision_method.clone());
             (
                 room,
                 source,
@@ -4697,7 +4758,7 @@ impl MemythosRequestProcessor {
             &source.parent_role,
             &target.parent_role,
         )?;
-        let eligible_winner_ids = {
+        let (eligible_winner_ids, existing_native_judge_turn) = {
             let state = self.state.lock().await;
             let composition = state.arena_compositions.get(&room.arena_id);
             validate_competitive_round_progress(
@@ -4707,7 +4768,7 @@ impl MemythosRequestProcessor {
                 composition,
                 &state.arena_message_deliveries,
             )?;
-            composition
+            let eligible_winner_ids = composition
                 .map(|composition| {
                     composition
                         .contract
@@ -4717,12 +4778,65 @@ impl MemythosRequestProcessor {
                         .map(|participant| participant.participant_id.clone())
                         .collect::<Vec<_>>()
                 })
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let existing_native_judge_turn = (args.message_kind == "verdict_request")
+                .then(|| {
+                    state
+                        .arena_message_deliveries
+                        .iter()
+                        .rev()
+                        .find(|delivery| {
+                            delivery.arena_id == room.arena_id
+                                && delivery.receiver_thread_id == target.thread_id
+                                && delivery.aggregate_id.is_some()
+                                && delivery.receiver_turn_id.is_some()
+                                && matches!(
+                                    delivery.aggregate_state,
+                                    Some(
+                                        MemythosArenaAggregateState::RecipientTriggered
+                                            | MemythosArenaAggregateState::Consumed
+                                    )
+                                )
+                        })
+                        .and_then(|delivery| delivery.receiver_turn_id.clone())
+                })
+                .flatten();
+            (eligible_winner_ids, existing_native_judge_turn)
         };
         if target.thread_id == current_thread_id {
             return Err(invalid_params(
                 "room message target must be a different parent thread".to_string(),
             ));
+        }
+        if let Some(target_turn_id) = existing_native_judge_turn {
+            let (response_item_ref, response_text, event_refs) = self
+                .await_parent_turn_response(&target.thread_id, &target_turn_id)
+                .await?;
+            return Ok(MemythosRoomToolResponse {
+                room_id: room.room_id,
+                target_parent_key: target.parent_key,
+                target_thread_id: target.thread_id,
+                target_turn_id,
+                response_item_ref,
+                response_text,
+                event_refs,
+            });
+        }
+
+        let activates_native_judge = source.parent_role == "bettor"
+            && target.parent_role == "judge"
+            && args.message_kind == "peer_bet"
+            && decision_method
+                .as_ref()
+                .is_some_and(|method| is_competitive_method(*method));
+        if activates_native_judge {
+            args.delivery_policy = Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger);
+            args.aggregate_contract = Some(canonical_native_judge_bet_contract(
+                &room,
+                &inherited_round_id,
+                &target,
+            )?);
+            args.response_contract = "judge_verdict".to_string();
         }
 
         let message_id = self.next_id("mem_room_tool_message", &self.next_delivery_id);
@@ -4743,23 +4857,24 @@ impl MemythosRequestProcessor {
             "memythos_source".to_string(),
             serde_json::Value::String("native_room_tool".to_string()),
         );
-        let execution_prompt = if args.message_kind == "verdict_request"
+        let execution_prompt = if (args.message_kind == "verdict_request" || activates_native_judge)
             && !eligible_winner_ids.is_empty()
         {
             format!(
-                "{}\n\nNative verdict boundary: the eligible winner participant ids are [{}]. Name exactly one with `winner_participant_id: <exact-id>`, then rank the alternatives, preserve dissent, and state reopening signals. Report `closed_decisions_status: preserved` unless new evidence materially invalidates a declared closed decision; in that exceptional case report `closed_decisions_status: reopened` and identify the evidence and authority required.",
+                "{}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Name exactly one with `winner_participant_id: <exact-id>`, then rank the alternatives, preserve dissent, and state reopening signals. Report `closed_decisions_status: preserved` unless new evidence materially invalidates a declared closed decision; in that exceptional case report `closed_decisions_status: reopened` and identify the evidence and authority required. Send the completed verdict to the Room Concierge exactly once with messageKind `judge_verdict`; do not wait for a separate verdict request.",
                 args.message,
                 eligible_winner_ids.join(", ")
             )
         } else {
             args.message.clone()
         };
-        let output_schema =
-            if args.message_kind == "verdict_request" && !eligible_winner_ids.is_empty() {
-                Some(native_judge_verdict_output_schema(&eligible_winner_ids)?)
-            } else {
-                None
-            };
+        let output_schema = if (args.message_kind == "verdict_request" || activates_native_judge)
+            && !eligible_winner_ids.is_empty()
+        {
+            Some(native_judge_verdict_output_schema(&eligible_winner_ids)?)
+        } else {
+            None
+        };
         let payload = self
             .room_send_input(MemythosRoomSendInputParams {
                 room_id: room.room_id.clone(),
@@ -6854,7 +6969,7 @@ fn build_arena_intake_prompt(
         })
         .unwrap_or_else(|| "not required by the selected method".to_string());
     format!(
-        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own technical coordination, checkpoints, dependencies, exceptions, and communication for the complete method; the client will only observe. You are not a proposer and you do not decide the business outcome. For a competitive method, obtain independent proposals from every proposal-bearing bettor with peer_proposal. After all proposals complete, require every bettor in one consolidated peer_review_and_objection turn to read competing evidence, explain what they incorporate, state a concrete objection, and identify residual uncertainty. Then obtain one explicit revised commitment from every bettor with peer_bet. Deliver all bets to the judge through aggregate_then_trigger so the judge activates exactly once after the checkpoint is sealed. The verdict request must require the judge to return judge_verdict, identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never bet or judge as Room Concierge. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own technical coordination, checkpoints, dependencies, exceptions, and communication for the complete method; the client will only observe. You are not a proposer and you do not decide the business outcome. For a competitive method, obtain independent proposals from every proposal-bearing bettor with peer_proposal. After all proposals complete, require every bettor in one consolidated peer_review_and_objection turn to read competing evidence, explain what they incorporate, state a concrete objection, and identify residual uncertainty. Then obtain one explicit revised commitment from every bettor with peer_bet. Tell each bettor to send its peer_bet directly to the judge. App-server owns the canonical aggregate_then_trigger mailbox: it collects every expected bettor, seals the checkpoint, activates the judge exactly once, and the judge returns judge_verdict through the room. Do not issue a separate verdict_request after bets are dispatched; wait for the native judge_verdict delivery. The verdict must identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never bet or judge as Room Concierge. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
         params.request_origin,
         params.case_brief,
         params.layer_objective,
@@ -8470,6 +8585,61 @@ mod tests {
     }
 
     #[test]
+    fn judge_bet_aggregation_is_canonical_and_runtime_owned() {
+        let participant =
+            |parent_key: &str, parent_role: &str, thread_id: &str, stance_profile: &str| {
+                MemythosRoomParticipant {
+                    parent_key: parent_key.to_string(),
+                    thread_id: thread_id.to_string(),
+                    parent_role: parent_role.to_string(),
+                    stance_profile: stance_profile.to_string(),
+                    goal_ref: None,
+                    authority_scope: Vec::new(),
+                }
+            };
+        let room = MemythosRoom {
+            room_id: "room-1".to_string(),
+            case_id: "case-1".to_string(),
+            layer_id: "layer-1".to_string(),
+            arena_id: "arena-1".to_string(),
+            topology: "room_concierge".to_string(),
+            participants: vec![
+                participant(
+                    "concierge",
+                    "room_concierge",
+                    "concierge-thread",
+                    "coordination",
+                ),
+                participant("bettor-a", "bettor", "bettor-a-thread", "growth"),
+                participant("bettor-b", "bettor", "bettor-b-thread", "risk"),
+                participant("judge", "judge", "judge-thread", "business_fitness"),
+            ],
+        };
+        let judge = room
+            .participants
+            .iter()
+            .find(|participant| participant.parent_role == "judge")
+            .expect("judge");
+
+        let first = canonical_native_judge_bet_contract(&room, "round-1", judge)
+            .expect("canonical contract");
+        let second = canonical_native_judge_bet_contract(&room, "round-1", judge)
+            .expect("same canonical contract");
+
+        assert_eq!(first, second);
+        assert_eq!(first.recipient_thread_id, "judge-thread");
+        assert_eq!(first.quorum, 2);
+        assert_eq!(
+            first.expected_source_thread_ids,
+            vec!["bettor-a-thread".to_string(), "bettor-b-thread".to_string()]
+        );
+        assert_eq!(
+            first.late_arrival_policy,
+            MemythosArenaLateArrivalPolicy::Reject
+        );
+    }
+
+    #[test]
     fn arena_composition_schema_closes_every_object_for_strict_output() {
         fn assert_closed(value: &serde_json::Value, object_count: &mut usize) {
             match value {
@@ -9664,7 +9834,8 @@ mod tests {
         assert!(prompt.contains("bettor-risk"));
         assert!(prompt.contains("Do not ask the client to activate phases"));
         assert!(prompt.contains("Room Concierge and own technical coordination"));
-        assert!(prompt.contains("Deliver all bets to the judge through aggregate_then_trigger"));
+        assert!(prompt.contains("App-server owns the canonical aggregate_then_trigger mailbox"));
+        assert!(prompt.contains("Do not issue a separate verdict_request"));
         assert!(prompt.contains("Never bet or judge as Room Concierge"));
     }
 
