@@ -905,8 +905,62 @@ pub struct MemythosArenaMessage {
     #[serde(default)]
     pub artifact_refs: Vec<String>,
     pub requires_response: bool,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub delivery_policy: Option<MemythosArenaDeliveryPolicy>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub aggregate_contract: Option<MemythosArenaAggregateContract>,
     #[ts(optional = nullable)]
     pub response_contract: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosArenaDeliveryPolicy {
+    Immediate,
+    QueueOnly,
+    AggregateThenTrigger,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosArenaLateArrivalPolicy {
+    Reject,
+    QueueWithoutRetrigger,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaAggregateContract {
+    pub aggregate_id: String,
+    pub recipient_thread_id: String,
+    pub expected_source_thread_ids: Vec<String>,
+    pub quorum: u32,
+    pub phase_id: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub deadline_ref: Option<String>,
+    pub completion_criteria_ref: String,
+    pub late_arrival_policy: MemythosArenaLateArrivalPolicy,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosArenaAggregateState {
+    Open,
+    Collecting,
+    ReadyByExpectedSources,
+    ReadyByQuorum,
+    Sealed,
+    RecipientTriggered,
+    Consumed,
+    SealedIncomplete,
+    ExceptionRouted,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -927,6 +981,15 @@ pub struct MemythosArenaMessageDelivery {
     #[ts(optional = nullable)]
     pub phase: Option<String>,
     pub delivery_mechanism: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub delivery_policy: Option<MemythosArenaDeliveryPolicy>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub aggregate_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub aggregate_state: Option<MemythosArenaAggregateState>,
     #[ts(optional = nullable)]
     pub receiver_turn_id: Option<String>,
     #[ts(optional = nullable)]

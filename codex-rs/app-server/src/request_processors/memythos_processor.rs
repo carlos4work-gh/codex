@@ -13,6 +13,8 @@ use codex_app_server_protocol::AdditionalContextKind;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::MemythosArena;
+use codex_app_server_protocol::MemythosArenaAggregateContract;
+use codex_app_server_protocol::MemythosArenaAggregateState;
 use codex_app_server_protocol::MemythosArenaCompositionContract;
 use codex_app_server_protocol::MemythosArenaCompositionLease;
 use codex_app_server_protocol::MemythosArenaCompositionLifecycleState;
@@ -24,6 +26,8 @@ use codex_app_server_protocol::MemythosArenaCompositionRevisionActionKind;
 use codex_app_server_protocol::MemythosArenaCreateParams;
 use codex_app_server_protocol::MemythosArenaCreateResponse;
 use codex_app_server_protocol::MemythosArenaDecisionMethod;
+use codex_app_server_protocol::MemythosArenaDeliveryPolicy;
+use codex_app_server_protocol::MemythosArenaLateArrivalPolicy;
 use codex_app_server_protocol::MemythosArenaLifecycleState;
 use codex_app_server_protocol::MemythosArenaListParams;
 use codex_app_server_protocol::MemythosArenaListResponse;
@@ -181,12 +185,22 @@ struct MemythosRuntimeState {
     arena_parents: HashMap<String, MemythosArenaParent>,
     arena_compositions: HashMap<String, MemythosArenaCompositionProvisionResponse>,
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
+    arena_message_aggregates: HashMap<String, NativeArenaMessageAggregate>,
     room_activity_events: HashMap<String, Vec<MemythosRoomActivityEvent>>,
     structured_contracts: HashMap<String, MemythosStructuredContract>,
     native_token_usage_refs: HashMap<String, String>,
     native_thread_usage_totals: HashMap<String, MemythosTokenUsageBreakdown>,
     native_turn_usage: HashMap<String, MemythosTurnUsageAttribution>,
     telemetry_refs: Vec<MemythosTelemetryRef>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeArenaMessageAggregate {
+    contract: MemythosArenaAggregateContract,
+    state: MemythosArenaAggregateState,
+    received_source_thread_ids: HashSet<String>,
+    received_message_ids: HashSet<String>,
+    trigger_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1707,6 +1721,168 @@ fn native_mailbox_wake_policy(
     }
 }
 
+fn prepare_native_aggregate_delivery(
+    state: &mut MemythosRuntimeState,
+    message: &mut MemythosArenaMessage,
+) -> Result<Option<MemythosArenaAggregateState>, JSONRPCErrorError> {
+    let policy = message
+        .delivery_policy
+        .unwrap_or(if message.requires_response {
+            MemythosArenaDeliveryPolicy::Immediate
+        } else {
+            MemythosArenaDeliveryPolicy::QueueOnly
+        });
+    message.delivery_policy = Some(policy);
+    match policy {
+        MemythosArenaDeliveryPolicy::Immediate => {
+            message.requires_response = true;
+            Ok(None)
+        }
+        MemythosArenaDeliveryPolicy::QueueOnly => {
+            message.requires_response = false;
+            Ok(None)
+        }
+        MemythosArenaDeliveryPolicy::AggregateThenTrigger => {
+            let contract = message.aggregate_contract.clone().ok_or_else(|| {
+                invalid_params("aggregate_then_trigger requires aggregateContract")
+            })?;
+            validate_native_aggregate_contract(message, &contract)?;
+            let aggregate_key = format!(
+                "{}::{}::{}",
+                message.arena_id, message.round_id, contract.aggregate_id
+            );
+            let aggregate = state
+                .arena_message_aggregates
+                .entry(aggregate_key)
+                .or_insert_with(|| NativeArenaMessageAggregate {
+                    contract: contract.clone(),
+                    state: MemythosArenaAggregateState::Open,
+                    received_source_thread_ids: HashSet::new(),
+                    received_message_ids: HashSet::new(),
+                    trigger_message_id: None,
+                });
+            if aggregate.contract != contract {
+                return Err(invalid_params(format!(
+                    "aggregate {} contract changed while collecting",
+                    contract.aggregate_id
+                )));
+            }
+            if matches!(
+                aggregate.state,
+                MemythosArenaAggregateState::RecipientTriggered
+                    | MemythosArenaAggregateState::Consumed
+                    | MemythosArenaAggregateState::Sealed
+                    | MemythosArenaAggregateState::SealedIncomplete
+                    | MemythosArenaAggregateState::ExceptionRouted
+            ) {
+                return match contract.late_arrival_policy {
+                    MemythosArenaLateArrivalPolicy::Reject => Err(invalid_params(format!(
+                        "aggregate {} is already sealed",
+                        contract.aggregate_id
+                    ))),
+                    MemythosArenaLateArrivalPolicy::QueueWithoutRetrigger => {
+                        message.requires_response = false;
+                        Ok(Some(aggregate.state))
+                    }
+                };
+            }
+            if !aggregate
+                .received_message_ids
+                .insert(message.message_id.clone())
+            {
+                return Err(invalid_params(format!(
+                    "aggregate {} already received message {}",
+                    contract.aggregate_id, message.message_id
+                )));
+            }
+            aggregate
+                .received_source_thread_ids
+                .insert(message.from_parent_thread_id.clone());
+            let all_expected = contract
+                .expected_source_thread_ids
+                .iter()
+                .all(|source| aggregate.received_source_thread_ids.contains(source));
+            let quorum_reached =
+                aggregate.received_source_thread_ids.len() >= contract.quorum as usize;
+            aggregate.state = if all_expected {
+                MemythosArenaAggregateState::ReadyByExpectedSources
+            } else if quorum_reached {
+                MemythosArenaAggregateState::ReadyByQuorum
+            } else {
+                MemythosArenaAggregateState::Collecting
+            };
+            message.requires_response = matches!(
+                aggregate.state,
+                MemythosArenaAggregateState::ReadyByExpectedSources
+                    | MemythosArenaAggregateState::ReadyByQuorum
+            );
+            if message.requires_response {
+                aggregate.trigger_message_id = Some(message.message_id.clone());
+            }
+            Ok(Some(aggregate.state))
+        }
+    }
+}
+
+fn validate_native_aggregate_contract(
+    message: &MemythosArenaMessage,
+    contract: &MemythosArenaAggregateContract,
+) -> Result<(), JSONRPCErrorError> {
+    if contract.aggregate_id.trim().is_empty()
+        || contract.phase_id.trim().is_empty()
+        || contract.completion_criteria_ref.trim().is_empty()
+        || contract.expected_source_thread_ids.is_empty()
+        || contract.quorum == 0
+        || contract.quorum as usize > contract.expected_source_thread_ids.len()
+    {
+        return Err(invalid_params(
+            "aggregate contract requires id, phase, completion criteria, expected sources, and a valid quorum",
+        ));
+    }
+    if contract.recipient_thread_id != message.to_parent_thread_id {
+        return Err(invalid_params(
+            "aggregate recipient must match the message target parent",
+        ));
+    }
+    if !contract
+        .expected_source_thread_ids
+        .contains(&message.from_parent_thread_id)
+    {
+        return Err(invalid_params(
+            "aggregate message source is not declared in expected sources",
+        ));
+    }
+    Ok(())
+}
+
+fn finalize_native_aggregate_delivery(
+    state: &mut MemythosRuntimeState,
+    message: &MemythosArenaMessage,
+    prepared_state: Option<MemythosArenaAggregateState>,
+    delivered: bool,
+) -> Option<MemythosArenaAggregateState> {
+    let contract = message.aggregate_contract.as_ref()?;
+    let aggregate_key = format!(
+        "{}::{}::{}",
+        message.arena_id, message.round_id, contract.aggregate_id
+    );
+    let aggregate = state.arena_message_aggregates.get_mut(&aggregate_key)?;
+    if !delivered {
+        aggregate.state = MemythosArenaAggregateState::ExceptionRouted;
+    } else if message.requires_response
+        && matches!(
+            prepared_state,
+            Some(
+                MemythosArenaAggregateState::ReadyByExpectedSources
+                    | MemythosArenaAggregateState::ReadyByQuorum
+            )
+        )
+    {
+        aggregate.state = MemythosArenaAggregateState::RecipientTriggered;
+    }
+    Some(aggregate.state)
+}
+
 fn failed_native_mailbox_delivery_attempt(
     message: &MemythosArenaMessage,
     reason: &str,
@@ -2464,6 +2640,7 @@ impl MemythosRequestProcessor {
                 arena_parents: HashMap::new(),
                 arena_compositions: HashMap::new(),
                 arena_message_deliveries: Vec::new(),
+                arena_message_aggregates: HashMap::new(),
                 room_activity_events: HashMap::new(),
                 structured_contracts: HashMap::new(),
                 native_token_usage_refs: HashMap::new(),
@@ -3324,61 +3501,70 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosArenaMessageSendParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let mut message = params.message;
         let mut state = self.state.lock().await;
-        let Some(arena) = state.arenas.get(&params.message.arena_id) else {
+        let Some(arena) = state.arenas.get(&message.arena_id) else {
             return Err(invalid_params(format!(
                 "unknown arena id: {}",
-                params.message.arena_id
+                message.arena_id
             )));
         };
         let layer_id = arena.layer_id.clone();
-        let sender_key = arena_parent_key(
-            &params.message.arena_id,
-            &params.message.from_parent_thread_id,
-        );
-        let receiver_key = arena_parent_key(
-            &params.message.arena_id,
-            &params.message.to_parent_thread_id,
-        );
+        let sender_key = arena_parent_key(&message.arena_id, &message.from_parent_thread_id);
+        let receiver_key = arena_parent_key(&message.arena_id, &message.to_parent_thread_id);
         if !state.arena_parents.contains_key(&sender_key) {
             return Err(invalid_params(format!(
                 "sender parent {} is not registered in arena {}",
-                params.message.from_parent_thread_id, params.message.arena_id
+                message.from_parent_thread_id, message.arena_id
             )));
         }
         if !state.arena_parents.contains_key(&receiver_key) {
             return Err(invalid_params(format!(
                 "receiver parent {} is not registered in arena {}",
-                params.message.to_parent_thread_id, params.message.arena_id
+                message.to_parent_thread_id, message.arena_id
             )));
         }
+
+        let aggregate_state = prepare_native_aggregate_delivery(&mut state, &mut message)?;
 
         let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
         let delivery_attempt = self
             .peer_parent_delivery_adapter
             .deliver_peer_parent_message(
-                &params.message,
+                &message,
                 arena_parent_reasoning_effort(
                     &state,
-                    &params.message.arena_id,
-                    &params.message.to_parent_thread_id,
+                    &message.arena_id,
+                    &message.to_parent_thread_id,
                 ),
                 ConnectionId(0),
             )
             .await;
+        let aggregate_state = finalize_native_aggregate_delivery(
+            &mut state,
+            &message,
+            aggregate_state,
+            delivery_attempt.rejection_reason.is_none(),
+        );
         let telemetry_channel = delivery_attempt.telemetry_channel;
         let telemetry_summary = delivery_attempt.telemetry_summary.clone();
         let delivery = MemythosArenaMessageDelivery {
             delivery_id,
-            message_id: params.message.message_id.clone(),
-            human_summary: params.message.human_summary.clone(),
+            message_id: message.message_id.clone(),
+            human_summary: message.human_summary.clone(),
             status: delivery_attempt.status,
-            sender_thread_id: params.message.from_parent_thread_id,
-            receiver_thread_id: params.message.to_parent_thread_id,
-            arena_id: params.message.arena_id,
-            round_id: params.message.round_id,
-            phase: phase_from_message_kind(&params.message.message_kind),
+            sender_thread_id: message.from_parent_thread_id,
+            receiver_thread_id: message.to_parent_thread_id,
+            arena_id: message.arena_id,
+            round_id: message.round_id,
+            phase: phase_from_message_kind(&message.message_kind),
             delivery_mechanism: delivery_attempt.delivery_mechanism,
+            delivery_policy: message.delivery_policy,
+            aggregate_id: message
+                .aggregate_contract
+                .as_ref()
+                .map(|contract| contract.aggregate_id.clone()),
+            aggregate_state,
             receiver_turn_id: delivery_attempt.receiver_turn_id,
             receiver_response_event_ref: delivery_attempt.receiver_response_event_ref,
             delivered_as_human_instruction: delivery_attempt.delivered_as_human_instruction,
@@ -3594,6 +3780,27 @@ impl MemythosRequestProcessor {
         let event_ref = format!(
             "app-server://memythos/arenas/{arena_id}/rounds/{round_id}/phases/{phase}/{action}"
         );
+        if action == "closed" {
+            let aggregate_prefix = format!("{arena_id}::{round_id}::");
+            for aggregate in state
+                .arena_message_aggregates
+                .iter_mut()
+                .filter(|(key, aggregate)| {
+                    key.starts_with(&aggregate_prefix) && aggregate.contract.phase_id == phase
+                })
+                .map(|(_, aggregate)| aggregate)
+            {
+                if matches!(
+                    aggregate.state,
+                    MemythosArenaAggregateState::Open
+                        | MemythosArenaAggregateState::Collecting
+                        | MemythosArenaAggregateState::ReadyByExpectedSources
+                        | MemythosArenaAggregateState::ReadyByQuorum
+                ) {
+                    aggregate.state = MemythosArenaAggregateState::SealedIncomplete;
+                }
+            }
+        }
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::ArenaState,
@@ -4437,6 +4644,8 @@ impl MemythosRequestProcessor {
             context_packet_ref: params.room_message_ref.clone(),
             artifact_refs: vec![params.delivery_ref.clone()],
             requires_response: true,
+            delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+            aggregate_contract: None,
             response_contract: Some(params.response_contract.clone()),
         };
         let target_reasoning_effort = {
@@ -4555,6 +4764,9 @@ impl MemythosRequestProcessor {
             round_id: message.round_id.clone(),
             phase: delivery_phase.clone(),
             delivery_mechanism: "room_loopback_send_input".to_string(),
+            delivery_policy: message.delivery_policy,
+            aggregate_id: None,
+            aggregate_state: None,
             receiver_turn_id: Some(target_turn_id.clone()),
             receiver_response_event_ref: None,
             delivered_as_human_instruction: params.human_instruction,
@@ -5565,6 +5777,7 @@ impl MemythosRequestProcessor {
             let native_event_ref =
                 format!("app-server://threads/{thread_id}/turns/{turn_id}/completed");
             let mut matched_delivery = false;
+            let mut completed_aggregates = Vec::new();
             for delivery in state
                 .arena_message_deliveries
                 .iter_mut()
@@ -5582,8 +5795,24 @@ impl MemythosRequestProcessor {
                 };
                 delivery.receiver_response_event_ref = Some(native_event_ref.clone());
                 delivery.failure_reason = failure_reason.clone();
+                if status == "completed"
+                    && let Some(aggregate_id) = delivery.aggregate_id.as_ref()
+                {
+                    completed_aggregates.push((
+                        delivery.arena_id.clone(),
+                        delivery.round_id.clone(),
+                        aggregate_id.clone(),
+                    ));
+                    delivery.aggregate_state = Some(MemythosArenaAggregateState::Consumed);
+                }
                 if !delivery.event_refs.contains(&native_event_ref) {
                     delivery.event_refs.push(native_event_ref.clone());
+                }
+            }
+            for (arena_id, round_id, aggregate_id) in completed_aggregates {
+                let key = format!("{arena_id}::{round_id}::{aggregate_id}");
+                if let Some(aggregate) = state.arena_message_aggregates.get_mut(&key) {
+                    aggregate.state = MemythosArenaAggregateState::Consumed;
                 }
             }
 
@@ -8018,6 +8247,9 @@ mod tests {
             round_id: "round-1".to_string(),
             phase: Some("bet".to_string()),
             delivery_mechanism: "room_loopback_send_input".to_string(),
+            delivery_policy: None,
+            aggregate_id: None,
+            aggregate_state: None,
             receiver_turn_id: Some(format!("turn-{id}")),
             receiver_response_event_ref: None,
             delivered_as_human_instruction: false,
@@ -8083,6 +8315,9 @@ mod tests {
                 round_id: "round-1".to_string(),
                 phase: Some(phase.to_string()),
                 delivery_mechanism: "room_loopback_send_input".to_string(),
+                delivery_policy: None,
+                aggregate_id: None,
+                aggregate_state: None,
                 receiver_turn_id: Some(turn_id.to_string()),
                 receiver_response_event_ref: None,
                 delivered_as_human_instruction: phase == "arena_intake",
@@ -8180,12 +8415,119 @@ mod tests {
             context_packet_ref: "app-server://rooms/room-1/messages/message-1".to_string(),
             artifact_refs: Vec::new(),
             requires_response: true,
+            delivery_policy: None,
+            aggregate_contract: None,
             response_contract: Some("judge_verdict".to_string()),
         };
 
         let envelope = build_peer_parent_envelope(&message);
         assert!(envelope.contains("winner_participant_id: exact-id"));
         assert_eq!(message.human_summary, "Evaluate the alternatives.");
+    }
+
+    #[tokio::test]
+    async fn aggregate_then_trigger_queues_until_expected_sources_are_complete() {
+        let processor = MemythosRequestProcessor::new();
+        let contract = MemythosArenaAggregateContract {
+            aggregate_id: "judge-round-1".to_string(),
+            recipient_thread_id: "judge".to_string(),
+            expected_source_thread_ids: vec!["bettor-a".to_string(), "bettor-b".to_string()],
+            quorum: 2,
+            phase_id: "bet".to_string(),
+            deadline_ref: None,
+            completion_criteria_ref: "criteria://all-bets".to_string(),
+            late_arrival_policy: MemythosArenaLateArrivalPolicy::Reject,
+        };
+        let message = |id: &str, source: &str| MemythosArenaMessage {
+            message_id: id.to_string(),
+            case_id: "case-1".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-1".to_string(),
+            from_parent_thread_id: source.to_string(),
+            from_parent_role: "bettor".to_string(),
+            to_parent_thread_id: "judge".to_string(),
+            to_parent_role: "judge".to_string(),
+            message_kind: "peer_bet".to_string(),
+            human_summary: format!("Bet from {source}"),
+            execution_prompt: None,
+            context_packet_ref: "context://round-1".to_string(),
+            artifact_refs: Vec::new(),
+            requires_response: true,
+            delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+            aggregate_contract: Some(contract.clone()),
+            response_contract: Some("judge_verdict".to_string()),
+        };
+        let mut first = message("bet-a", "bettor-a");
+        let mut second = message("bet-b", "bettor-b");
+        let mut state = processor.state.lock().await;
+
+        assert_eq!(
+            prepare_native_aggregate_delivery(&mut state, &mut first).expect("first bet"),
+            Some(MemythosArenaAggregateState::Collecting)
+        );
+        assert!(!first.requires_response);
+        assert_eq!(
+            prepare_native_aggregate_delivery(&mut state, &mut second).expect("second bet"),
+            Some(MemythosArenaAggregateState::ReadyByExpectedSources)
+        );
+        assert!(second.requires_response);
+        assert_eq!(
+            finalize_native_aggregate_delivery(
+                &mut state,
+                &second,
+                Some(MemythosArenaAggregateState::ReadyByExpectedSources),
+                true,
+            ),
+            Some(MemythosArenaAggregateState::RecipientTriggered)
+        );
+
+        let mut late = message("bet-a-late", "bettor-a");
+        assert!(prepare_native_aggregate_delivery(&mut state, &mut late).is_err());
+    }
+
+    #[tokio::test]
+    async fn aggregate_then_trigger_does_not_count_duplicate_messages() {
+        let processor = MemythosRequestProcessor::new();
+        let contract = MemythosArenaAggregateContract {
+            aggregate_id: "planner-round-1".to_string(),
+            recipient_thread_id: "planner".to_string(),
+            expected_source_thread_ids: vec!["peer-a".to_string(), "peer-b".to_string()],
+            quorum: 2,
+            phase_id: "proposal".to_string(),
+            deadline_ref: Some("deadline://round-1".to_string()),
+            completion_criteria_ref: "criteria://two-proposals".to_string(),
+            late_arrival_policy: MemythosArenaLateArrivalPolicy::QueueWithoutRetrigger,
+        };
+        let mut message = MemythosArenaMessage {
+            message_id: "proposal-a".to_string(),
+            case_id: "case-1".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-1".to_string(),
+            from_parent_thread_id: "peer-a".to_string(),
+            from_parent_role: "peer".to_string(),
+            to_parent_thread_id: "planner".to_string(),
+            to_parent_role: "peer".to_string(),
+            message_kind: "peer_proposal".to_string(),
+            human_summary: "Proposal A".to_string(),
+            execution_prompt: None,
+            context_packet_ref: "context://round-1".to_string(),
+            artifact_refs: Vec::new(),
+            requires_response: true,
+            delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+            aggregate_contract: Some(contract),
+            response_contract: None,
+        };
+        let mut state = processor.state.lock().await;
+        prepare_native_aggregate_delivery(&mut state, &mut message).expect("first proposal");
+
+        let mut duplicate = message.clone();
+        assert!(prepare_native_aggregate_delivery(&mut state, &mut duplicate).is_err());
+        let aggregate = state
+            .arena_message_aggregates
+            .values()
+            .next()
+            .expect("aggregate");
+        assert_eq!(aggregate.received_source_thread_ids.len(), 1);
     }
 
     #[test]
@@ -9360,6 +9702,9 @@ mod tests {
                     round_id: "intake-001".to_string(),
                     phase: Some("human_intake".to_string()),
                     delivery_mechanism: "room_loopback_send_input".to_string(),
+                    delivery_policy: None,
+                    aggregate_id: None,
+                    aggregate_state: None,
                     receiver_turn_id: Some("human-intake-turn".to_string()),
                     receiver_response_event_ref: None,
                     delivered_as_human_instruction: true,
@@ -11063,6 +11408,8 @@ mod tests {
                     context_packet_ref: "artifact://context/minimal".to_string(),
                     artifact_refs: vec!["arena-contract.json".to_string()],
                     requires_response: true,
+                    delivery_policy: None,
+                    aggregate_contract: None,
                     response_contract: Some("peer_objection_response".to_string()),
                 },
             })
@@ -11214,6 +11561,8 @@ mod tests {
                     context_packet_ref: "artifact://context/minimal".to_string(),
                     artifact_refs: vec!["arena-contract.json".to_string()],
                     requires_response: true,
+                    delivery_policy: None,
+                    aggregate_contract: None,
                     response_contract: Some("peer_objection_response".to_string()),
                 },
             })
@@ -11344,6 +11693,8 @@ mod tests {
                     context_packet_ref: "artifact://context/minimal".to_string(),
                     artifact_refs: vec!["arena-contract.json".to_string()],
                     requires_response: true,
+                    delivery_policy: None,
+                    aggregate_contract: None,
                     response_contract: Some("peer_objection_response".to_string()),
                 },
             })
@@ -11451,6 +11802,8 @@ mod tests {
                     context_packet_ref: "artifact://context/minimal".to_string(),
                     artifact_refs: vec![],
                     requires_response: true,
+                    delivery_policy: None,
+                    aggregate_contract: None,
                     response_contract: Some("peer_objection_response".to_string()),
                 },
             })
@@ -11587,6 +11940,8 @@ mod tests {
                         context_packet_ref: "artifact://context/minimal".to_string(),
                         artifact_refs: vec!["arena-contract.json".to_string()],
                         requires_response: true,
+                        delivery_policy: None,
+                        aggregate_contract: None,
                         response_contract: Some("peer_objection_response".to_string()),
                     },
                 })
@@ -11703,6 +12058,8 @@ mod tests {
                         context_packet_ref: "artifact://context/minimal".to_string(),
                         artifact_refs: vec!["arena-contract.json".to_string()],
                         requires_response: true,
+                        delivery_policy: None,
+                        aggregate_contract: None,
                         response_contract: Some("peer_objection_response".to_string()),
                     },
                 })
