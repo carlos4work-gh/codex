@@ -672,6 +672,44 @@ pub struct MemythosArenaCompositionProvisionResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum MemythosArenaResumeDisposition {
+    InitialRound,
+    RetainDecision,
+    PartialResume,
+    FullRound,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaResumeContext {
+    #[serde(default)]
+    pub previous_decision_refs: Vec<String>,
+    #[serde(default)]
+    pub previous_evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub candidate_change_refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaResumeAssessment {
+    pub disposition: MemythosArenaResumeDisposition,
+    pub rationale: String,
+    #[serde(default)]
+    pub affected_participant_ids: Vec<String>,
+    #[serde(default)]
+    pub cited_change_refs: Vec<String>,
+    #[serde(default)]
+    pub affected_decision_refs: Vec<String>,
+    pub comparability_invalidated: bool,
+    pub avoided_full_round: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct MemythosArenaRequestParams {
@@ -697,6 +735,8 @@ pub struct MemythosArenaRequestParams {
     pub cost_goal: String,
     #[ts(optional = nullable)]
     pub composition_change_signal: Option<String>,
+    #[ts(optional = nullable)]
+    pub resume_context: Option<MemythosArenaResumeContext>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -707,7 +747,9 @@ pub struct MemythosArenaRequestResponse {
     pub planner_thread_id: String,
     pub planner_turn_id: String,
     pub composition: MemythosArenaCompositionProvisionResponse,
-    pub initial_delivery: MemythosRoomSendInputDelivery,
+    pub resume_assessment: MemythosArenaResumeAssessment,
+    #[ts(optional = nullable)]
+    pub initial_delivery: Option<MemythosRoomSendInputDelivery>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]

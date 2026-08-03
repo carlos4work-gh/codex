@@ -55,6 +55,8 @@ use codex_app_server_protocol::MemythosArenaPhaseStartParams;
 use codex_app_server_protocol::MemythosArenaPhaseStartResponse;
 use codex_app_server_protocol::MemythosArenaRequestParams;
 use codex_app_server_protocol::MemythosArenaRequestResponse;
+use codex_app_server_protocol::MemythosArenaResumeAssessment;
+use codex_app_server_protocol::MemythosArenaResumeDisposition;
 use codex_app_server_protocol::MemythosArenaRunParams;
 use codex_app_server_protocol::MemythosArenaRunResponse;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
@@ -340,8 +342,17 @@ pub(crate) struct PlannedArenaComposition {
     contract: MemythosArenaCompositionContract,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PlannedArenaResume {
+    planner_thread_id: String,
+    planner_turn_id: String,
+    assessment: MemythosArenaResumeAssessment,
+}
+
 pub(crate) type ArenaCompositionPlanningFuture<'a> =
     Pin<Box<dyn Future<Output = Result<PlannedArenaComposition, JSONRPCErrorError>> + Send + 'a>>;
+pub(crate) type ArenaResumePlanningFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<PlannedArenaResume, JSONRPCErrorError>> + Send + 'a>>;
 
 pub(crate) trait ArenaCompositionPlanningAdapter: Send + Sync {
     fn plan<'a>(
@@ -350,6 +361,19 @@ pub(crate) trait ArenaCompositionPlanningAdapter: Send + Sync {
         previous: Option<&'a MemythosArenaCompositionProvisionResponse>,
         connection_id: ConnectionId,
     ) -> ArenaCompositionPlanningFuture<'a>;
+
+    fn assess_resume<'a>(
+        &'a self,
+        _params: &'a MemythosArenaRequestParams,
+        _previous: &'a MemythosArenaCompositionProvisionResponse,
+        _connection_id: ConnectionId,
+    ) -> ArenaResumePlanningFuture<'a> {
+        Box::pin(async {
+            Err(invalid_params(
+                "native material-novelty assessment is unavailable for this planner",
+            ))
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -366,6 +390,14 @@ fn arena_composition_output_schema() -> Result<serde_json::Value, JSONRPCErrorEr
     let mut schema = serde_json::to_value(schemars::schema_for!(MemythosArenaCompositionContract))
         .map_err(|err| invalid_params(format!("failed to build composition schema: {err}")))?;
     normalize_arena_composition_output_schema(&mut schema);
+    close_json_schema_objects(&mut schema);
+    validate_responses_output_schema(&schema)?;
+    Ok(schema)
+}
+
+fn arena_resume_output_schema() -> Result<serde_json::Value, JSONRPCErrorError> {
+    let mut schema = serde_json::to_value(schemars::schema_for!(MemythosArenaResumeAssessment))
+        .map_err(|err| invalid_params(format!("failed to build resume schema: {err}")))?;
     close_json_schema_objects(&mut schema);
     validate_responses_output_schema(&schema)?;
     Ok(schema)
@@ -596,6 +628,186 @@ impl NativeArenaCompositionPlanningAdapter {
             "nativeRoleCatalog": roles,
         })
     }
+
+    async fn assess_resume_native(
+        &self,
+        params: &MemythosArenaRequestParams,
+        previous: &MemythosArenaCompositionProvisionResponse,
+        connection_id: ConnectionId,
+    ) -> Result<PlannedArenaResume, JSONRPCErrorError> {
+        let mut config = (*self.config).clone();
+        if let Some(cwd) = params.cwd.as_ref() {
+            config.cwd = AbsolutePathBuf::try_from(PathBuf::from(cwd)).map_err(|err| {
+                invalid_params(format!("arena request cwd must be absolute: {err}"))
+            })?;
+        }
+        let environments = self
+            .thread_manager
+            .default_environment_selections(&config.cwd);
+        let planner = self
+            .thread_manager
+            .start_thread_with_options(StartThreadOptions {
+                config,
+                agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
+                root_developer_instructions: Some(
+                    concat!(
+                        "You are the native Memythos material-novelty assessor. Decide whether a closed arena decision must be resumed. ",
+                        "Material novelty requires new reality evidence, a new human or upstream definition, a contradiction with the current decision, ",
+                        "a reached breakpoint, a material objective/restriction/authority change, or a later fact that invalidates a bet. ",
+                        "Elapsed time, inactivity, repeated wording, or a generic desire to validate again are not material novelty. ",
+                        "Use retain_decision when the prior result remains comparable, partial_resume when only named participants or perspectives must work again, ",
+                        "and full_round only when cited change evidence invalidates comparability across the prior competitive result. ",
+                        "Cite supplied refs, preserve closed decisions that are unaffected, and return only the requested structured assessment."
+                    )
+                    .to_string(),
+                ),
+                initial_history: InitialHistory::New,
+                session_source: None,
+                thread_source: None,
+                dynamic_tools: Vec::new(),
+                metrics_service_name: Some("memythos_arena_novelty_assessor".to_string()),
+                multi_agent_mode: None,
+                parent_trace: None,
+                environments,
+                thread_extension_init: ExtensionDataInit::default(),
+                supports_openai_form_elicitation: false,
+            })
+            .await
+            .map_err(|err| {
+                invalid_params(format!("failed to start native novelty assessor: {err}"))
+            })?;
+        self.thread_processor
+            .attach_thread_listener(planner.thread_id, connection_id)
+            .await?;
+        let planner_thread_id = planner.thread_id.to_string();
+        let context = serde_json::to_string_pretty(&serde_json::json!({
+            "request": self.planner_context(params, Some(previous)),
+            "resumeContext": params.resume_context,
+            "activeParticipantIds": previous.contract.participants.iter().map(|participant| participant.participant_id.as_str()).collect::<Vec<_>>(),
+            "previousCompositionVersion": previous.composition_version,
+            "previousContractRefs": previous.event_refs,
+        }))
+        .map_err(|err| invalid_params(format!("failed to serialize novelty context: {err}")))?;
+        let turn = self
+            .turn_processor
+            .turn_start(
+                ConnectionRequestId {
+                    connection_id,
+                    request_id: RequestId::String(format!(
+                        "memythos-arena-novelty:{}",
+                        params.arena_id
+                    )),
+                },
+                TurnStartParams {
+                    thread_id: planner_thread_id.clone(),
+                    client_user_message_id: Some(format!(
+                        "arena-novelty:{}:{}",
+                        params.arena_id, previous.composition_version
+                    )),
+                    input: vec![UserInput::Text {
+                        text: format!(
+                            "Assess material novelty and select the smallest valid resume scope. Do not re-plan the composition yet.\n\n{context}"
+                        ),
+                        text_elements: vec![],
+                    }],
+                    responsesapi_client_metadata: None,
+                    additional_context: None,
+                    environments: None,
+                    cwd: None,
+                    runtime_workspace_roots: None,
+                    approval_policy: None,
+                    approvals_reviewer: None,
+                    sandbox_policy: None,
+                    permissions: None,
+                    model: None,
+                    service_tier: None,
+                    effort: None,
+                    summary: None,
+                    personality: None,
+                    output_schema: Some(arena_resume_output_schema()?),
+                    collaboration_mode: None,
+                    multi_agent_mode: None,
+                },
+                Some("memythos".to_string()),
+                None,
+                false,
+            )
+            .await?;
+        let Some(ClientResponsePayload::TurnStart(turn)) = turn else {
+            return Err(invalid_params(
+                "native novelty assessor did not start a turn",
+            ));
+        };
+        let planner_turn_id = turn.turn.id;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+        loop {
+            if !self
+                .thread_processor
+                .turn_terminal_observed(&planner_thread_id, &planner_turn_id)
+                .await?
+            {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(invalid_params(format!(
+                        "native novelty assessor turn {planner_turn_id} did not reach an OOTB terminal event before timeout"
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+            let planner_turn = self
+                .read_planner_turn(&planner_thread_id, &planner_turn_id)
+                .await?;
+            match planner_turn.as_ref().map(|turn| &turn.status) {
+                Some(TurnStatus::Completed) => {
+                    let text = planner_turn
+                        .as_ref()
+                        .and_then(|turn| {
+                            turn.items.iter().rev().find_map(|item| match item {
+                                ThreadItem::AgentMessage { text, .. } => Some(text.as_str()),
+                                _ => None,
+                            })
+                        })
+                        .ok_or_else(|| {
+                            invalid_params(format!(
+                                "native novelty assessor turn {planner_turn_id} completed without an OOTB final AgentMessage"
+                            ))
+                        })?;
+                    let assessment = serde_json::from_str::<MemythosArenaResumeAssessment>(text)
+                        .map_err(|err| {
+                            invalid_params(format!(
+                                "native novelty assessor returned invalid JSON: {err}"
+                            ))
+                        })?;
+                    validate_native_resume_assessment(&assessment, previous)?;
+                    return Ok(PlannedArenaResume {
+                        planner_thread_id,
+                        planner_turn_id,
+                        assessment,
+                    });
+                }
+                Some(TurnStatus::Failed) => {
+                    let error = planner_turn
+                        .as_ref()
+                        .and_then(|turn| turn.error.as_ref())
+                        .map(|error| error.message.as_str())
+                        .unwrap_or("unknown app-server turn failure");
+                    return Err(invalid_params(format!(
+                        "native novelty assessor turn {planner_turn_id} failed: {error}"
+                    )));
+                }
+                Some(TurnStatus::Interrupted) => {
+                    return Err(invalid_params(format!(
+                        "native novelty assessor turn {planner_turn_id} was interrupted"
+                    )));
+                }
+                _ => {
+                    return Err(invalid_params(format!(
+                        "native novelty assessor turn {planner_turn_id} ended without a terminal status"
+                    )));
+                }
+            }
+        }
+    }
 }
 
 impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
@@ -819,6 +1031,18 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
+        })
+    }
+
+    fn assess_resume<'a>(
+        &'a self,
+        params: &'a MemythosArenaRequestParams,
+        previous: &'a MemythosArenaCompositionProvisionResponse,
+        connection_id: ConnectionId,
+    ) -> ArenaResumePlanningFuture<'a> {
+        Box::pin(async move {
+            self.assess_resume_native(params, previous, connection_id)
+                .await
         })
     }
 }
@@ -2977,6 +3201,30 @@ impl MemythosRequestProcessor {
             let state = self.state.lock().await;
             state.arena_compositions.get(&params.arena_id).cloned()
         };
+        let resume = if let Some(previous) = previous.as_ref() {
+            Some(
+                self.arena_composition_planning_adapter
+                    .assess_resume(&params, previous, connection_id)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        if let Some(resume) = resume.as_ref()
+            && resume.assessment.disposition == MemythosArenaResumeDisposition::RetainDecision
+        {
+            return Ok(MemythosArenaRequestResponse {
+                request_id: self.next_id("mem_arena_request", &self.next_delivery_id),
+                planner_thread_id: resume.planner_thread_id.clone(),
+                planner_turn_id: resume.planner_turn_id.clone(),
+                composition: previous
+                    .clone()
+                    .expect("retain decision requires an active composition"),
+                resume_assessment: resume.assessment.clone(),
+                initial_delivery: None,
+            }
+            .into());
+        }
         let planned = self
             .arena_composition_planning_adapter
             .plan(&params, previous.as_ref(), connection_id)
@@ -2987,9 +3235,17 @@ impl MemythosRequestProcessor {
                 planned.contract.arena_id, params.arena_id
             )));
         }
+        let mut revision_params = params.clone();
+        if revision_params.composition_change_signal.is_none()
+            && let Some(resume) = resume.as_ref()
+        {
+            revision_params.composition_change_signal = Some(resume.assessment.rationale.clone());
+        }
         let revision = previous
             .as_ref()
-            .map(|previous| build_native_composition_revision(&params, previous, &planned.contract))
+            .map(|previous| {
+                build_native_composition_revision(&revision_params, previous, &planned.contract)
+            })
             .transpose()?;
         let provision = self
             .arena_composition_provision(
@@ -3094,7 +3350,20 @@ impl MemythosRequestProcessor {
             planner_thread_id: planned.planner_thread_id,
             planner_turn_id: planned.planner_turn_id,
             composition,
-            initial_delivery: delivery.delivery,
+            resume_assessment: resume.map_or(
+                MemythosArenaResumeAssessment {
+                    disposition: MemythosArenaResumeDisposition::InitialRound,
+                    rationale: "No prior arena composition exists; run the initial round."
+                        .to_string(),
+                    affected_participant_ids: Vec::new(),
+                    cited_change_refs: Vec::new(),
+                    affected_decision_refs: Vec::new(),
+                    comparability_invalidated: false,
+                    avoided_full_round: false,
+                },
+                |resume| resume.assessment,
+            ),
+            initial_delivery: Some(delivery.delivery),
         }
         .into())
     }
@@ -7231,6 +7500,72 @@ fn build_native_composition_revision(
     })
 }
 
+fn validate_native_resume_assessment(
+    assessment: &MemythosArenaResumeAssessment,
+    previous: &MemythosArenaCompositionProvisionResponse,
+) -> Result<(), JSONRPCErrorError> {
+    if assessment.rationale.trim().is_empty() {
+        return Err(invalid_params(
+            "native novelty assessment requires a rationale",
+        ));
+    }
+    let active_ids = previous
+        .contract
+        .participants
+        .iter()
+        .map(|participant| participant.participant_id.as_str())
+        .collect::<HashSet<_>>();
+    if let Some(unknown) = assessment
+        .affected_participant_ids
+        .iter()
+        .find(|participant_id| !active_ids.contains(participant_id.as_str()))
+    {
+        return Err(invalid_params(format!(
+            "native novelty assessment references inactive participant {unknown}"
+        )));
+    }
+    match assessment.disposition {
+        MemythosArenaResumeDisposition::InitialRound => Err(invalid_params(
+            "active arena novelty assessment cannot return initial_round",
+        )),
+        MemythosArenaResumeDisposition::RetainDecision => {
+            if !assessment.affected_participant_ids.is_empty()
+                || assessment.comparability_invalidated
+                || !assessment.avoided_full_round
+            {
+                return Err(invalid_params(
+                    "retain_decision must preserve comparability, affect no participants, and record the avoided full round",
+                ));
+            }
+            Ok(())
+        }
+        MemythosArenaResumeDisposition::PartialResume => {
+            if assessment.affected_participant_ids.is_empty()
+                || assessment.cited_change_refs.is_empty()
+                || assessment.comparability_invalidated
+                || !assessment.avoided_full_round
+            {
+                return Err(invalid_params(
+                    "partial_resume requires affected participants and cited change refs while preserving comparability and avoiding a full round",
+                ));
+            }
+            Ok(())
+        }
+        MemythosArenaResumeDisposition::FullRound => {
+            if assessment.cited_change_refs.is_empty()
+                || assessment.affected_decision_refs.is_empty()
+                || !assessment.comparability_invalidated
+                || assessment.avoided_full_round
+            {
+                return Err(invalid_params(
+                    "full_round requires cited change refs, affected decisions, and explicit comparability invalidation",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 fn native_token_usage_key(thread_id: &str, turn_id: &str) -> String {
     format!("{thread_id}::{turn_id}")
 }
@@ -8135,6 +8470,76 @@ mod tests {
                 })
             })
         }
+
+        fn assess_resume<'a>(
+            &'a self,
+            params: &'a MemythosArenaRequestParams,
+            previous: &'a MemythosArenaCompositionProvisionResponse,
+            _connection_id: ConnectionId,
+        ) -> ArenaResumePlanningFuture<'a> {
+            let all_participant_ids = previous
+                .contract
+                .participants
+                .iter()
+                .map(|participant| participant.participant_id.clone())
+                .collect::<Vec<_>>();
+            let candidate_change_refs = params
+                .resume_context
+                .as_ref()
+                .map(|context| context.candidate_change_refs.clone())
+                .unwrap_or_default();
+            let has_change =
+                params.composition_change_signal.is_some() || !candidate_change_refs.is_empty();
+            let full_round = candidate_change_refs
+                .iter()
+                .any(|reference| reference == "evidence://global-invalidation");
+            let partial_participant_ids = previous
+                .contract
+                .participants
+                .iter()
+                .find(|participant| participant.agent_role == "bettor")
+                .map(|participant| vec![participant.participant_id.clone()])
+                .unwrap_or_else(|| all_participant_ids.clone());
+            Box::pin(async move {
+                Ok(PlannedArenaResume {
+                    planner_thread_id: "novelty-thread".to_string(),
+                    planner_turn_id: "novelty-turn".to_string(),
+                    assessment: if full_round {
+                        MemythosArenaResumeAssessment {
+                            disposition: MemythosArenaResumeDisposition::FullRound,
+                            rationale: "fixture evidence invalidates comparability across all bets"
+                                .to_string(),
+                            affected_participant_ids: all_participant_ids,
+                            cited_change_refs: candidate_change_refs,
+                            affected_decision_refs: vec!["decision://fixture".to_string()],
+                            comparability_invalidated: true,
+                            avoided_full_round: false,
+                        }
+                    } else if has_change {
+                        MemythosArenaResumeAssessment {
+                            disposition: MemythosArenaResumeDisposition::PartialResume,
+                            rationale: "fixture material change affects the selected live parents"
+                                .to_string(),
+                            affected_participant_ids: partial_participant_ids,
+                            cited_change_refs: vec!["evidence://fixture-change".to_string()],
+                            affected_decision_refs: vec!["decision://fixture".to_string()],
+                            comparability_invalidated: false,
+                            avoided_full_round: true,
+                        }
+                    } else {
+                        MemythosArenaResumeAssessment {
+                            disposition: MemythosArenaResumeDisposition::RetainDecision,
+                            rationale: "fixture has no material delta".to_string(),
+                            affected_participant_ids: Vec::new(),
+                            cited_change_refs: Vec::new(),
+                            affected_decision_refs: Vec::new(),
+                            comparability_invalidated: false,
+                            avoided_full_round: true,
+                        }
+                    },
+                })
+            })
+        }
     }
 
     impl ArenaCompositionPlanningAdapter for ExpandingArenaCompositionPlanningAdapter {
@@ -8154,6 +8559,36 @@ mod tests {
                     planner_thread_id: "planner-thread".to_string(),
                     planner_turn_id: "planner-turn".to_string(),
                     contract,
+                })
+            })
+        }
+
+        fn assess_resume<'a>(
+            &'a self,
+            _params: &'a MemythosArenaRequestParams,
+            previous: &'a MemythosArenaCompositionProvisionResponse,
+            _connection_id: ConnectionId,
+        ) -> ArenaResumePlanningFuture<'a> {
+            let affected_participant_ids = previous
+                .contract
+                .participants
+                .iter()
+                .map(|participant| participant.participant_id.clone())
+                .collect();
+            Box::pin(async move {
+                Ok(PlannedArenaResume {
+                    planner_thread_id: "novelty-thread".to_string(),
+                    planner_turn_id: "novelty-turn".to_string(),
+                    assessment: MemythosArenaResumeAssessment {
+                        disposition: MemythosArenaResumeDisposition::PartialResume,
+                        rationale: "fixture evidence gap requires one additional perspective"
+                            .to_string(),
+                        affected_participant_ids,
+                        cited_change_refs: vec!["evidence://fixture-gap".to_string()],
+                        affected_decision_refs: vec!["decision://fixture".to_string()],
+                        comparability_invalidated: false,
+                        avoided_full_round: true,
+                    },
                 })
             })
         }
@@ -8377,6 +8812,7 @@ mod tests {
             reality_evidence: vec!["Current process map".to_string()],
             cost_goal: "Use the smallest sufficient arena".to_string(),
             composition_change_signal: None,
+            resume_context: None,
         }
     }
 
@@ -8912,13 +9348,14 @@ mod tests {
                 .count(),
             2
         );
-        assert!(response.initial_delivery.human_instruction);
+        let initial_delivery = response
+            .initial_delivery
+            .as_ref()
+            .expect("initial request should deliver intake");
+        assert!(initial_delivery.human_instruction);
+        assert_eq!(initial_delivery.round_id, "arena-composition-round-1");
         assert_eq!(
-            response.initial_delivery.round_id,
-            "arena-composition-round-1"
-        );
-        assert_eq!(
-            response.initial_delivery.thread_id,
+            initial_delivery.thread_id,
             "test::room_concierge::concierge"
         );
         provisioning
@@ -9077,15 +9514,22 @@ mod tests {
         };
 
         assert_eq!(response.composition.composition_version, 2);
-        assert_eq!(first.initial_delivery.round_id, "arena-composition-round-1");
         assert_eq!(
-            response.initial_delivery.round_id,
-            "arena-composition-round-2"
+            response.resume_assessment.disposition,
+            MemythosArenaResumeDisposition::PartialResume
         );
-        assert_ne!(
-            first.initial_delivery.round_id,
-            response.initial_delivery.round_id
-        );
+        assert_eq!(response.resume_assessment.affected_participant_ids.len(), 1);
+        let first_delivery = first
+            .initial_delivery
+            .as_ref()
+            .expect("initial request delivery");
+        let resumed_delivery = response
+            .initial_delivery
+            .as_ref()
+            .expect("material resume delivery");
+        assert_eq!(first_delivery.round_id, "arena-composition-round-1");
+        assert_eq!(resumed_delivery.round_id, "arena-composition-round-2");
+        assert_ne!(first_delivery.round_id, resumed_delivery.round_id);
         let revision = response
             .composition
             .applied_revision
@@ -9102,6 +9546,88 @@ mod tests {
                 .iter()
                 .all(|lease| lease.lease_source == "reused")
         );
+    }
+
+    #[tokio::test]
+    async fn arena_request_retains_decision_without_provisioning_or_parent_wake() {
+        let contract = competitive_composition_params().contract;
+        let provisioning = Arc::new(FakeArenaParentProvisioningAdapter::default());
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            provisioning.clone(),
+            Arc::new(FakeArenaCompositionPlanningAdapter { contract }),
+        );
+
+        processor
+            .arena_request(semantic_arena_request_params(), ConnectionId(7))
+            .await
+            .expect("initial semantic request should provision");
+        let goal_transition_count = provisioning.goal_transitions.lock().await.len();
+        let response = processor
+            .arena_request(semantic_arena_request_params(), ConnectionId(7))
+            .await
+            .expect("identical request should retain the prior decision");
+        let ClientResponsePayload::MemythosArenaRequest(response) = response else {
+            panic!("expected retained semantic arena request response");
+        };
+
+        assert_eq!(response.composition.composition_version, 1);
+        assert_eq!(
+            response.resume_assessment.disposition,
+            MemythosArenaResumeDisposition::RetainDecision
+        );
+        assert!(response.resume_assessment.avoided_full_round);
+        assert!(response.initial_delivery.is_none());
+        assert_eq!(
+            provisioning.goal_transitions.lock().await.len(),
+            goal_transition_count,
+            "retaining the decision must not provision or wake any parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn arena_request_requires_explicit_comparability_invalidation_for_full_round() {
+        let contract = competitive_composition_params().contract;
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(FakeArenaCompositionPlanningAdapter { contract }),
+        );
+        processor
+            .arena_request(semantic_arena_request_params(), ConnectionId(7))
+            .await
+            .expect("initial semantic request should provision");
+        let mut update = semantic_arena_request_params();
+        update.resume_context = Some(codex_app_server_protocol::MemythosArenaResumeContext {
+            previous_decision_refs: vec!["decision://fixture".to_string()],
+            previous_evidence_refs: vec!["evidence://baseline".to_string()],
+            candidate_change_refs: vec!["evidence://global-invalidation".to_string()],
+        });
+        let response = processor
+            .arena_request(update, ConnectionId(7))
+            .await
+            .expect("global invalidation should open a full round");
+        let ClientResponsePayload::MemythosArenaRequest(response) = response else {
+            panic!("expected full-round semantic arena request response");
+        };
+
+        assert_eq!(
+            response.resume_assessment.disposition,
+            MemythosArenaResumeDisposition::FullRound
+        );
+        assert!(response.resume_assessment.comparability_invalidated);
+        assert!(!response.resume_assessment.affected_decision_refs.is_empty());
+        assert!(response.initial_delivery.is_some());
     }
 
     #[tokio::test]
