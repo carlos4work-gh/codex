@@ -963,6 +963,22 @@ pub enum MemythosArenaAggregateState {
     ExceptionRouted,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosArenaCheckpointState {
+    PhaseOpen,
+    CollectingMailboxContributions,
+    CheckpointReady,
+    CheckpointSealed,
+    ConciergeSynthesis,
+    NextPhaseDispatched,
+    MaterialException,
+    ConciergeExceptionHandling,
+    Replan,
+    Aborted,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -990,6 +1006,11 @@ pub struct MemythosArenaMessageDelivery {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub aggregate_state: Option<MemythosArenaAggregateState>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub checkpoint_state: Option<MemythosArenaCheckpointState>,
+    #[serde(default)]
+    pub checkpoint_event_refs: Vec<String>,
     #[ts(optional = nullable)]
     pub receiver_turn_id: Option<String>,
     #[ts(optional = nullable)]

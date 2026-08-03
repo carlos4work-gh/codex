@@ -15,6 +15,7 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::MemythosArena;
 use codex_app_server_protocol::MemythosArenaAggregateContract;
 use codex_app_server_protocol::MemythosArenaAggregateState;
+use codex_app_server_protocol::MemythosArenaCheckpointState;
 use codex_app_server_protocol::MemythosArenaCompositionContract;
 use codex_app_server_protocol::MemythosArenaCompositionLease;
 use codex_app_server_protocol::MemythosArenaCompositionLifecycleState;
@@ -201,6 +202,8 @@ struct NativeArenaMessageAggregate {
     received_source_thread_ids: HashSet<String>,
     received_message_ids: HashSet<String>,
     trigger_message_id: Option<String>,
+    checkpoint_state: MemythosArenaCheckpointState,
+    checkpoint_history: Vec<MemythosArenaCheckpointState>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,9 +305,10 @@ fn room_delivery_goal_objective(room: &MemythosRoom, message: &MemythosArenaMess
     let materialization_requirement = if message.message_kind == "human_intake" {
         concat!(
             " This intake is not complete until you invoke the native ",
-            "memythos_room_send_message tool and deliver notify_coordinator to the Room ",
-            "Concierge. A prose statement that you activated or will activate the arena is not ",
-            "materialized progress and must not be reported as completion."
+            "memythos_room_send_message tool and dispatch the first proposal assignment from ",
+            "the Room Concierge to every configured proposal-bearing parent. A prose statement ",
+            "that you activated or will activate the arena is not materialized progress and must ",
+            "not be reported as completion."
         )
     } else {
         ""
@@ -617,7 +621,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     config,
                     agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
                     root_developer_instructions: Some(
-                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances and three additional independent parents: one scrum_master coordinator, one room_concierge, and one judge. Populate all three coordination participant IDs with those distinct participants. Native method authorities such as coordinate and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the scrum_master coordinator; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent and select a native reasoningEffort for every participant. The active arena parent toolset requires reasoningEffort low, medium, high, or xhigh; none and minimal are invalid for this runtime. Within that compatible range, choose effort proportionate to uncertainty and decision impact; routine room coordination and concise phase responses normally need less effort than final judgment of material uncertainty. tokenBudget is a cumulative hard limit over the complete parent objective, including every arena phase and all input/output tokens. A qualitative request for efficiency, a small team, brevity, speed, or lower cost is not an explicit numeric hard limit: in those cases tokenBudget must be null. Set tokenBudget only when the caller supplied an explicit numeric token cap or previous measured evidence supports a calibrated cap that funds the full round. Never invent a small numeric cap from qualitative cost language. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances plus one room_concierge and one judge. The Room Concierge owns technical coordination, checkpoints, dependencies, exception routing, and communication; it is not a proposer or business authority. coordinatorParticipantId must be null for an ordinary arena. Select an additional coordinator/process steward only for an explicit regulatory, method-conflict, or exceptional-governance requirement and explain that exception in rationale. Native method authorities such as coordinate, delegate, and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the room_concierge; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent and select a native reasoningEffort for every participant. The active arena parent toolset requires reasoningEffort low, medium, high, or xhigh; none and minimal are invalid for this runtime. Within that compatible range, choose effort proportionate to uncertainty and decision impact; routine room coordination and concise phase responses normally need less effort than final judgment of material uncertainty. tokenBudget is a cumulative hard limit over the complete parent objective, including every arena phase and all input/output tokens. A qualitative request for efficiency, a small team, brevity, speed, or lower cost is not an explicit numeric hard limit: in those cases tokenBudget must be null. Set tokenBudget only when the caller supplied an explicit numeric token cap or previous measured evidence supports a calibrated cap that funds the full round. Never invent a small numeric cap from qualitative cost language. Cost pressure must never silently remove method integrity. Return only the requested structured contract."
                             .to_string(),
                     ),
                     initial_history: InitialHistory::New,
@@ -749,7 +753,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                                         )),
                                         input: vec![UserInput::Text {
                                             text: format!(
-                                                "Native contract validation rejected unresolvedRoleGap: {role_gap}. Review attempt {role_gap_repair_attempts} of 2 on this same planner thread. Re-read nativeRoleCatalog in the original planning context below. Generic roles are intentionally domain-independent: express business specialization through stance and roleObjective, not a new role. A competitive arena already has native coordination and decision authority through scrum_master, room_concierge, and judge. If delegate is available and the catalog grants it to scrum_master, use that coordinator for post-verdict downstream promotion instead of inventing a proposal-independent delegation role. Unless the catalog truly lacks one of those structural capabilities, return unresolvedRoleGap as null. Preserve method integrity and emit the complete corrected contract only.\n\nOriginal planning context:\n{context}"
+                                                "Native contract validation rejected unresolvedRoleGap: {role_gap}. Review attempt {role_gap_repair_attempts} of 2 on this same planner thread. Re-read nativeRoleCatalog in the original planning context below. Generic roles are intentionally domain-independent: express business specialization through stance and roleObjective, not a new role. A competitive arena already has native coordination and decision authority through room_concierge and judge. The Room Concierge owns ordinary checkpoint coordination and downstream promotion; do not add a scrum_master or coordinator unless an explicit exceptional-governance rationale requires a process steward. Unless the catalog truly lacks one of those structural capabilities, return unresolvedRoleGap as null. Preserve method integrity and emit the complete corrected contract only.\n\nOriginal planning context:\n{context}"
                                             ),
                                             text_elements: vec![],
                                         }],
@@ -1760,6 +1764,8 @@ fn prepare_native_aggregate_delivery(
                     received_source_thread_ids: HashSet::new(),
                     received_message_ids: HashSet::new(),
                     trigger_message_id: None,
+                    checkpoint_state: MemythosArenaCheckpointState::PhaseOpen,
+                    checkpoint_history: vec![MemythosArenaCheckpointState::PhaseOpen],
                 });
             if aggregate.contract != contract {
                 return Err(invalid_params(format!(
@@ -1811,6 +1817,25 @@ fn prepare_native_aggregate_delivery(
             } else {
                 MemythosArenaAggregateState::Collecting
             };
+            if matches!(
+                aggregate.state,
+                MemythosArenaAggregateState::ReadyByExpectedSources
+                    | MemythosArenaAggregateState::ReadyByQuorum
+            ) {
+                transition_native_checkpoint(
+                    aggregate,
+                    MemythosArenaCheckpointState::CheckpointReady,
+                );
+                transition_native_checkpoint(
+                    aggregate,
+                    MemythosArenaCheckpointState::CheckpointSealed,
+                );
+            } else {
+                transition_native_checkpoint(
+                    aggregate,
+                    MemythosArenaCheckpointState::CollectingMailboxContributions,
+                );
+            }
             message.requires_response = matches!(
                 aggregate.state,
                 MemythosArenaAggregateState::ReadyByExpectedSources
@@ -1869,6 +1894,11 @@ fn finalize_native_aggregate_delivery(
     let aggregate = state.arena_message_aggregates.get_mut(&aggregate_key)?;
     if !delivered {
         aggregate.state = MemythosArenaAggregateState::ExceptionRouted;
+        transition_native_checkpoint(aggregate, MemythosArenaCheckpointState::MaterialException);
+        transition_native_checkpoint(
+            aggregate,
+            MemythosArenaCheckpointState::ConciergeExceptionHandling,
+        );
     } else if message.requires_response
         && matches!(
             prepared_state,
@@ -1879,8 +1909,53 @@ fn finalize_native_aggregate_delivery(
         )
     {
         aggregate.state = MemythosArenaAggregateState::RecipientTriggered;
+        transition_native_checkpoint(
+            aggregate,
+            if message.to_parent_role == "room_concierge" {
+                MemythosArenaCheckpointState::ConciergeSynthesis
+            } else {
+                MemythosArenaCheckpointState::NextPhaseDispatched
+            },
+        );
     }
     Some(aggregate.state)
+}
+
+fn transition_native_checkpoint(
+    aggregate: &mut NativeArenaMessageAggregate,
+    next: MemythosArenaCheckpointState,
+) {
+    if aggregate.checkpoint_state != next {
+        aggregate.checkpoint_state = next;
+        aggregate.checkpoint_history.push(next);
+    }
+}
+
+fn native_aggregate_checkpoint_projection(
+    state: &MemythosRuntimeState,
+    message: &MemythosArenaMessage,
+) -> (Option<MemythosArenaCheckpointState>, Vec<String>) {
+    let Some(contract) = message.aggregate_contract.as_ref() else {
+        return (None, Vec::new());
+    };
+    let key = format!(
+        "{}::{}::{}",
+        message.arena_id, message.round_id, contract.aggregate_id
+    );
+    let Some(aggregate) = state.arena_message_aggregates.get(&key) else {
+        return (None, Vec::new());
+    };
+    let refs = aggregate
+        .checkpoint_history
+        .iter()
+        .map(|checkpoint| {
+            format!(
+                "app-server://memythos/arenas/{}/rounds/{}/aggregates/{}/checkpoints/{checkpoint:?}",
+                message.arena_id, message.round_id, contract.aggregate_id
+            )
+        })
+        .collect();
+    (Some(aggregate.checkpoint_state), refs)
 }
 
 fn failed_native_mailbox_delivery_attempt(
@@ -2935,14 +3010,9 @@ impl MemythosRequestProcessor {
         let target_participant_id = composition
             .contract
             .coordination
-            .coordinator_participant_id
+            .concierge_participant_id
             .as_ref()
-            .or(composition
-                .contract
-                .coordination
-                .concierge_participant_id
-                .as_ref())
-            .ok_or_else(|| invalid_params("arena composition has no coordinator or concierge"))?;
+            .ok_or_else(|| invalid_params("arena composition has no Room Concierge"))?;
         let target = composition
             .leases
             .iter()
@@ -3546,6 +3616,8 @@ impl MemythosRequestProcessor {
             aggregate_state,
             delivery_attempt.rejection_reason.is_none(),
         );
+        let (checkpoint_state, checkpoint_event_refs) =
+            native_aggregate_checkpoint_projection(&state, &message);
         let telemetry_channel = delivery_attempt.telemetry_channel;
         let telemetry_summary = delivery_attempt.telemetry_summary.clone();
         let delivery = MemythosArenaMessageDelivery {
@@ -3565,6 +3637,8 @@ impl MemythosRequestProcessor {
                 .as_ref()
                 .map(|contract| contract.aggregate_id.clone()),
             aggregate_state,
+            checkpoint_state,
+            checkpoint_event_refs,
             receiver_turn_id: delivery_attempt.receiver_turn_id,
             receiver_response_event_ref: delivery_attempt.receiver_response_event_ref,
             delivered_as_human_instruction: delivery_attempt.delivered_as_human_instruction,
@@ -3798,6 +3872,10 @@ impl MemythosRequestProcessor {
                         | MemythosArenaAggregateState::ReadyByQuorum
                 ) {
                     aggregate.state = MemythosArenaAggregateState::SealedIncomplete;
+                    transition_native_checkpoint(
+                        aggregate,
+                        MemythosArenaCheckpointState::MaterialException,
+                    );
                 }
             }
         }
@@ -4767,6 +4845,8 @@ impl MemythosRequestProcessor {
             delivery_policy: message.delivery_policy,
             aggregate_id: None,
             aggregate_state: None,
+            checkpoint_state: None,
+            checkpoint_event_refs: Vec::new(),
             receiver_turn_id: Some(target_turn_id.clone()),
             receiver_response_event_ref: None,
             delivered_as_human_instruction: params.human_instruction,
@@ -5813,6 +5893,23 @@ impl MemythosRequestProcessor {
                 let key = format!("{arena_id}::{round_id}::{aggregate_id}");
                 if let Some(aggregate) = state.arena_message_aggregates.get_mut(&key) {
                     aggregate.state = MemythosArenaAggregateState::Consumed;
+                    transition_native_checkpoint(
+                        aggregate,
+                        MemythosArenaCheckpointState::NextPhaseDispatched,
+                    );
+                }
+                for delivery in state
+                    .arena_message_deliveries
+                    .iter_mut()
+                    .filter(|delivery| {
+                        delivery.arena_id == arena_id
+                            && delivery.round_id == round_id
+                            && delivery.aggregate_id.as_deref() == Some(aggregate_id.as_str())
+                    })
+                {
+                    delivery.status = "receiver_turn_completed".to_string();
+                    delivery.aggregate_state = Some(MemythosArenaAggregateState::Consumed);
+                    delivery.receiver_response_event_ref = Some(native_event_ref.clone());
                 }
             }
 
@@ -6346,8 +6443,10 @@ fn room_activity_turn_from_delivery(
 fn phase_from_message_kind(message_kind: &str) -> Option<String> {
     match message_kind {
         "dispatch_proposals" | "peer_proposal" => Some("proposal".to_string()),
-        "dispatch_cross_read" | "peer_cross_read" => Some("cross_read".to_string()),
-        "peer_objection" => Some("objection".to_string()),
+        "dispatch_cross_read"
+        | "peer_cross_read"
+        | "peer_objection"
+        | "peer_review_and_objection" => Some("peer_review_and_objection".to_string()),
         "dispatch_bets" | "peer_bet" => Some("bet".to_string()),
         "request_judge" | "verdict_request" | "judge_verdict" => Some("judge".to_string()),
         "notify_coordinator" => Some("learning".to_string()),
@@ -6388,7 +6487,7 @@ fn build_arena_intake_prompt(
         })
         .unwrap_or_else(|| "not required by the selected method".to_string());
     format!(
-        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. As coordinator, own the complete method through the Room Concierge; the client will only observe. Your first materialized act must be a native memythos_room_send_message tool call that delivers notify_coordinator to the Room Concierge. Do not merely say that you activated, will activate, or asked the Room Concierge: without the tool call the arena has not advanced. For a competitive method, the Room Concierge must obtain independent proposals from every proposal-bearing bettor with peer_proposal. After all proposals complete, require every bettor to read a competing proposal with peer_cross_read. After all cross-reads complete, require every bettor to state a concrete objection with peer_objection. Only after all required objections complete, obtain one explicit revised commitment from every bettor with peer_bet. Only after those commitments exist, the Room Concierge must send exactly one verdict_request to the configured judge. That request must require the judge to identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never use verdict_request for peer comparison and never use judge_verdict to request a verdict. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own technical coordination, checkpoints, dependencies, exceptions, and communication for the complete method; the client will only observe. You are not a proposer and you do not decide the business outcome. For a competitive method, obtain independent proposals from every proposal-bearing bettor with peer_proposal. After all proposals complete, require every bettor in one consolidated peer_review_and_objection turn to read competing evidence, explain what they incorporate, state a concrete objection, and identify residual uncertainty. Then obtain one explicit revised commitment from every bettor with peer_bet. Deliver all bets to the judge through aggregate_then_trigger so the judge activates exactly once after the checkpoint is sealed. The verdict request must require the judge to return judge_verdict, identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never bet or judge as Room Concierge. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
         params.request_origin,
         params.case_brief,
         params.layer_objective,
@@ -6412,7 +6511,7 @@ fn validate_room_message_kind(
         && phase_from_message_kind(message_kind).is_none()
     {
         return Err(invalid_params(format!(
-            "competitive arena room acts require an explicit semantic phase messageKind; {message_kind} is ambiguous. Use peer_proposal, peer_cross_read, peer_objection, peer_bet, verdict_request, judge_verdict, or notify_coordinator"
+            "competitive arena room acts require an explicit semantic phase messageKind; {message_kind} is ambiguous. Use peer_proposal, peer_review_and_objection, peer_bet, verdict_request, judge_verdict, or notify_coordinator"
         )));
     }
     Ok(())
@@ -6429,7 +6528,11 @@ fn validate_room_message_route(
     }
 
     let valid = match message_kind {
-        "peer_proposal" | "peer_cross_read" | "peer_objection" | "peer_bet" => {
+        "peer_proposal"
+        | "peer_cross_read"
+        | "peer_objection"
+        | "peer_review_and_objection"
+        | "peer_bet" => {
             (source_role == "room_concierge" && target_role == "bettor")
                 || (source_role == "bettor" && target_role == "room_concierge")
         }
@@ -6487,10 +6590,16 @@ fn validate_competitive_round_progress(
         .and_then(|composition| composition.contract.coordination.round_policy.as_ref())
         .is_some_and(|policy| policy.objection_required);
     let prerequisite = match message_kind {
-        "peer_cross_read" => Some(("proposal", "peer proposals")),
-        "peer_objection" => Some(("cross_read", "peer cross-reads")),
-        "peer_bet" if objection_required => Some(("objection", "peer objections")),
-        "peer_bet" => Some(("cross_read", "peer cross-reads")),
+        "peer_cross_read" | "peer_objection" | "peer_review_and_objection" => {
+            Some(("proposal", "peer proposals"))
+        }
+        "peer_bet" if objection_required => {
+            Some(("peer_review_and_objection", "peer reviews with objections"))
+        }
+        "peer_bet" => Some((
+            "peer_review_and_objection",
+            "peer reviews of competing evidence",
+        )),
         "verdict_request" => Some(("bet", "explicit peer bets")),
         _ => None,
     };
@@ -6545,7 +6654,7 @@ fn arena_closure_candidate(
     let coordinator_id = composition
         .contract
         .coordination
-        .coordinator_participant_id
+        .concierge_participant_id
         .as_ref()?;
     let coordinator_thread_id = composition
         .leases
@@ -6593,9 +6702,7 @@ fn arena_closure_candidate(
                 .len()
         };
         if distinct_completed_targets("proposal") < minimum_positions
-            || distinct_completed_targets("cross_read") < minimum_positions
-            || (policy.objection_required
-                && distinct_completed_targets("objection") < minimum_positions)
+            || distinct_completed_targets("peer_review_and_objection") < minimum_positions
             || distinct_completed_targets("bet") < minimum_positions
             || distinct_completed_targets("judge") < 1
         {
@@ -6767,6 +6874,15 @@ fn validate_arena_composition_contract(
                 "coordinator and concierge must be independent participants",
             ));
         }
+        let rationale = contract.rationale.to_ascii_lowercase();
+        if !["exception", "regulat", "governance", "method conflict"]
+            .iter()
+            .any(|marker| rationale.contains(marker))
+        {
+            return Err(invalid_params(
+                "an additional coordinator/process steward requires explicit exceptional-governance rationale",
+            ));
+        }
     }
     if let Some(judge_id) = contract.coordination.judge_participant_id.as_deref() {
         let judge = find_participant(judge_id)
@@ -6787,11 +6903,10 @@ fn validate_arena_composition_contract(
             ));
         }
         if contract.coordination.concierge_participant_id.is_none()
-            || contract.coordination.coordinator_participant_id.is_none()
             || contract.coordination.judge_participant_id.is_none()
         {
             return Err(invalid_params(
-                "competitive arena requires independent coordinator, concierge, and judge participants",
+                "competitive arena requires independent Room Concierge and judge participants",
             ));
         }
     }
@@ -6802,6 +6917,7 @@ fn is_native_method_authority(agent_role: &str, scope: &str) -> bool {
     matches!(
         (agent_role, scope),
         ("room_concierge", "coordinate")
+            | ("room_concierge", "delegate")
             | ("scrum_master", "coordinate")
             | ("coordinator", "coordinate")
             | ("judge", "judge")
@@ -8125,14 +8241,13 @@ mod tests {
                 shared_objective: "Resolve the BPM decision with independent positions".to_string(),
                 completion_criteria: vec!["Judge selects a supported position".to_string()],
                 participants: vec![
-                    participant("coordinator", "scrum_master", "end_to_end_integrity"),
                     participant("concierge", "room_concierge", "coordination"),
                     participant("bettor-growth", "bettor", "growth"),
                     participant("bettor-risk", "bettor", "risk"),
                     participant("judge", "judge", "business_fitness"),
                 ],
                 coordination: codex_app_server_protocol::MemythosArenaCompositionCoordination {
-                    coordinator_participant_id: Some("coordinator".to_string()),
+                    coordinator_participant_id: None,
                     concierge_participant_id: Some("concierge".to_string()),
                     judge_participant_id: Some("judge".to_string()),
                     decision_method: MemythosArenaDecisionMethod::BettingRound,
@@ -8250,6 +8365,8 @@ mod tests {
             delivery_policy: None,
             aggregate_id: None,
             aggregate_state: None,
+            checkpoint_state: None,
+            checkpoint_event_refs: Vec::new(),
             receiver_turn_id: Some(format!("turn-{id}")),
             receiver_response_event_ref: None,
             delivered_as_human_instruction: false,
@@ -8282,7 +8399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_completion_atomically_closes_every_parent_goal() {
+    async fn concierge_completion_atomically_closes_every_parent_goal() {
         let provisioning = Arc::new(FakeArenaParentProvisioningAdapter::default());
         let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
             AppServerRpcTransport::InProcess,
@@ -8318,6 +8435,8 @@ mod tests {
                 delivery_policy: None,
                 aggregate_id: None,
                 aggregate_state: None,
+                checkpoint_state: None,
+                checkpoint_event_refs: Vec::new(),
                 receiver_turn_id: Some(turn_id.to_string()),
                 receiver_response_event_ref: None,
                 delivered_as_human_instruction: phase == "arena_intake",
@@ -8330,7 +8449,7 @@ mod tests {
             let mut state = processor.state.lock().await;
             let bettor_growth = "test::bettor::bettor-growth";
             let bettor_risk = "test::bettor::bettor-risk";
-            for phase in ["proposal", "cross_read", "objection", "bet"] {
+            for phase in ["proposal", "peer_review_and_objection", "bet"] {
                 state.arena_message_deliveries.push(delivery(
                     &format!("{phase}-growth"),
                     phase,
@@ -8353,16 +8472,16 @@ mod tests {
             state.arena_message_deliveries.push(delivery(
                 "intake",
                 "arena_intake",
-                "test::scrum_master::coordinator",
-                "turn-coordinator",
+                "test::room_concierge::concierge",
+                "turn-concierge",
             ));
         }
 
         assert!(
             processor
                 .record_native_turn_completed(
-                    "test::scrum_master::coordinator",
-                    "turn-coordinator",
+                    "test::room_concierge::concierge",
+                    "turn-concierge",
                     "completed",
                     Some(1),
                     Some(100),
@@ -8372,7 +8491,7 @@ mod tests {
         );
 
         let goals = provisioning.goals.lock().await;
-        assert_eq!(goals.len(), 5);
+        assert_eq!(goals.len(), 4);
         assert!(
             goals
                 .values()
@@ -8556,13 +8675,12 @@ mod tests {
     }
 
     #[test]
-    fn downstream_delegate_authority_belongs_to_the_scrum_master_coordinator() {
+    fn downstream_delegate_is_native_room_concierge_method_authority() {
         let mut params = competitive_composition_params();
         params.upstream_authority_scope = vec!["recommend".to_string(), "delegate".to_string()];
         for participant in &mut params.contract.participants {
             participant.authority_scope = match participant.agent_role.as_str() {
-                "room_concierge" => vec!["coordinate".to_string()],
-                "scrum_master" => vec!["coordinate".to_string(), "delegate".to_string()],
+                "room_concierge" => vec!["coordinate".to_string(), "delegate".to_string()],
                 "judge" => vec!["judge".to_string()],
                 _ => vec!["recommend".to_string()],
             };
@@ -8572,7 +8690,31 @@ mod tests {
             .expect("the coordinator may promote an approved contract within upstream authority");
 
         params.upstream_authority_scope = vec!["recommend".to_string()];
-        assert!(validate_arena_composition_contract(&params).is_err());
+        validate_arena_composition_contract(&params).expect(
+            "native delegation coordinates the method and does not consume business authority",
+        );
+    }
+
+    #[test]
+    fn ordinary_competitive_arena_rejects_an_unnecessary_process_steward() {
+        let mut params = competitive_composition_params();
+        let mut steward = params.contract.participants[0].clone();
+        steward.participant_id = "process-steward".to_string();
+        steward.agent_role = "scrum_master".to_string();
+        steward.stance = "end_to_end_integrity".to_string();
+        steward.role_objective = "Coordinate the process".to_string();
+        params.contract.participants.push(steward);
+        params.contract.coordination.coordinator_participant_id =
+            Some("process-steward".to_string());
+
+        let error = validate_arena_composition_contract(&params)
+            .expect_err("ordinary checkpoint coordination belongs to the Room Concierge");
+        assert!(error.message.contains("exceptional-governance rationale"));
+
+        params.contract.rationale =
+            "Regulatory exception requires an independent process steward".to_string();
+        validate_arena_composition_contract(&params)
+            .expect("an explicit governance exception may add a process steward");
     }
 
     #[test]
@@ -8648,8 +8790,8 @@ mod tests {
 
         assert_eq!(response.planner_thread_id, "planner-thread");
         assert_eq!(response.planner_turn_id, "planner-turn");
-        assert_eq!(response.composition.leases.len(), 5);
-        assert_eq!(response.composition.planned_token_budget, Some(100_000));
+        assert_eq!(response.composition.leases.len(), 4);
+        assert_eq!(response.composition.planned_token_budget, Some(80_000));
         assert!(
             response
                 .composition
@@ -8667,7 +8809,7 @@ mod tests {
             1
         );
         assert!(response.composition.leases.iter().any(|lease| {
-            lease.participant_id == "coordinator" && lease.goal_status == ThreadGoalStatus::Active
+            lease.participant_id == "concierge" && lease.goal_status == ThreadGoalStatus::Active
         }));
         assert_eq!(
             response
@@ -8685,14 +8827,14 @@ mod tests {
         );
         assert_eq!(
             response.initial_delivery.thread_id,
-            "test::scrum_master::coordinator"
+            "test::room_concierge::concierge"
         );
         provisioning
             .goals
             .lock()
             .await
-            .get_mut("test::scrum_master::coordinator")
-            .expect("coordinator goal should exist")
+            .get_mut("test::room_concierge::concierge")
+            .expect("concierge goal should exist")
             .status = ThreadGoalStatus::Complete;
         processor
             .room_send_input(MemythosRoomSendInputParams {
@@ -8703,14 +8845,14 @@ mod tests {
                     .to_string(),
                 from_parent_thread_id: None,
                 via_concierge_thread_id: None,
-                to_parent_thread_id: "test::scrum_master::coordinator".to_string(),
+                to_parent_thread_id: "test::room_concierge::concierge".to_string(),
                 source_parent_key: "human:test".to_string(),
                 target_parent_key: response
                     .composition
                     .leases
                     .iter()
-                    .find(|lease| lease.participant_id == "coordinator")
-                    .expect("coordinator lease should exist")
+                    .find(|lease| lease.participant_id == "concierge")
+                    .expect("concierge lease should exist")
                     .parent_key
                     .clone(),
                 message_kind: "human_intake".to_string(),
@@ -8728,7 +8870,7 @@ mod tests {
         let transitions = provisioning.goal_transitions.lock().await;
         assert_eq!(transitions.len(), 2);
         assert!(transitions.iter().all(|transition| {
-            transition.0 == "test::scrum_master::coordinator"
+            transition.0 == "test::room_concierge::concierge"
                 && transition.1.as_deref().is_some_and(|objective| {
                     objective.contains("Complete only room assignment")
                         && objective.contains("call update_goal with status complete")
@@ -8759,27 +8901,26 @@ mod tests {
         assert!(prompt.contains("one autonomous native arena run"));
         assert!(prompt.contains("the client will only observe"));
         assert!(prompt.contains("peer_proposal"));
-        assert!(prompt.contains("peer_cross_read"));
-        assert!(prompt.contains("peer_objection"));
+        assert!(prompt.contains("peer_review_and_objection"));
         assert!(prompt.contains("peer_bet"));
         assert!(prompt.contains("judge_verdict"));
         assert!(prompt.contains("bettor-growth"));
         assert!(prompt.contains("bettor-risk"));
         assert!(prompt.contains("Do not ask the client to activate phases"));
-        assert!(prompt.contains("first materialized act"));
-        assert!(prompt.contains("memythos_room_send_message"));
-        assert!(prompt.contains("without the tool call the arena has not advanced"));
+        assert!(prompt.contains("Room Concierge and own technical coordination"));
+        assert!(prompt.contains("Deliver all bets to the judge through aggregate_then_trigger"));
+        assert!(prompt.contains("Never bet or judge as Room Concierge"));
     }
 
     #[test]
-    fn competitive_method_preserves_cross_read_and_objection_as_distinct_phases() {
+    fn competitive_method_consolidates_cross_read_and_objection_into_one_phase() {
         assert_eq!(
             phase_from_message_kind("peer_cross_read").as_deref(),
-            Some("cross_read")
+            Some("peer_review_and_objection")
         );
         assert_eq!(
             phase_from_message_kind("peer_objection").as_deref(),
-            Some("objection")
+            Some("peer_review_and_objection")
         );
     }
 
@@ -8855,7 +8996,7 @@ mod tests {
             .composition
             .applied_revision
             .expect("native revision should be recorded");
-        assert_eq!(revision.actions.len(), 5);
+        assert_eq!(revision.actions.len(), 4);
         assert!(revision.actions.iter().all(|action| {
             action.action == MemythosArenaCompositionRevisionActionKind::Keep
                 && action.thread_id.is_some()
@@ -8932,7 +9073,7 @@ mod tests {
         };
 
         assert_eq!(second.composition.composition_version, 2);
-        assert_eq!(second.composition.leases.len(), 6);
+        assert_eq!(second.composition.leases.len(), 5);
         assert_eq!(second.composition.planned_token_budget, None);
         assert!(second.composition.leases.iter().any(|lease| {
             lease.participant_id == "reality-observer"
@@ -8950,7 +9091,7 @@ mod tests {
                         .is_some_and(|thread_id| thread_id == &lease.thread_id)
                 })
                 .count()
-                == 5
+                == 4
         );
     }
 
@@ -8974,7 +9115,7 @@ mod tests {
             panic!("expected arena composition provision response");
         };
 
-        assert_eq!(response.leases.len(), 5);
+        assert_eq!(response.leases.len(), 4);
         assert_eq!(
             response
                 .leases
@@ -8983,8 +9124,8 @@ mod tests {
                 .count(),
             2
         );
-        assert_eq!(response.room.participants.len(), 5);
-        assert_eq!(response.planned_token_budget, Some(100_000));
+        assert_eq!(response.room.participants.len(), 4);
+        assert_eq!(response.planned_token_budget, Some(80_000));
         assert!(response.leases.iter().all(|lease| {
             lease.token_budget == Some(20_000)
                 && lease.goal_status == ThreadGoalStatus::Paused
@@ -8997,7 +9138,7 @@ mod tests {
         );
         assert!(response.applied_revision.is_none());
         let state = processor.state.lock().await;
-        assert_eq!(state.arena_parents.len(), 5);
+        assert_eq!(state.arena_parents.len(), 4);
         assert!(state.arenas.contains_key("arena-composition"));
         assert!(state.arena_compositions.contains_key("arena-composition"));
     }
@@ -9106,7 +9247,7 @@ mod tests {
             .await
             .expect_err("injected failure must reject the composition");
         assert!(error.message.contains("injected provisioning failure"));
-        assert_eq!(provisioning.rolled_back.lock().await.len(), 3);
+        assert_eq!(provisioning.rolled_back.lock().await.len(), 2);
         let state = processor.state.lock().await;
         assert!(state.arenas.is_empty());
         assert!(state.rooms.is_empty());
@@ -9705,6 +9846,8 @@ mod tests {
                     delivery_policy: None,
                     aggregate_id: None,
                     aggregate_state: None,
+                    checkpoint_state: None,
+                    checkpoint_event_refs: Vec::new(),
                     receiver_turn_id: Some("human-intake-turn".to_string()),
                     receiver_response_event_ref: None,
                     delivered_as_human_instruction: true,
