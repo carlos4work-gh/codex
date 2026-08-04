@@ -6687,12 +6687,29 @@ impl MemythosRequestProcessor {
     async fn close_arena_parent_goals(&self, candidate: ArenaClosureCandidate) {
         let mut original_goals = Vec::with_capacity(candidate.parent_thread_ids.len());
         for parent_thread_id in &candidate.parent_thread_ids {
-            let Ok(Some(goal)) = self
+            let goal = match self
                 .arena_parent_provisioning_adapter
                 .read_parent_goal(parent_thread_id)
                 .await
-            else {
-                return;
+            {
+                Ok(Some(goal)) => goal,
+                Ok(None) => {
+                    warn!(
+                        arena_id = candidate.arena_id,
+                        parent_thread_id,
+                        "cannot close native arena because a parent goal is missing"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    warn!(
+                        arena_id = candidate.arena_id,
+                        parent_thread_id,
+                        error = %error.message,
+                        "cannot close native arena because a parent goal could not be read"
+                    );
+                    return;
+                }
             };
             original_goals.push(goal);
         }
@@ -6700,7 +6717,7 @@ impl MemythosRequestProcessor {
         let mut transitioned: Vec<ThreadGoal> = Vec::new();
         for goal in &original_goals {
             if goal.status != ThreadGoalStatus::Complete {
-                if self
+                if let Err(error) = self
                     .arena_parent_provisioning_adapter
                     .transition_parent_goal(
                         &goal.thread_id,
@@ -6709,10 +6726,15 @@ impl MemythosRequestProcessor {
                         false,
                     )
                     .await
-                    .is_err()
                 {
+                    warn!(
+                        arena_id = candidate.arena_id,
+                        parent_thread_id = goal.thread_id,
+                        error = %error.message,
+                        "cannot close native arena because a parent goal transition failed"
+                    );
                     for transitioned_goal in transitioned.iter().rev() {
-                        let _ = self
+                        if let Err(rollback_error) = self
                             .arena_parent_provisioning_adapter
                             .transition_parent_goal(
                                 &transitioned_goal.thread_id,
@@ -6720,7 +6742,15 @@ impl MemythosRequestProcessor {
                                 transitioned_goal.status.clone(),
                                 false,
                             )
-                            .await;
+                            .await
+                        {
+                            warn!(
+                                arena_id = candidate.arena_id,
+                                parent_thread_id = transitioned_goal.thread_id,
+                                error = %rollback_error.message,
+                                "failed to roll back parent goal after native arena close failure"
+                            );
+                        }
                     }
                     return;
                 }
@@ -7498,8 +7528,15 @@ fn arena_closure_candidate(
         .filter(|delivery| delivery.arena_id == arena_id && delivery.round_id == active_round_id)
         .collect::<Vec<_>>();
     if deliveries.is_empty()
+        || deliveries
+            .iter()
+            .any(|delivery| delivery.rejection_reason.is_some())
         || deliveries.iter().any(|delivery| {
-            delivery.status != "receiver_turn_completed" || delivery.rejection_reason.is_some()
+            delivery
+                .receiver_turn_id
+                .as_deref()
+                .is_some_and(|turn_id| turn_id != "mailbox_queued")
+                && delivery.status != "receiver_turn_completed"
         })
     {
         return None;
@@ -7521,6 +7558,27 @@ fn arena_closure_candidate(
             || distinct_completed_targets("bet") < minimum_positions
             || distinct_completed_targets("judge") < 1
         {
+            return None;
+        }
+
+        let judge_id = composition
+            .contract
+            .coordination
+            .judge_participant_id
+            .as_ref()?;
+        let judge_thread_id = composition
+            .leases
+            .iter()
+            .find(|lease| &lease.participant_id == judge_id)?
+            .thread_id
+            .as_str();
+        let verdict_consumed_by_concierge = deliveries.iter().any(|delivery| {
+            delivery.sender_thread_id == judge_thread_id
+                && delivery.receiver_thread_id == coordinator_thread_id
+                && delivery.phase.as_deref() == Some("judge")
+                && delivery.status == "receiver_turn_completed"
+        });
+        if !verdict_consumed_by_concierge {
             return None;
         }
     }
@@ -9722,6 +9780,15 @@ mod tests {
                 "test::judge::judge",
                 "turn-judge",
             ));
+            let mut verdict_handoff = delivery(
+                "judge-verdict-handoff",
+                "judge",
+                "test::room_concierge::concierge",
+                "turn-concierge",
+            );
+            verdict_handoff.sender_thread_id = "test::judge::judge".to_string();
+            verdict_handoff.status = "receiver_turn_running".to_string();
+            state.arena_message_deliveries.push(verdict_handoff);
             state.arena_message_deliveries.push(delivery(
                 "intake",
                 "arena_intake",
@@ -10614,7 +10681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn arena_closes_when_judge_finishes_after_concierge() {
+    async fn arena_closes_after_concierge_consumes_the_judge_verdict() {
         let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
             AppServerRpcTransport::InProcess,
             Arc::new(RecordOnlyPeerParentDeliveryAdapter),
@@ -10704,6 +10771,13 @@ mod tests {
                 "judge",
                 false,
             ),
+            (
+                8,
+                judge_thread_id.as_str(),
+                concierge_thread_id.as_str(),
+                "judge",
+                false,
+            ),
         ] {
             state
                 .arena_message_deliveries
@@ -10733,12 +10807,93 @@ mod tests {
                 });
         }
 
-        let candidate =
-            arena_closure_candidate(&state, &response.room.arena_id, &judge_thread_id)
+        let candidate = arena_closure_candidate(&state, &response.room.arena_id, &judge_thread_id)
             .expect("the final judge completion should close a fully completed round");
         assert_eq!(candidate.arena_id, response.room.arena_id);
         assert!(candidate.parent_thread_ids.contains(&concierge_thread_id));
         assert!(candidate.parent_thread_ids.contains(&judge_thread_id));
+    }
+
+    #[tokio::test]
+    async fn arena_does_not_close_before_concierge_consumes_the_judge_verdict() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let response = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(response) = response else {
+            panic!("expected arena composition provision response");
+        };
+        let thread_for = |participant_id: &str| {
+            response
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == participant_id)
+                .expect("participant lease should exist")
+                .thread_id
+                .clone()
+        };
+        let concierge_thread_id = thread_for("concierge");
+        let growth_thread_id = thread_for("bettor-growth");
+        let risk_thread_id = thread_for("bettor-risk");
+        let judge_thread_id = thread_for("judge");
+
+        let mut state = processor.state.lock().await;
+        for (index, receiver, phase) in [
+            (0, concierge_thread_id.as_str(), "arena_intake"),
+            (1, growth_thread_id.as_str(), "proposal"),
+            (2, risk_thread_id.as_str(), "proposal"),
+            (3, growth_thread_id.as_str(), "peer_review_and_objection"),
+            (4, risk_thread_id.as_str(), "peer_review_and_objection"),
+            (5, growth_thread_id.as_str(), "bet"),
+            (6, risk_thread_id.as_str(), "bet"),
+            (7, judge_thread_id.as_str(), "judge"),
+        ] {
+            state
+                .arena_message_deliveries
+                .push(MemythosArenaMessageDelivery {
+                    delivery_id: format!("delivery-{index}"),
+                    message_id: format!("message-{index}"),
+                    human_summary: format!("Completed {phase} delivery"),
+                    status: "receiver_turn_completed".to_string(),
+                    sender_thread_id: if phase == "arena_intake" {
+                        "human".to_string()
+                    } else {
+                        concierge_thread_id.clone()
+                    },
+                    receiver_thread_id: receiver.to_string(),
+                    arena_id: response.room.arena_id.clone(),
+                    round_id: "round-1".to_string(),
+                    phase: Some(phase.to_string()),
+                    delivery_mechanism: "native_test".to_string(),
+                    delivery_policy: None,
+                    aggregate_id: None,
+                    aggregate_state: None,
+                    checkpoint_state: None,
+                    checkpoint_event_refs: Vec::new(),
+                    receiver_turn_id: Some(format!("turn-{index}")),
+                    receiver_response_event_ref: Some(format!("item-{index}")),
+                    delivered_as_human_instruction: phase == "arena_intake",
+                    memory_replay_required: false,
+                    event_refs: Vec::new(),
+                    rejection_reason: None,
+                    failure_reason: None,
+                });
+        }
+
+        assert!(
+            arena_closure_candidate(&state, &response.room.arena_id, &judge_thread_id).is_none(),
+            "a judge response is not a clean arena close until its verdict returns to the concierge"
+        );
     }
 
     #[tokio::test]
