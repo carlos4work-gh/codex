@@ -985,7 +985,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                                         )),
                                         input: vec![UserInput::Text {
                                             text: format!(
-                                                "Native contract validation rejected unresolvedRoleGap: {role_gap}. Review attempt {role_gap_repair_attempts} of 2 on this same planner thread. Re-read nativeRoleCatalog in the original planning context below. Generic roles are intentionally domain-independent: express business specialization through stance and roleObjective, not a new role. A competitive arena already has native coordination and decision authority through room_concierge and judge. The Room Concierge owns ordinary checkpoint coordination and downstream promotion; do not add a scrum_master or coordinator unless an explicit exceptional-governance rationale requires a process steward. Unless the catalog truly lacks one of those structural capabilities, return unresolvedRoleGap as null. Preserve method integrity and emit the complete corrected contract only.\n\nOriginal planning context:\n{context}"
+                                                "Native contract validation rejected unresolvedRoleGap: {role_gap}. Review attempt {role_gap_repair_attempts} of 2 on this same planner thread. Re-read nativeRoleCatalog in the original planning context below. Generic roles are intentionally domain-independent: express business specialization through stance and roleObjective, not a new role. A competitive arena already has native coordination and decision authority through room_concierge and judge. The Room Concierge owns ordinary checkpoint coordination and downstream promotion; do not add a process_steward unless an explicit exceptional-governance rationale requires one. Unless the catalog truly lacks one of those structural capabilities, return unresolvedRoleGap as null. Preserve method integrity and emit the complete corrected contract only.\n\nOriginal planning context:\n{context}"
                                             ),
                                             text_elements: vec![],
                                         }],
@@ -7610,8 +7610,8 @@ fn validate_room_message_route(
         "judge_verdict" => source_role == "judge" && target_role == "room_concierge",
         "notify_coordinator" => {
             (source_role == "room_concierge"
-                && matches!(target_role, "scrum_master" | "coordinator"))
-                || (matches!(source_role, "scrum_master" | "coordinator")
+                && matches!(target_role, "process_steward" | "coordinator"))
+                || (matches!(source_role, "process_steward" | "coordinator")
                     && target_role == "room_concierge")
         }
         // Legacy protocol aliases remain available for old non-agentic callers. Native parents
@@ -7973,10 +7973,10 @@ fn validate_arena_composition_contract(
         })?;
         if !matches!(
             coordinator.agent_role.as_str(),
-            "scrum_master" | "coordinator"
+            "process_steward" | "coordinator"
         ) {
             return Err(invalid_params(
-                "coordinator participant must use the scrum_master or coordinator role",
+                "coordinator participant must use the process_steward or coordinator role",
             ));
         }
         if contract.coordination.concierge_participant_id.as_deref() == Some(coordinator_id) {
@@ -8197,7 +8197,7 @@ fn validate_bounded_arena_cost_envelope(
         .filter(|participant| {
             matches!(
                 participant.agent_role.as_str(),
-                "room_concierge" | "scrum_master" | "coordinator"
+                "room_concierge" | "process_steward" | "coordinator"
             )
         })
         .map(|participant| participant.token_budget.unwrap_or_default())
@@ -8215,7 +8215,7 @@ fn is_native_method_authority(agent_role: &str, scope: &str) -> bool {
         (agent_role, scope),
         ("room_concierge", "coordinate")
             | ("room_concierge", "delegate")
-            | ("scrum_master", "coordinate")
+            | ("process_steward", "coordinate")
             | ("coordinator", "coordinate")
             | ("judge", "judge")
     )
@@ -9866,7 +9866,7 @@ mod tests {
             validate_room_message_route(
                 method,
                 "notify_coordinator",
-                "scrum_master",
+                "process_steward",
                 "room_concierge",
             )
             .is_ok()
@@ -10482,7 +10482,7 @@ mod tests {
         params.upstream_authority_scope = vec!["recommend".to_string()];
         for participant in &mut params.contract.participants {
             participant.authority_scope = match participant.agent_role.as_str() {
-                "room_concierge" | "scrum_master" => vec!["coordinate".to_string()],
+                "room_concierge" | "process_steward" => vec!["coordinate".to_string()],
                 "judge" => vec!["judge".to_string()],
                 _ => vec!["recommend".to_string()],
             };
@@ -10527,7 +10527,7 @@ mod tests {
         let mut params = competitive_composition_params();
         let mut steward = params.contract.participants[0].clone();
         steward.participant_id = "process-steward".to_string();
-        steward.agent_role = "scrum_master".to_string();
+        steward.agent_role = "process_steward".to_string();
         steward.stance = "end_to_end_integrity".to_string();
         steward.role_objective = "Coordinate the process".to_string();
         params.contract.participants.push(steward);

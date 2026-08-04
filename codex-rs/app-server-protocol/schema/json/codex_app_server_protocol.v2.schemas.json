@@ -10077,16 +10077,27 @@
       "type": "object"
     },
     "MemythosParentRole": {
-      "enum": [
-        "room_concierge",
-        "scrum_master",
-        "judge",
-        "bettor",
-        "coordinator",
-        "observer",
-        "peer"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "room_concierge",
+            "process_steward",
+            "judge",
+            "bettor",
+            "coordinator",
+            "observer",
+            "peer"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Legacy role retained for replaying older Memythos runs.",
+          "enum": [
+            "scrum_master"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "MemythosParentStance": {
       "enum": [

@@ -152,6 +152,8 @@ pub enum MemythosThreadConsolidationAuthorityMode {
 #[ts(rename_all = "snake_case", export_to = "v2/")]
 pub enum MemythosParentRole {
     RoomConcierge,
+    ProcessSteward,
+    /// Legacy role retained for replaying older Memythos runs.
     ScrumMaster,
     Judge,
     Bettor,
@@ -164,6 +166,7 @@ impl MemythosParentRole {
     pub fn from_wire(value: &str) -> Option<Self> {
         match value {
             "room_concierge" => Some(Self::RoomConcierge),
+            "process_steward" => Some(Self::ProcessSteward),
             "scrum_master" => Some(Self::ScrumMaster),
             "judge" => Some(Self::Judge),
             "bettor" => Some(Self::Bettor),
@@ -177,6 +180,7 @@ impl MemythosParentRole {
     pub fn as_wire(self) -> &'static str {
         match self {
             Self::RoomConcierge => "room_concierge",
+            Self::ProcessSteward => "process_steward",
             Self::ScrumMaster => "scrum_master",
             Self::Judge => "judge",
             Self::Bettor => "bettor",
