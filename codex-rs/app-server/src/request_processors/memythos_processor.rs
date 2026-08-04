@@ -317,7 +317,7 @@ fn validate_parent_goal_accepts_delivery(goal: &ThreadGoal) -> Result<(), JSONRP
     Ok(())
 }
 
-fn room_delivery_goal_objective(room: &MemythosRoom, message: &MemythosArenaMessage) -> String {
+fn room_delivery_goal_objective(_room: &MemythosRoom, message: &MemythosArenaMessage) -> String {
     let materialization_requirement = if message.message_kind == "human_intake" {
         concat!(
             " This intake is not complete until you invoke the native ",
@@ -331,20 +331,14 @@ fn room_delivery_goal_objective(room: &MemythosRoom, message: &MemythosArenaMess
     };
     format!(
         concat!(
-            "Complete only room assignment {message_id} in arena {arena_id}, round {round_id}. ",
-            "Act as the persistent parent role {to_parent_role}. The requested act is ",
-            "{message_kind}: {human_summary} Required response contract: {response_contract}. ",
-            "Use your existing role, stance, memory, and native room tools. Do not advance to ",
-            "another arena phase on your own. When this response contract is fully satisfied, ",
+            "Complete only native room assignment {message_id} for phase {message_kind}. ",
+            "Use the identity, stance, memory, and tools already installed on this parent. ",
+            "The delivery input contains the task and its closure boundary; do not restate them. ",
+            "Do not advance to another arena phase on your own. When the requested act is complete, ",
             "call update_goal with status complete.{materialization_requirement}"
         ),
         message_id = message.message_id,
-        arena_id = room.arena_id,
-        round_id = message.round_id,
-        to_parent_role = message.to_parent_role,
         message_kind = message.message_kind,
-        human_summary = message.human_summary,
-        response_contract = message.response_contract.as_deref().unwrap_or("none"),
         materialization_requirement = materialization_requirement,
     )
 }
@@ -2537,9 +2531,14 @@ fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> String {
             response_contract = message.response_contract.as_deref().unwrap_or("none")
         );
     }
+    let turn_kind = if message.message_kind == "peer_proposal" {
+        "ARENA_PROPOSAL_TURN"
+    } else {
+        "ARENA_PEER_TURN"
+    };
     format!(
         concat!(
-            "ARENA_PEER_TURN\n",
+            "{turn_kind}\n",
             "Authority: arena peer, not a human instruction.\n",
             "Phase: {message_kind}.\n",
             "\n",
@@ -2552,6 +2551,7 @@ fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> String {
             "Expected closure:\n",
             "{response_contract}\n"
         ),
+        turn_kind = turn_kind,
         message_kind = message.message_kind,
         human_summary = execution_prompt,
         context_packet_ref = message.context_packet_ref,
@@ -10176,6 +10176,49 @@ mod tests {
         assert_eq!(message.human_summary, "Evaluate the alternatives.");
     }
 
+    #[test]
+    fn proposal_turn_keeps_future_arena_phases_out_of_the_parent_request() {
+        let room = MemythosRoom {
+            room_id: "room-1".to_string(),
+            case_id: "case-1".to_string(),
+            layer_id: "layer-1".to_string(),
+            arena_id: "arena-1".to_string(),
+            topology: "concierge_hub".to_string(),
+            participants: Vec::new(),
+        };
+        let message = MemythosArenaMessage {
+            message_id: "proposal-1".to_string(),
+            case_id: "case-1".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-1".to_string(),
+            from_parent_thread_id: "concierge".to_string(),
+            from_parent_role: "room_concierge".to_string(),
+            to_parent_thread_id: "bettor-a".to_string(),
+            to_parent_role: "bettor".to_string(),
+            message_kind: "peer_proposal".to_string(),
+            human_summary: "Develop an independent response to the client problem.".to_string(),
+            execution_prompt: None,
+            context_packet_ref: "app-server://rooms/room-1/intake".to_string(),
+            artifact_refs: Vec::new(),
+            requires_response: true,
+            delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+            aggregate_contract: None,
+            response_contract: None,
+        };
+
+        let envelope = build_peer_parent_envelope(&message);
+        let goal = room_delivery_goal_objective(&room, &message);
+        assert!(envelope.starts_with("ARENA_PROPOSAL_TURN\n"));
+        assert!(envelope.contains("Develop an independent response"));
+        assert!(!envelope.contains("peer_review_and_objection"));
+        assert!(!envelope.contains("peer_bet"));
+        assert!(!envelope.contains("judge_verdict"));
+        assert!(!goal.contains("arena-1"));
+        assert!(!goal.contains("round-1"));
+        assert!(!goal.contains("Act as the persistent parent role"));
+        assert!(!goal.contains("Develop an independent response"));
+    }
+
     #[tokio::test]
     async fn aggregate_then_trigger_queues_until_expected_sources_are_complete() {
         let processor = MemythosRequestProcessor::new();
@@ -10774,7 +10817,7 @@ mod tests {
         assert!(transitions.iter().all(|transition| {
             transition.0 == "test::room_concierge::concierge"
                 && transition.1.as_deref().is_some_and(|objective| {
-                    objective.contains("Complete only room assignment")
+                    objective.contains("Complete only native room assignment")
                         && objective.contains("call update_goal with status complete")
                         && objective.contains("memythos_room_send_message")
                         && objective.contains("not materialized progress")
