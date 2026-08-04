@@ -677,7 +677,11 @@ impl NativeArenaCompositionPlanningAdapter {
                         "Elapsed time, inactivity, repeated wording, or a generic desire to validate again are not material novelty. ",
                         "Use retain_decision when the prior result remains comparable, partial_resume when only named participants or perspectives must work again, ",
                         "and full_round only when cited change evidence invalidates comparability across the prior competitive result. ",
-                        "Cite supplied refs, preserve closed decisions that are unaffected, and return only the requested structured assessment."
+                        "For retain_decision, return no affected participants, comparabilityInvalidated=false, and avoidedFullRound=true. ",
+                        "For partial_resume, return at least one active affected participant and at least one supplied candidateChangeRef as a citedChangeRef, ",
+                        "with comparabilityInvalidated=false and avoidedFullRound=true. For full_round, cite at least one supplied candidateChangeRef and one affected decision ref, ",
+                        "with comparabilityInvalidated=true and avoidedFullRound=false. If no supplied candidateChangeRef supports partial_resume or full_round, use retain_decision. ",
+                        "Never invent refs. Preserve closed decisions that are unaffected, and return only the requested structured assessment."
                     )
                     .to_string(),
                 ),
