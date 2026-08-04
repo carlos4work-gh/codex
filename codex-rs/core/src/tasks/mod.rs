@@ -489,10 +489,14 @@ impl Session {
                 *active_turn = Some(ActiveTurn::default());
             }
 
+            let input = self
+                .input_queue
+                .drain_mailbox_input_items_for_turn(Some(&sub_id))
+                .await;
             let turn_context = self.new_default_turn_with_sub_id(sub_id).await;
             self.maybe_emit_unknown_model_warning_for_turn(turn_context.as_ref())
                 .await;
-            self.start_task(turn_context, Vec::new(), RegularTask::new())
+            self.start_task(turn_context, input, RegularTask::new())
                 .await;
         })
     }

@@ -119,13 +119,34 @@ impl InputQueue {
             .and_then(|mail| mail.submission_id.clone())
     }
 
-    pub(crate) async fn drain_mailbox_input_items(&self) -> Vec<TurnInput> {
-        self.mailbox_pending_mails
-            .lock()
-            .await
-            .drain(..)
-            .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
-            .collect()
+    pub(crate) async fn drain_mailbox_input_items_for_turn(
+        &self,
+        active_submission_id: Option<&str>,
+    ) -> Vec<TurnInput> {
+        let mut pending = self.mailbox_pending_mails.lock().await;
+        let mut delivered = Vec::new();
+        let mut deferred = VecDeque::new();
+
+        while let Some(mail) = pending.pop_front() {
+            let belongs_to_active_turn = !mail.communication.trigger_turn
+                || mail.submission_id.is_none()
+                || mail.submission_id.as_deref() == active_submission_id;
+            if belongs_to_active_turn {
+                delivered.push(TurnInput::InterAgentCommunication(mail.communication));
+            } else {
+                deferred.push_back(mail);
+            }
+        }
+        *pending = deferred;
+        delivered
+    }
+
+    async fn has_mailbox_items_for_turn(&self, active_submission_id: Option<&str>) -> bool {
+        self.mailbox_pending_mails.lock().await.iter().any(|mail| {
+            !mail.communication.trigger_turn
+                || mail.submission_id.is_none()
+                || mail.submission_id.as_deref() == active_submission_id
+        })
     }
 
     pub(crate) async fn turn_state_for_sub_id(
@@ -225,7 +246,7 @@ impl InputQueue {
         &self,
         active_turn: &Mutex<Option<ActiveTurn>>,
     ) -> Vec<TurnInput> {
-        let (pending_input, accepts_mailbox_delivery) = {
+        let (pending_input, accepts_mailbox_delivery, active_submission_id) = {
             let mut active = active_turn.lock().await;
             match active.as_mut() {
                 Some(active_turn) => {
@@ -233,15 +254,22 @@ impl InputQueue {
                     (
                         turn_state.pending_input.items.split_off(0),
                         turn_state.accepts_mailbox_delivery_for_current_turn(),
+                        active_turn
+                            .task
+                            .as_ref()
+                            .map(|task| task.turn_context.sub_id.clone()),
                     )
                 }
-                None => (Vec::new(), true),
+                None => (Vec::new(), true, None),
             }
         };
         if !accepts_mailbox_delivery {
             return pending_input;
         }
-        let mailbox_items = self.drain_mailbox_input_items().await.into_iter();
+        let mailbox_items = self
+            .drain_mailbox_input_items_for_turn(active_submission_id.as_deref())
+            .await
+            .into_iter();
         if pending_input.is_empty() {
             mailbox_items.collect()
         } else {
@@ -256,7 +284,7 @@ impl InputQueue {
         reason = "active turn checks and turn state reads must remain atomic"
     )]
     pub(crate) async fn has_pending_input(&self, active_turn: &Mutex<Option<ActiveTurn>>) -> bool {
-        let (has_turn_pending_input, accepts_mailbox_delivery) = {
+        let (has_turn_pending_input, accepts_mailbox_delivery, active_submission_id) = {
             let active = active_turn.lock().await;
             match active.as_ref() {
                 Some(active_turn) => {
@@ -264,9 +292,13 @@ impl InputQueue {
                     (
                         !turn_state.pending_input.items.is_empty(),
                         turn_state.accepts_mailbox_delivery_for_current_turn(),
+                        active_turn
+                            .task
+                            .as_ref()
+                            .map(|task| task.turn_context.sub_id.clone()),
                     )
                 }
-                None => (false, true),
+                None => (false, true, None),
             }
         };
         if has_turn_pending_input {
@@ -275,7 +307,8 @@ impl InputQueue {
         if !accepts_mailbox_delivery {
             return false;
         }
-        self.has_pending_mailbox_items().await
+        self.has_mailbox_items_for_turn(active_submission_id.as_deref())
+            .await
     }
 }
 
@@ -411,11 +444,80 @@ mod tests {
             .await;
 
         assert_eq!(
-            input_queue.drain_mailbox_input_items().await,
+            input_queue.drain_mailbox_input_items_for_turn(None).await,
             vec![
                 TurnInput::InterAgentCommunication(mail_one),
                 TurnInput::InterAgentCommunication(mail_two)
             ]
+        );
+        assert!(!input_queue.has_pending_mailbox_items().await);
+    }
+
+    #[tokio::test]
+    async fn trigger_turn_mail_is_drained_only_by_its_submission_turn() {
+        let input_queue = InputQueue::new();
+        let first = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "first",
+            /*trigger_turn*/ true,
+        );
+        let second = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "second",
+            /*trigger_turn*/ true,
+        );
+
+        input_queue
+            .enqueue_mailbox_communication_with_submission_id(
+                Some("turn-one".to_string()),
+                first.clone(),
+            )
+            .await;
+        input_queue
+            .enqueue_mailbox_communication_with_submission_id(
+                Some("turn-two".to_string()),
+                second.clone(),
+            )
+            .await;
+
+        assert_eq!(
+            input_queue
+                .drain_mailbox_input_items_for_turn(Some("already-running-turn"))
+                .await,
+            Vec::new(),
+            "accepted trigger-turn requests must not be folded into unrelated active work",
+        );
+        assert_eq!(
+            input_queue.pending_trigger_turn_submission_id().await,
+            Some("turn-one".to_string())
+        );
+        assert_eq!(
+            input_queue
+                .drain_mailbox_input_items_for_turn(Some("turn-one"))
+                .await,
+            vec![TurnInput::InterAgentCommunication(first)]
+        );
+        assert_eq!(
+            input_queue.pending_trigger_turn_submission_id().await,
+            Some("turn-two".to_string())
+        );
+        assert!(
+            !input_queue
+                .has_mailbox_items_for_turn(Some("turn-one"))
+                .await
+        );
+        assert!(
+            input_queue
+                .has_mailbox_items_for_turn(Some("turn-two"))
+                .await
+        );
+        assert_eq!(
+            input_queue
+                .drain_mailbox_input_items_for_turn(Some("turn-two"))
+                .await,
+            vec![TurnInput::InterAgentCommunication(second)]
         );
         assert!(!input_queue.has_pending_mailbox_items().await);
     }
