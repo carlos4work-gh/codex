@@ -2066,6 +2066,61 @@ fn native_concierge_checkpoint_prompt(message_kind: &str, message: &str) -> Stri
     format!("{message}\n\nNative phase checkpoint: {next_action}")
 }
 
+fn native_judge_checkpoint_prompt(message: &str, eligible_winner_ids: &[String]) -> String {
+    format!(
+        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Name exactly one with `winner_participant_id: <exact-id>`, then rank the alternatives, preserve dissent, and state reopening signals. Report `closed_decisions_status: preserved` unless new evidence materially invalidates a declared closed decision; in that exceptional case report `closed_decisions_status: reopened` and identify the evidence and authority required. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
+        eligible_winner_ids.join(", ")
+    )
+}
+
+fn apply_native_checkpoint_execution_contract(
+    state: &MemythosRuntimeState,
+    message: &mut MemythosArenaMessage,
+) {
+    if !message.requires_response
+        || !matches!(
+            message.delivery_policy,
+            Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger)
+        )
+    {
+        return;
+    }
+
+    match message.to_parent_role.as_str() {
+        "room_concierge" => {
+            message.execution_prompt = Some(native_concierge_checkpoint_prompt(
+                &message.message_kind,
+                &message.human_summary,
+            ));
+            message.response_contract = Some(format!("{}_checkpoint", message.message_kind));
+        }
+        "judge" => {
+            let eligible_winner_ids = state
+                .arena_compositions
+                .get(&message.arena_id)
+                .map(|composition| {
+                    composition
+                        .contract
+                        .participants
+                        .iter()
+                        .filter(|participant| participant.agent_role == "bettor")
+                        .map(|participant| participant.participant_id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if eligible_winner_ids.is_empty() {
+                return;
+            }
+            message.execution_prompt = Some(native_judge_checkpoint_prompt(
+                &message.human_summary,
+                &eligible_winner_ids,
+            ));
+            message.response_contract = Some("judge_verdict".to_string());
+        }
+        _ => {}
+    }
+}
+
 fn prepare_native_aggregate_delivery(
     state: &mut MemythosRuntimeState,
     message: &mut MemythosArenaMessage,
@@ -3988,6 +4043,7 @@ impl MemythosRequestProcessor {
         }
 
         let aggregate_state = prepare_native_aggregate_delivery(&mut state, &mut message)?;
+        apply_native_checkpoint_execution_contract(&state, &mut message);
 
         let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
         let delivery_attempt = self
@@ -4963,11 +5019,7 @@ impl MemythosRequestProcessor {
         } else if (args.message_kind == "verdict_request" || activates_native_judge)
             && !eligible_winner_ids.is_empty()
         {
-            format!(
-                "{}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Name exactly one with `winner_participant_id: <exact-id>`, then rank the alternatives, preserve dissent, and state reopening signals. Report `closed_decisions_status: preserved` unless new evidence materially invalidates a declared closed decision; in that exceptional case report `closed_decisions_status: reopened` and identify the evidence and authority required. Send the completed verdict to the Room Concierge exactly once with messageKind `judge_verdict`; do not wait for a separate verdict request.",
-                args.message,
-                eligible_winner_ids.join(", ")
-            )
+            native_judge_checkpoint_prompt(&args.message, &eligible_winner_ids)
         } else {
             args.message.clone()
         };
@@ -7273,7 +7325,7 @@ fn native_turn_loopback_candidate(
                     .participants
                     .iter()
                     .find(|participant| participant.parent_role == "room_concierge")?;
-                (target, "judge_verdict", None, None, false)
+                (target, "judge_verdict", None, None, true)
             }
             _ => return None,
         };
@@ -7287,6 +7339,12 @@ fn native_turn_loopback_candidate(
     if duplicate {
         return None;
     }
+    let execution_prompt = (message_kind == "judge_verdict").then(|| {
+        format!(
+            "{}\n\nNative arena close checkpoint: consume the Judge verdict, preserve its exact winner participant id, ranking, dissent, reopening signals, and closed-decision status, then report the promoted result and end this turn. Do not re-judge the alternatives and do not dispatch another phase.",
+            response_text
+        )
+    });
     Some(MemythosArenaMessage {
         message_id: format!("turn-loopback-{turn_id}"),
         case_id: incoming.arena_id.clone(),
@@ -7298,13 +7356,14 @@ fn native_turn_loopback_candidate(
         to_parent_role: target.parent_role.clone(),
         message_kind: message_kind.to_string(),
         human_summary: response_text.to_string(),
-        execution_prompt: None,
+        execution_prompt,
         context_packet_ref: native_event_ref.to_string(),
         artifact_refs: Vec::new(),
         requires_response,
         delivery_policy,
         aggregate_contract,
-        response_contract: None,
+        response_contract: (message_kind == "judge_verdict")
+            .then(|| "arena_promoted_result".to_string()),
     })
 }
 
@@ -9936,6 +9995,181 @@ mod tests {
 
         let mut late = message("bet-a-late", "bettor-a");
         assert!(prepare_native_aggregate_delivery(&mut state, &mut late).is_err());
+    }
+
+    #[tokio::test]
+    async fn autonomous_bet_aggregate_applies_the_native_judge_contract() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let response = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(response) = response else {
+            panic!("expected arena composition provision response");
+        };
+        let thread_for = |participant_id: &str| {
+            response
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == participant_id)
+                .expect("participant lease should exist")
+                .thread_id
+                .clone()
+        };
+        let growth_thread_id = thread_for("bettor-growth");
+        let risk_thread_id = thread_for("bettor-risk");
+        let judge_thread_id = thread_for("judge");
+        let contract = MemythosArenaAggregateContract {
+            aggregate_id: "judge-bets-round-1".to_string(),
+            recipient_thread_id: judge_thread_id.clone(),
+            expected_source_thread_ids: vec![growth_thread_id.clone(), risk_thread_id.clone()],
+            quorum: 2,
+            phase_id: "bet".to_string(),
+            deadline_ref: None,
+            completion_criteria_ref: "criteria://all-bets".to_string(),
+            late_arrival_policy: MemythosArenaLateArrivalPolicy::Reject,
+        };
+        let message = |id: &str, source: &str| MemythosArenaMessage {
+            message_id: id.to_string(),
+            case_id: "case-1".to_string(),
+            arena_id: response.room.arena_id.clone(),
+            round_id: "round-1".to_string(),
+            from_parent_thread_id: source.to_string(),
+            from_parent_role: "bettor".to_string(),
+            to_parent_thread_id: judge_thread_id.clone(),
+            to_parent_role: "judge".to_string(),
+            message_kind: "peer_bet".to_string(),
+            human_summary: format!("Final bet from {source}"),
+            execution_prompt: None,
+            context_packet_ref: "context://round-1".to_string(),
+            artifact_refs: Vec::new(),
+            requires_response: true,
+            delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+            aggregate_contract: Some(contract.clone()),
+            response_contract: None,
+        };
+        let mut first = message("bet-growth", &growth_thread_id);
+        let mut second = message("bet-risk", &risk_thread_id);
+        let mut state = processor.state.lock().await;
+        prepare_native_aggregate_delivery(&mut state, &mut first).expect("first bet");
+        apply_native_checkpoint_execution_contract(&state, &mut first);
+        assert!(first.execution_prompt.is_none());
+
+        prepare_native_aggregate_delivery(&mut state, &mut second).expect("second bet");
+        apply_native_checkpoint_execution_contract(&state, &mut second);
+        let prompt = second
+            .execution_prompt
+            .as_deref()
+            .expect("sealed aggregate must carry the judge contract");
+        assert!(prompt.contains("winner_participant_id: <exact-id>"));
+        assert!(prompt.contains("bettor-growth"));
+        assert!(prompt.contains("bettor-risk"));
+        assert!(prompt.contains("returned automatically to the Room Concierge"));
+        assert_eq!(second.response_contract.as_deref(), Some("judge_verdict"));
+    }
+
+    #[tokio::test]
+    async fn completed_judge_turn_loopback_wakes_the_room_concierge() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let response = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(response) = response else {
+            panic!("expected arena composition provision response");
+        };
+        let thread_for = |participant_id: &str| {
+            response
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == participant_id)
+                .expect("participant lease should exist")
+                .thread_id
+                .clone()
+        };
+        let concierge_thread_id = thread_for("concierge");
+        let judge_thread_id = thread_for("judge");
+        let judge_turn_id = "judge-turn-1";
+        let mut state = processor.state.lock().await;
+        state
+            .arena_message_deliveries
+            .push(MemythosArenaMessageDelivery {
+                delivery_id: "judge-wake".to_string(),
+                message_id: "sealed-bets".to_string(),
+                human_summary: "All bets sealed.".to_string(),
+                status: "receiver_turn_completed".to_string(),
+                sender_thread_id: thread_for("bettor-risk"),
+                receiver_thread_id: judge_thread_id.clone(),
+                arena_id: response.room.arena_id.clone(),
+                round_id: "round-1".to_string(),
+                phase: Some("judge".to_string()),
+                delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                aggregate_id: Some("judge-bets-round-1".to_string()),
+                aggregate_state: Some(MemythosArenaAggregateState::Consumed),
+                checkpoint_state: Some(MemythosArenaCheckpointState::NextPhaseDispatched),
+                checkpoint_event_refs: Vec::new(),
+                receiver_turn_id: Some(judge_turn_id.to_string()),
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: Vec::new(),
+                rejection_reason: None,
+                failure_reason: None,
+            });
+        state.native_parent_turn_responses.insert(
+            native_token_usage_key(&judge_thread_id, judge_turn_id),
+            ParentTurnResponse {
+                status: Some(TurnStatus::Completed),
+                request_item_ref: None,
+                request_text: None,
+                item_ref: Some("app-server://judge/verdict".to_string()),
+                text: Some(
+                    "winner_participant_id: bettor-risk\nclosed_decisions_status: preserved"
+                        .to_string(),
+                ),
+            },
+        );
+
+        let loopback = native_turn_loopback_candidate(
+            &state,
+            &judge_thread_id,
+            judge_turn_id,
+            "app-server://judge/completed",
+        )
+        .expect("judge completion must loop back through the native room");
+        assert_eq!(loopback.to_parent_thread_id, concierge_thread_id);
+        assert_eq!(loopback.message_kind, "judge_verdict");
+        assert!(loopback.requires_response);
+        assert_eq!(
+            loopback.response_contract.as_deref(),
+            Some("arena_promoted_result")
+        );
+        assert!(
+            loopback
+                .execution_prompt
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Do not re-judge")
+        );
     }
 
     #[tokio::test]
