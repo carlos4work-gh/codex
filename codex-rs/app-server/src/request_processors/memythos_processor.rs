@@ -1999,6 +1999,63 @@ fn canonical_native_judge_bet_contract(
     })
 }
 
+fn canonical_native_concierge_phase_contract(
+    room: &MemythosRoom,
+    round_id: &str,
+    concierge: &MemythosRoomParticipant,
+    message_kind: &str,
+) -> Result<MemythosArenaAggregateContract, JSONRPCErrorError> {
+    let phase_id = match message_kind {
+        "peer_proposal" => "proposal",
+        "peer_review_and_objection" => "peer_review_and_objection",
+        _ => {
+            return Err(invalid_params(format!(
+                "message kind {message_kind} is not a native concierge phase checkpoint"
+            )));
+        }
+    };
+    let mut expected_source_thread_ids = room
+        .participants
+        .iter()
+        .filter(|participant| participant.parent_role == "bettor")
+        .map(|participant| participant.thread_id.clone())
+        .collect::<Vec<_>>();
+    expected_source_thread_ids.sort();
+    expected_source_thread_ids.dedup();
+    if expected_source_thread_ids.len() < 2 {
+        return Err(invalid_params(format!(
+            "competitive room {} requires at least two bettor parents before {phase_id} aggregation",
+            room.room_id
+        )));
+    }
+    Ok(MemythosArenaAggregateContract {
+        aggregate_id: format!("{}::{round_id}::concierge_{phase_id}", room.room_id),
+        recipient_thread_id: concierge.thread_id.clone(),
+        quorum: expected_source_thread_ids.len() as u32,
+        expected_source_thread_ids,
+        phase_id: phase_id.to_string(),
+        deadline_ref: None,
+        completion_criteria_ref: format!(
+            "app-server://rooms/{}/rounds/{round_id}/checkpoints/all-{phase_id}",
+            room.room_id
+        ),
+        late_arrival_policy: MemythosArenaLateArrivalPolicy::Reject,
+    })
+}
+
+fn native_concierge_checkpoint_prompt(message_kind: &str, message: &str) -> String {
+    let next_action = match message_kind {
+        "peer_proposal" => {
+            "All expected independent proposals are now sealed in your native mailbox. Read the complete mailbox checkpoint, then dispatch exactly one peer_review_and_objection assignment to every bettor and end this turn. Do not wait synchronously for their responses."
+        }
+        "peer_review_and_objection" => {
+            "All expected cross-reads and objections are now sealed in your native mailbox. Read the complete mailbox checkpoint, then dispatch exactly one peer_bet assignment to every bettor and end this turn. Each bettor must send its revised commitment directly to the Judge. Do not wait synchronously for their responses."
+        }
+        _ => "Read the complete sealed mailbox checkpoint and continue the native arena method.",
+    };
+    format!("{message}\n\nNative phase checkpoint: {next_action}")
+}
+
 fn prepare_native_aggregate_delivery(
     state: &mut MemythosRuntimeState,
     message: &mut MemythosArenaMessage,
@@ -4831,6 +4888,24 @@ impl MemythosRequestProcessor {
             && decision_method
                 .as_ref()
                 .is_some_and(|method| is_competitive_method(*method));
+        let activates_native_concierge_checkpoint = source.parent_role == "bettor"
+            && target.parent_role == "room_concierge"
+            && matches!(
+                args.message_kind.as_str(),
+                "peer_proposal" | "peer_review_and_objection"
+            )
+            && decision_method
+                .as_ref()
+                .is_some_and(|method| is_competitive_method(*method));
+        let asynchronous_phase_dispatch = source.parent_role == "room_concierge"
+            && target.parent_role == "bettor"
+            && matches!(
+                args.message_kind.as_str(),
+                "peer_proposal" | "peer_review_and_objection" | "peer_bet"
+            )
+            && decision_method
+                .as_ref()
+                .is_some_and(|method| is_competitive_method(*method));
         if activates_native_judge {
             args.delivery_policy = Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger);
             args.aggregate_contract = Some(canonical_native_judge_bet_contract(
@@ -4839,6 +4914,15 @@ impl MemythosRequestProcessor {
                 &target,
             )?);
             args.response_contract = "judge_verdict".to_string();
+        } else if activates_native_concierge_checkpoint {
+            args.delivery_policy = Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger);
+            args.aggregate_contract = Some(canonical_native_concierge_phase_contract(
+                &room,
+                &inherited_round_id,
+                &target,
+                &args.message_kind,
+            )?);
+            args.response_contract = format!("{}_checkpoint", args.message_kind);
         }
 
         let message_id = self.next_id("mem_room_tool_message", &self.next_delivery_id);
@@ -4859,7 +4943,9 @@ impl MemythosRequestProcessor {
             "memythos_source".to_string(),
             serde_json::Value::String("native_room_tool".to_string()),
         );
-        let execution_prompt = if (args.message_kind == "verdict_request" || activates_native_judge)
+        let execution_prompt = if activates_native_concierge_checkpoint {
+            native_concierge_checkpoint_prompt(&args.message_kind, &args.message)
+        } else if (args.message_kind == "verdict_request" || activates_native_judge)
             && !eligible_winner_ids.is_empty()
         {
             format!(
@@ -4929,6 +5015,20 @@ impl MemythosRequestProcessor {
         let target_turn_id = delivery_response.delivery.turn_id.clone().ok_or_else(|| {
             invalid_params("room delivery did not start a target turn".to_string())
         })?;
+        if asynchronous_phase_dispatch {
+            return Ok(MemythosRoomToolResponse {
+                room_id: room.room_id,
+                target_parent_key: target.parent_key.clone(),
+                target_thread_id: target.thread_id,
+                target_turn_id,
+                response_item_ref: delivery_response.delivery.delivery_ref,
+                response_text: format!(
+                    "Phase assignment dispatched asynchronously to {}. Its response will return through the native aggregate checkpoint; end this concierge turn without waiting.",
+                    target.parent_key
+                ),
+                event_refs: delivery_response.delivery.event_refs,
+            });
+        }
         let (response_item_ref, response_text, event_refs) = self
             .await_parent_turn_response(&target.thread_id, &target_turn_id)
             .await?;
@@ -7026,7 +7126,7 @@ fn build_arena_intake_prompt(
         })
         .unwrap_or_else(|| "not required by the selected method".to_string());
     format!(
-        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own technical coordination, checkpoints, dependencies, exceptions, and communication for the complete method; the client will only observe. You are not a proposer and you do not decide the business outcome. For a competitive method, obtain independent proposals from every proposal-bearing bettor with peer_proposal. After all proposals complete, require every bettor in one consolidated peer_review_and_objection turn to read competing evidence, explain what they incorporate, state a concrete objection, and identify residual uncertainty. Then obtain one explicit revised commitment from every bettor with peer_bet. Tell each bettor to send its peer_bet directly to the judge. App-server owns the canonical aggregate_then_trigger mailbox: it collects every expected bettor, seals the checkpoint, activates the judge exactly once, and the judge returns judge_verdict through the room. Do not issue a separate verdict_request after bets are dispatched; wait for the native judge_verdict delivery. The verdict must identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never bet or judge as Room Concierge. Do not return a final answer before the method and completion criteria are satisfied. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own technical coordination, checkpoints, dependencies, exceptions, and communication for the complete method; the client will only observe. You are not a proposer and you do not decide the business outcome. For a competitive method, dispatch exactly one independent peer_proposal assignment to every proposal-bearing bettor, then end this turn immediately. Do not wait synchronously for any bettor. App-server aggregates all bettor responses in the native mailbox and wakes you exactly once when the proposal checkpoint is sealed. That checkpoint turn instructs you to dispatch exactly one consolidated peer_review_and_objection assignment to every bettor and end again. App-server then wakes you once with the sealed review checkpoint; dispatch exactly one peer_bet assignment to every bettor and end again. Tell each bettor to send its peer_bet directly to the judge. App-server owns every canonical aggregate_then_trigger mailbox: it collects every expected bettor, seals each checkpoint, activates the next parent exactly once, and the judge returns judge_verdict through the room. Do not issue a separate verdict_request after bets are dispatched. The verdict must identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never bet or judge as Room Concierge. Do not keep a concierge turn alive while peers work. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
         params.request_origin,
         params.case_brief,
         params.layer_objective,
@@ -9894,7 +9994,11 @@ mod tests {
         assert!(prompt.contains("bettor-risk"));
         assert!(prompt.contains("Do not ask the client to activate phases"));
         assert!(prompt.contains("Room Concierge and own technical coordination"));
-        assert!(prompt.contains("App-server owns the canonical aggregate_then_trigger mailbox"));
+        assert!(prompt.contains("App-server owns every canonical aggregate_then_trigger mailbox"));
+        assert!(prompt.contains("end this turn immediately"));
+        assert!(prompt.contains("Do not wait synchronously for any bettor"));
+        assert!(prompt.contains("wakes you exactly once when the proposal checkpoint is sealed"));
+        assert!(prompt.contains("Do not keep a concierge turn alive while peers work"));
         assert!(prompt.contains("Do not issue a separate verdict_request"));
         assert!(prompt.contains("Never bet or judge as Room Concierge"));
     }
@@ -11506,6 +11610,141 @@ mod tests {
             deliveries[1].aggregate_state,
             Some(MemythosArenaAggregateState::RecipientTriggered)
         );
+    }
+
+    #[tokio::test]
+    async fn competitive_concierge_dispatches_without_waiting_and_resumes_once_per_checkpoint() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let provision = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(provision) = provision else {
+            panic!("expected arena composition provision response");
+        };
+        let participant = |participant_id: &str| {
+            provision
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == participant_id)
+                .expect("participant lease should exist")
+        };
+        let concierge = participant("concierge");
+        let growth = participant("bettor-growth");
+        let risk = participant("bettor-risk");
+
+        let dispatch = processor
+            .room_tool_send_message(
+                &concierge.thread_id,
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: Some(growth.parent_key.clone()),
+                    message: "Produce an independent proposal, then return it to the Concierge with peer_proposal.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "peer_proposal".to_string(),
+                    response_contract: "Return one bounded proposal.".to_string(),
+                    delivery_policy: None,
+                    aggregate_contract: None,
+                },
+            )
+            .await
+            .expect("concierge dispatch should not wait for bettor completion");
+        assert!(dispatch.target_turn_id.starts_with("turn_for_"));
+        assert!(dispatch.response_text.contains("dispatched asynchronously"));
+
+        let first = processor
+            .room_tool_send_message(
+                &growth.thread_id,
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: None,
+                    message: "Growth proposal.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "peer_proposal".to_string(),
+                    response_contract: String::new(),
+                    delivery_policy: None,
+                    aggregate_contract: None,
+                },
+            )
+            .await
+            .expect("first proposal should enter the aggregate mailbox");
+        let second = processor
+            .room_tool_send_message(
+                &risk.thread_id,
+                MemythosRoomToolSendMessageArgs {
+                    target_parent_key: None,
+                    message: "Risk proposal.".to_string(),
+                    authority: "peer".to_string(),
+                    message_kind: "peer_proposal".to_string(),
+                    response_contract: String::new(),
+                    delivery_policy: None,
+                    aggregate_contract: None,
+                },
+            )
+            .await
+            .expect("last proposal should seal and trigger the concierge checkpoint");
+
+        assert_eq!(first.target_turn_id, "mailbox_queued");
+        assert!(second.target_turn_id.starts_with("turn_for_"));
+        let state = processor.state.lock().await;
+        let proposal_deliveries = state
+            .arena_message_deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery
+                    .aggregate_id
+                    .as_deref()
+                    .is_some_and(|aggregate_id| aggregate_id.ends_with("::concierge_proposal"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(proposal_deliveries.len(), 2);
+        assert_eq!(
+            proposal_deliveries
+                .iter()
+                .filter(|delivery| delivery.receiver_turn_id.is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            proposal_deliveries[1].checkpoint_state,
+            Some(MemythosArenaCheckpointState::ConciergeSynthesis)
+        );
+    }
+
+    #[test]
+    fn canonical_concierge_checkpoint_requires_every_bettor() {
+        let room = MemythosRoom {
+            room_id: "room-001".to_string(),
+            case_id: "case-001".to_string(),
+            layer_id: "bpm_e2e".to_string(),
+            arena_id: "arena-001".to_string(),
+            topology: "cross_parent_room".to_string(),
+            participants: room_register_params_with_concierge().participants,
+        };
+        let concierge = room
+            .participants
+            .iter()
+            .find(|participant| participant.parent_role == "room_concierge")
+            .expect("concierge participant");
+        let contract = canonical_native_concierge_phase_contract(
+            &room,
+            "round-1",
+            concierge,
+            "peer_review_and_objection",
+        )
+        .expect("canonical review checkpoint");
+
+        assert_eq!(contract.quorum, 2);
+        assert_eq!(contract.expected_source_thread_ids.len(), 2);
+        assert_eq!(contract.recipient_thread_id, "thread_concierge");
+        assert_eq!(contract.phase_id, "peer_review_and_objection");
     }
 
     #[tokio::test]
