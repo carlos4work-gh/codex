@@ -579,6 +579,13 @@ impl NativeArenaCompositionPlanningAdapter {
         planner_thread_id: &str,
         planner_turn_id: &str,
     ) -> Result<Option<codex_app_server_protocol::Turn>, JSONRPCErrorError> {
+        if let Some(turn) = self
+            .thread_processor
+            .terminal_turn_snapshot(planner_thread_id, planner_turn_id)
+            .await?
+        {
+            return Ok(Some(turn));
+        }
         let response = self
             .thread_processor
             .thread_turns_list(ThreadTurnsListParams {

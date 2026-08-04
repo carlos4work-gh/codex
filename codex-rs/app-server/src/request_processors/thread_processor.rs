@@ -865,6 +865,19 @@ impl ThreadRequestProcessor {
         Ok(thread_state.lock().await.last_terminal_turn_id.as_deref() == Some(turn_id))
     }
 
+    /// Returns the terminal turn exactly as projected by the live OOTB listener.
+    /// This preserves transient native failures that are intentionally absent from rollout replay.
+    pub(crate) async fn terminal_turn_snapshot(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<codex_app_server_protocol::Turn>, JSONRPCErrorError> {
+        let thread_id = ThreadId::from_string(thread_id)
+            .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+        Ok(thread_state.lock().await.terminal_turn_snapshot(turn_id))
+    }
+
     pub(crate) async fn thread_turns_items_list(
         &self,
         _params: ThreadTurnsItemsListParams,
