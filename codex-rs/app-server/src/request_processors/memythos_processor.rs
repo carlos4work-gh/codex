@@ -7184,7 +7184,7 @@ fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
 fn arena_closure_candidate(
     state: &MemythosRuntimeState,
     arena_id: &str,
-    completed_thread_id: &str,
+    completion_trigger_thread_id: &str,
 ) -> Option<ArenaClosureCandidate> {
     let arena = state.arenas.get(arena_id)?;
     if arena.lifecycle_state == MemythosArenaLifecycleState::ClosedCleanly {
@@ -7202,10 +7202,13 @@ fn arena_closure_candidate(
         .find(|lease| &lease.participant_id == coordinator_id)?
         .thread_id
         .as_str();
-    if coordinator_thread_id != completed_thread_id {
+    if !composition
+        .leases
+        .iter()
+        .any(|lease| lease.thread_id == completion_trigger_thread_id)
+    {
         return None;
     }
-
     let active_round_id = state
         .arena_message_deliveries
         .iter()
@@ -10334,6 +10337,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn arena_closes_when_judge_finishes_after_concierge() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let response = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(response) = response else {
+            panic!("expected arena composition provision response");
+        };
+        let thread_for = |participant_id: &str| {
+            response
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == participant_id)
+                .expect("participant lease should exist")
+                .thread_id
+                .clone()
+        };
+        let concierge_thread_id = thread_for("concierge");
+        let growth_thread_id = thread_for("bettor-growth");
+        let risk_thread_id = thread_for("bettor-risk");
+        let judge_thread_id = thread_for("judge");
+
+        let mut state = processor.state.lock().await;
+        for (index, sender, receiver, phase, human_instruction) in [
+            (
+                0,
+                "human",
+                concierge_thread_id.as_str(),
+                "arena_intake",
+                true,
+            ),
+            (
+                1,
+                concierge_thread_id.as_str(),
+                growth_thread_id.as_str(),
+                "proposal",
+                false,
+            ),
+            (
+                2,
+                concierge_thread_id.as_str(),
+                risk_thread_id.as_str(),
+                "proposal",
+                false,
+            ),
+            (
+                3,
+                concierge_thread_id.as_str(),
+                growth_thread_id.as_str(),
+                "peer_review_and_objection",
+                false,
+            ),
+            (
+                4,
+                concierge_thread_id.as_str(),
+                risk_thread_id.as_str(),
+                "peer_review_and_objection",
+                false,
+            ),
+            (
+                5,
+                concierge_thread_id.as_str(),
+                growth_thread_id.as_str(),
+                "bet",
+                false,
+            ),
+            (
+                6,
+                concierge_thread_id.as_str(),
+                risk_thread_id.as_str(),
+                "bet",
+                false,
+            ),
+            (
+                7,
+                concierge_thread_id.as_str(),
+                judge_thread_id.as_str(),
+                "judge",
+                false,
+            ),
+        ] {
+            state
+                .arena_message_deliveries
+                .push(MemythosArenaMessageDelivery {
+                    delivery_id: format!("delivery-{index}"),
+                    message_id: format!("message-{index}"),
+                    human_summary: format!("Completed {phase} delivery"),
+                    status: "receiver_turn_completed".to_string(),
+                    sender_thread_id: sender.to_string(),
+                    receiver_thread_id: receiver.to_string(),
+                    arena_id: response.room.arena_id.clone(),
+                    round_id: "round-1".to_string(),
+                    phase: Some(phase.to_string()),
+                    delivery_mechanism: "native_test".to_string(),
+                    delivery_policy: None,
+                    aggregate_id: None,
+                    aggregate_state: None,
+                    checkpoint_state: None,
+                    checkpoint_event_refs: Vec::new(),
+                    receiver_turn_id: Some(format!("turn-{index}")),
+                    receiver_response_event_ref: Some(format!("item-{index}")),
+                    delivered_as_human_instruction: human_instruction,
+                    memory_replay_required: false,
+                    event_refs: Vec::new(),
+                    rejection_reason: None,
+                    failure_reason: None,
+                });
+        }
+
+        let candidate =
+            arena_closure_candidate(&state, &response.room.arena_id, &judge_thread_id)
+            .expect("the final judge completion should close a fully completed round");
+        assert_eq!(candidate.arena_id, response.room.arena_id);
+        assert!(candidate.parent_thread_ids.contains(&concierge_thread_id));
+        assert!(candidate.parent_thread_ids.contains(&judge_thread_id));
+    }
+
+    #[tokio::test]
     async fn arena_composition_requires_explicit_revision_and_reuses_only_kept_identity() {
         let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
             AppServerRpcTransport::InProcess,
@@ -12455,30 +12586,32 @@ mod tests {
             .unwrap();
         {
             let mut state = processor.state.lock().await;
-            state.arena_message_deliveries.push(MemythosArenaMessageDelivery {
-                delivery_id: "aggregate-component-delivery".to_string(),
-                message_id: "aggregate-component-message".to_string(),
-                human_summary: "One sealed aggregate component.".to_string(),
-                status: "receiver_turn_completed".to_string(),
-                sender_thread_id: "thread_growth".to_string(),
-                receiver_thread_id: "thread_risk".to_string(),
-                arena_id: "arena-001".to_string(),
-                round_id: "round-001".to_string(),
-                phase: Some("bet".to_string()),
-                delivery_mechanism: "native_aggregate_mailbox".to_string(),
-                delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
-                aggregate_id: Some("aggregate-001".to_string()),
-                aggregate_state: Some(MemythosArenaAggregateState::Consumed),
-                checkpoint_state: Some(MemythosArenaCheckpointState::NextPhaseDispatched),
-                checkpoint_event_refs: Vec::new(),
-                receiver_turn_id: None,
-                receiver_response_event_ref: None,
-                delivered_as_human_instruction: false,
-                memory_replay_required: false,
-                event_refs: Vec::new(),
-                rejection_reason: None,
-                failure_reason: None,
-            });
+            state
+                .arena_message_deliveries
+                .push(MemythosArenaMessageDelivery {
+                    delivery_id: "aggregate-component-delivery".to_string(),
+                    message_id: "aggregate-component-message".to_string(),
+                    human_summary: "One sealed aggregate component.".to_string(),
+                    status: "receiver_turn_completed".to_string(),
+                    sender_thread_id: "thread_growth".to_string(),
+                    receiver_thread_id: "thread_risk".to_string(),
+                    arena_id: "arena-001".to_string(),
+                    round_id: "round-001".to_string(),
+                    phase: Some("bet".to_string()),
+                    delivery_mechanism: "native_aggregate_mailbox".to_string(),
+                    delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                    aggregate_id: Some("aggregate-001".to_string()),
+                    aggregate_state: Some(MemythosArenaAggregateState::Consumed),
+                    checkpoint_state: Some(MemythosArenaCheckpointState::NextPhaseDispatched),
+                    checkpoint_event_refs: Vec::new(),
+                    receiver_turn_id: None,
+                    receiver_response_event_ref: None,
+                    delivered_as_human_instruction: false,
+                    memory_replay_required: false,
+                    event_refs: Vec::new(),
+                    rejection_reason: None,
+                    failure_reason: None,
+                });
         }
 
         let response = processor
