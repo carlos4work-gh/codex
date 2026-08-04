@@ -5968,6 +5968,7 @@ impl MemythosRequestProcessor {
                         })
                 });
                 if delivery.status == "receiver_turn_completed"
+                    && delivery.receiver_turn_id.is_some()
                     && native_response.and_then(|response| response.text.as_ref()).is_none()
                 {
                     blockers.push(format!(
@@ -12437,6 +12438,67 @@ mod tests {
                 .iter()
                 .any(|blocker| { blocker.contains("has no readable native AgentMessage") })
         );
+    }
+
+    #[tokio::test]
+    async fn room_activity_list_does_not_require_agent_message_for_consumed_aggregate_component() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+        );
+        processor
+            .room_register(room_register_params())
+            .await
+            .unwrap();
+        {
+            let mut state = processor.state.lock().await;
+            state.arena_message_deliveries.push(MemythosArenaMessageDelivery {
+                delivery_id: "aggregate-component-delivery".to_string(),
+                message_id: "aggregate-component-message".to_string(),
+                human_summary: "One sealed aggregate component.".to_string(),
+                status: "receiver_turn_completed".to_string(),
+                sender_thread_id: "thread_growth".to_string(),
+                receiver_thread_id: "thread_risk".to_string(),
+                arena_id: "arena-001".to_string(),
+                round_id: "round-001".to_string(),
+                phase: Some("bet".to_string()),
+                delivery_mechanism: "native_aggregate_mailbox".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                aggregate_id: Some("aggregate-001".to_string()),
+                aggregate_state: Some(MemythosArenaAggregateState::Consumed),
+                checkpoint_state: Some(MemythosArenaCheckpointState::NextPhaseDispatched),
+                checkpoint_event_refs: Vec::new(),
+                receiver_turn_id: None,
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: Vec::new(),
+                rejection_reason: None,
+                failure_reason: None,
+            });
+        }
+
+        let response = processor
+            .room_activity_list(MemythosRoomActivityListParams {
+                room_id: "room-001".to_string(),
+                round_id: None,
+                phase: None,
+                since_cursor: None,
+                after_cursor: None,
+                limit: Some(25),
+                include_debug_refs: false,
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosRoomActivityList(response) = response else {
+            panic!("expected MemythosRoomActivityList response");
+        };
+
+        assert!(response.blockers.is_empty());
+        assert!(response.turns.is_empty());
     }
 
     #[tokio::test]
