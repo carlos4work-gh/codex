@@ -34,7 +34,12 @@ pub(crate) struct TurnInputQueue {
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
-    mailbox_pending_mails: Mutex<VecDeque<InterAgentCommunication>>,
+    mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+}
+
+struct PendingMailboxCommunication {
+    submission_id: Option<String>,
+    communication: InterAgentCommunication,
 }
 
 impl InputQueue {
@@ -69,14 +74,27 @@ impl InputQueue {
         (activity_rx, pending_activity)
     }
 
+    #[cfg(test)]
     pub(crate) async fn enqueue_mailbox_communication(
         &self,
+        communication: InterAgentCommunication,
+    ) {
+        self.enqueue_mailbox_communication_with_submission_id(None, communication)
+            .await;
+    }
+
+    pub(crate) async fn enqueue_mailbox_communication_with_submission_id(
+        &self,
+        submission_id: Option<String>,
         communication: InterAgentCommunication,
     ) {
         self.mailbox_pending_mails
             .lock()
             .await
-            .push_back(communication);
+            .push_back(PendingMailboxCommunication {
+                submission_id,
+                communication,
+            });
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
     }
 
@@ -89,7 +107,16 @@ impl InputQueue {
             .lock()
             .await
             .iter()
-            .any(|mail| mail.trigger_turn)
+            .any(|mail| mail.communication.trigger_turn)
+    }
+
+    pub(crate) async fn pending_trigger_turn_submission_id(&self) -> Option<String> {
+        self.mailbox_pending_mails
+            .lock()
+            .await
+            .iter()
+            .find(|mail| mail.communication.trigger_turn)
+            .and_then(|mail| mail.submission_id.clone())
     }
 
     pub(crate) async fn drain_mailbox_input_items(&self) -> Vec<TurnInput> {
@@ -97,7 +124,7 @@ impl InputQueue {
             .lock()
             .await
             .drain(..)
-            .map(TurnInput::InterAgentCommunication)
+            .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
             .collect()
     }
 

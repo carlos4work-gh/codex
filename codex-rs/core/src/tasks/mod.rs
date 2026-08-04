@@ -458,8 +458,12 @@ impl Session {
     /// explicit-sub-id variant.
     pub(crate) fn maybe_start_turn_for_pending_work(self: &Arc<Self>) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            self.maybe_start_turn_for_pending_work_with_sub_id(uuid::Uuid::new_v4().to_string())
-                .await;
+            let sub_id = self
+                .input_queue
+                .pending_trigger_turn_submission_id()
+                .await
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            self.maybe_start_turn_for_pending_work_with_sub_id(sub_id).await;
         })
     }
 

@@ -9174,9 +9174,10 @@ async fn task_finish_starts_pending_trigger_turn_mailbox_work_before_thread_idle
         .await
         .expect("first task should start");
 
+    let deferred_turn_id = "mail-arrived-during-active-turn".to_string();
     handlers::inter_agent_communication(
         &sess,
-        "mail-arrived-during-active-turn".to_string(),
+        deferred_turn_id.clone(),
         InterAgentCommunication::new(
             AgentPath::try_from("/root/worker").expect("worker path should parse"),
             AgentPath::root(),
@@ -9203,6 +9204,7 @@ async fn task_finish_starts_pending_trigger_turn_mailbox_work_before_thread_idle
     .await
     .expect("pending trigger-turn mail should start a new turn after normal completion");
 
+    assert_eq!(deferred_turn_id, second_turn_id);
     assert_ne!(first_turn_id, second_turn_id);
     assert!(!sess.input_queue.has_trigger_turn_mailbox_items().await);
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
