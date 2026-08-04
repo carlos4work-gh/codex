@@ -1958,8 +1958,10 @@ fn native_mailbox_wake_policy(
         return Ok(false);
     }
     match target_status {
-        AgentStatus::Running => Ok(false),
-        AgentStatus::PendingInit | AgentStatus::Interrupted | AgentStatus::Completed(_) => Ok(true),
+        AgentStatus::Running
+        | AgentStatus::PendingInit
+        | AgentStatus::Interrupted
+        | AgentStatus::Completed(_) => Ok(true),
         AgentStatus::Errored(reason) => Err(format!("target parent is errored: {reason}")),
         AgentStatus::Shutdown => Err("target parent is shutdown".to_string()),
         AgentStatus::NotFound => Err("target parent is not found".to_string()),
@@ -8924,10 +8926,10 @@ mod tests {
     }
 
     #[test]
-    fn native_mailbox_wake_policy_never_starts_a_concurrent_parent_turn() {
+    fn native_mailbox_wake_policy_delegates_active_turn_serialization_to_core() {
         assert_eq!(
             native_mailbox_wake_policy(&AgentStatus::Running, true),
-            Ok(false)
+            Ok(true)
         );
         assert_eq!(
             native_mailbox_wake_policy(&AgentStatus::Completed(None), true),
