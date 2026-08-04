@@ -163,6 +163,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::path::PathBuf;
 use tokio::sync::Mutex;
+use tracing::warn;
 
 use crate::error_code::invalid_params;
 use crate::outgoing_message::ConnectionId;
@@ -6442,8 +6443,9 @@ impl MemythosRequestProcessor {
         completed_at: Option<i64>,
         duration_ms: Option<i64>,
         failure_reason: Option<String>,
+        last_agent_message: Option<String>,
     ) -> bool {
-        let (matched_delivery, closure_candidate) = {
+        let (matched_delivery, closure_candidate, loopback) = {
             let mut state = self.state.lock().await;
             let Some((layer_id, arena_id)) = find_attachment_context(&state, thread_id) else {
                 return false;
@@ -6451,6 +6453,26 @@ impl MemythosRequestProcessor {
 
             let native_event_ref =
                 format!("app-server://threads/{thread_id}/turns/{turn_id}/completed");
+            if let Some(text) = last_agent_message
+                .as_ref()
+                .filter(|text| !text.trim().is_empty())
+            {
+                let response = state
+                    .native_parent_turn_responses
+                    .entry(native_token_usage_key(thread_id, turn_id))
+                    .or_insert_with(|| ParentTurnResponse {
+                        status: None,
+                        request_item_ref: None,
+                        request_text: None,
+                        item_ref: None,
+                        text: None,
+                    });
+                response.status = Some(TurnStatus::Completed);
+                response.text = Some(text.clone());
+                response
+                    .item_ref
+                    .get_or_insert_with(|| native_event_ref.clone());
+            }
             let mut matched_delivery = false;
             let mut completed_aggregates = Vec::new();
             for delivery in state
@@ -6588,8 +6610,28 @@ impl MemythosRequestProcessor {
             } else {
                 None
             };
-            (matched_delivery, closure_candidate)
+            let loopback = if status == "completed" {
+                native_turn_loopback_candidate(&state, thread_id, turn_id, &native_event_ref)
+            } else {
+                None
+            };
+            (matched_delivery, closure_candidate, loopback)
         };
+
+        if let Some(loopback_message) = loopback
+            && let Err(error) = self
+                .arena_message_send(MemythosArenaMessageSendParams {
+                    message: loopback_message,
+                })
+                .await
+        {
+            warn!(
+                thread_id,
+                turn_id,
+                error = %error.message,
+                "failed to deliver native arena turn completion loopback"
+            );
+        }
 
         if let Some(candidate) = closure_candidate {
             self.close_arena_parent_goals(candidate).await;
@@ -7091,6 +7133,135 @@ fn phase_from_message_kind(message_kind: &str) -> Option<String> {
         "notify_coordinator" => Some("learning".to_string()),
         _ => None,
     }
+}
+
+fn native_turn_loopback_candidate(
+    state: &MemythosRuntimeState,
+    thread_id: &str,
+    turn_id: &str,
+    native_event_ref: &str,
+) -> Option<MemythosArenaMessage> {
+    let incoming = state
+        .arena_message_deliveries
+        .iter()
+        .rev()
+        .find(|delivery| {
+            delivery.receiver_thread_id == thread_id
+                && delivery.receiver_turn_id.as_deref() == Some(turn_id)
+        })?;
+    let phase = incoming.phase.as_deref()?;
+    let response_text = state
+        .native_parent_turn_responses
+        .get(&native_token_usage_key(thread_id, turn_id))?
+        .text
+        .as_ref()?
+        .trim();
+    if response_text.is_empty() {
+        return None;
+    }
+    let room = state
+        .rooms
+        .values()
+        .find(|room| room.arena_id == incoming.arena_id)?;
+    let source = room
+        .participants
+        .iter()
+        .find(|participant| participant.thread_id == thread_id)?;
+    let (target, message_kind, delivery_policy, aggregate_contract, requires_response) =
+        match (source.parent_role.as_str(), phase) {
+            ("bettor", "proposal") => {
+                let target = room
+                    .participants
+                    .iter()
+                    .find(|participant| participant.parent_role == "room_concierge")?;
+                let contract = canonical_native_concierge_phase_contract(
+                    room,
+                    &incoming.round_id,
+                    target,
+                    "peer_proposal",
+                )
+                .ok()?;
+                (
+                    target,
+                    "peer_proposal",
+                    Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                    Some(contract),
+                    true,
+                )
+            }
+            ("bettor", "peer_review_and_objection") => {
+                let target = room
+                    .participants
+                    .iter()
+                    .find(|participant| participant.parent_role == "room_concierge")?;
+                let contract = canonical_native_concierge_phase_contract(
+                    room,
+                    &incoming.round_id,
+                    target,
+                    "peer_review_and_objection",
+                )
+                .ok()?;
+                (
+                    target,
+                    "peer_review_and_objection",
+                    Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                    Some(contract),
+                    true,
+                )
+            }
+            ("bettor", "bet") => {
+                let target = room
+                    .participants
+                    .iter()
+                    .find(|participant| participant.parent_role == "judge")?;
+                let contract =
+                    canonical_native_judge_bet_contract(room, &incoming.round_id, target).ok()?;
+                (
+                    target,
+                    "peer_bet",
+                    Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                    Some(contract),
+                    true,
+                )
+            }
+            ("judge", "judge") => {
+                let target = room
+                    .participants
+                    .iter()
+                    .find(|participant| participant.parent_role == "room_concierge")?;
+                (target, "judge_verdict", None, None, false)
+            }
+            _ => return None,
+        };
+    let duplicate = state.arena_message_deliveries.iter().any(|delivery| {
+        delivery.arena_id == incoming.arena_id
+            && delivery.round_id == incoming.round_id
+            && delivery.sender_thread_id == thread_id
+            && delivery.receiver_thread_id == target.thread_id
+            && delivery.phase.as_deref() == phase_from_message_kind(message_kind).as_deref()
+    });
+    if duplicate {
+        return None;
+    }
+    Some(MemythosArenaMessage {
+        message_id: format!("turn-loopback-{turn_id}"),
+        case_id: incoming.arena_id.clone(),
+        arena_id: incoming.arena_id.clone(),
+        round_id: incoming.round_id.clone(),
+        from_parent_thread_id: thread_id.to_string(),
+        from_parent_role: source.parent_role.clone(),
+        to_parent_thread_id: target.thread_id.clone(),
+        to_parent_role: target.parent_role.clone(),
+        message_kind: message_kind.to_string(),
+        human_summary: response_text.to_string(),
+        execution_prompt: None,
+        context_packet_ref: native_event_ref.to_string(),
+        artifact_refs: Vec::new(),
+        requires_response,
+        delivery_policy,
+        aggregate_contract,
+        response_contract: None,
+    })
 }
 
 fn build_arena_intake_prompt(
@@ -9567,6 +9738,7 @@ mod tests {
                     Some(1),
                     Some(100),
                     None,
+                    None,
                 )
                 .await
         );
@@ -11441,6 +11613,7 @@ mod tests {
                     Some(1_000),
                     Some(250),
                     None,
+                    None,
                 )
                 .await
         );
@@ -11517,6 +11690,7 @@ mod tests {
                     Some(1_000),
                     Some(250),
                     None,
+                    None,
                 )
                 .await
         );
@@ -11528,6 +11702,142 @@ mod tests {
             response
                 .response_text
                 .contains("Cierre conversacional OOTB de thread_risk")
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_bettor_turns_loop_back_into_the_native_proposal_checkpoint() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(FakeParentTurnResponseAdapter),
+        );
+        register_room_with_native_arena(
+            &processor,
+            room_register_params_with_concierge_and_judge(),
+        )
+        .await;
+        let arena_id = processor
+            .state
+            .lock()
+            .await
+            .rooms
+            .get("room-001")
+            .expect("registered room")
+            .arena_id
+            .clone();
+
+        let assignment = |id: &str, receiver: &str| MemythosArenaMessageDelivery {
+            delivery_id: format!("delivery-{id}"),
+            message_id: format!("message-{id}"),
+            human_summary: "Produce one independent proposal.".to_string(),
+            status: "receiver_turn_running".to_string(),
+            sender_thread_id: "thread_concierge".to_string(),
+            receiver_thread_id: receiver.to_string(),
+            arena_id: arena_id.clone(),
+            round_id: "round-1".to_string(),
+            phase: Some("proposal".to_string()),
+            delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+            delivery_policy: None,
+            aggregate_id: None,
+            aggregate_state: None,
+            checkpoint_state: None,
+            checkpoint_event_refs: Vec::new(),
+            receiver_turn_id: Some(format!("turn-{id}")),
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: Vec::new(),
+            rejection_reason: None,
+            failure_reason: None,
+        };
+        {
+            let mut state = processor.state.lock().await;
+            state
+                .arena_message_deliveries
+                .push(assignment("growth", "thread_growth"));
+            state
+                .arena_message_deliveries
+                .push(assignment("risk", "thread_risk"));
+        }
+
+        assert!(
+            processor
+                .record_native_turn_completed(
+                    "thread_growth",
+                    "turn-growth",
+                    "completed",
+                    Some(1_000),
+                    Some(250),
+                    None,
+                    Some("Growth proposal with bounded upside.".to_string()),
+                )
+                .await
+        );
+        {
+            let state = processor.state.lock().await;
+            let response = state
+                .arena_message_deliveries
+                .iter()
+                .find(|delivery| {
+                    delivery.sender_thread_id == "thread_growth"
+                        && delivery.receiver_thread_id == "thread_concierge"
+                })
+                .expect("the completed bettor turn should enter the proposal mailbox");
+            assert_eq!(
+                response.aggregate_state,
+                Some(MemythosArenaAggregateState::Collecting)
+            );
+        }
+
+        assert!(
+            processor
+                .record_native_turn_completed(
+                    "thread_risk",
+                    "turn-risk",
+                    "completed",
+                    Some(1_100),
+                    Some(275),
+                    None,
+                    Some("Risk proposal with explicit downside limits.".to_string()),
+                )
+                .await
+        );
+        let delivery_count = {
+            let state = processor.state.lock().await;
+            let responses = state
+                .arena_message_deliveries
+                .iter()
+                .filter(|delivery| {
+                    delivery.sender_thread_id == "thread_growth"
+                        || delivery.sender_thread_id == "thread_risk"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(responses.len(), 2);
+            assert_eq!(
+                responses[1].aggregate_state,
+                Some(MemythosArenaAggregateState::RecipientTriggered)
+            );
+            state.arena_message_deliveries.len()
+        };
+
+        processor
+            .record_native_turn_completed(
+                "thread_risk",
+                "turn-risk",
+                "completed",
+                Some(1_100),
+                Some(275),
+                None,
+                Some("Risk proposal with explicit downside limits.".to_string()),
+            )
+            .await;
+        assert_eq!(
+            processor.state.lock().await.arena_message_deliveries.len(),
+            delivery_count,
+            "turn completion replay must not duplicate the native room response"
         );
     }
 
@@ -12533,6 +12843,7 @@ mod tests {
                     Some(1_000),
                     Some(250),
                     None,
+                    None,
                 )
                 .await
         );
@@ -12778,6 +13089,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await
         );
@@ -12927,6 +13239,7 @@ mod tests {
                     "thread_risk",
                     turn_id,
                     "completed",
+                    None,
                     None,
                     None,
                     None,
@@ -13808,6 +14121,7 @@ mod tests {
                 Some(1234),
                 Some(2500),
                 None,
+                None,
             )
             .await;
         assert!(matched);
@@ -13918,6 +14232,7 @@ mod tests {
                 Some(5678),
                 Some(667),
                 Some(failure_reason.to_string()),
+                None,
             )
             .await;
         assert!(matched);
@@ -14172,6 +14487,7 @@ mod tests {
                 "completed",
                 Some(1234),
                 Some(2500),
+                None,
                 None,
             )
             .await;

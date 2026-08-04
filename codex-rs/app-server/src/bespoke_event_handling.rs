@@ -1586,6 +1586,7 @@ async fn handle_turn_complete(
     let native_error_message = error.as_ref().map(|error| error.message.clone());
     let completed_at = turn_complete_event.completed_at;
     let duration_ms = turn_complete_event.duration_ms;
+    let last_agent_message = turn_complete_event.last_agent_message.clone();
     let native_thread_id = conversation_id.to_string();
     let native_turn_id = event_turn_id.clone();
 
@@ -1612,6 +1613,7 @@ async fn handle_turn_complete(
                 completed_at,
                 duration_ms,
                 native_error_message,
+                last_agent_message,
             )
             .await;
     }
