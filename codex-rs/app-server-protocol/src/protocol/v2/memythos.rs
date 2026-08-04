@@ -729,6 +729,37 @@ pub struct MemythosArenaCompositionProvisionResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaCompositionSnapshot {
+    pub contract: MemythosArenaCompositionContract,
+    pub composition_version: u32,
+    pub lifecycle_state: MemythosArenaCompositionLifecycleState,
+    #[ts(optional = nullable)]
+    pub applied_revision: Option<MemythosArenaCompositionRevision>,
+    pub room: MemythosRoom,
+    pub leases: Vec<MemythosArenaCompositionLease>,
+    #[ts(optional = nullable, type = "number | null")]
+    pub planned_token_budget: Option<i64>,
+    pub event_refs: Vec<String>,
+}
+
+impl From<MemythosArenaCompositionProvisionResponse> for MemythosArenaCompositionSnapshot {
+    fn from(response: MemythosArenaCompositionProvisionResponse) -> Self {
+        Self {
+            contract: response.contract,
+            composition_version: response.composition_version,
+            lifecycle_state: response.lifecycle_state,
+            applied_revision: response.applied_revision,
+            room: response.room,
+            leases: response.leases,
+            planned_token_budget: response.planned_token_budget,
+            event_refs: response.event_refs,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export_to = "v2/")]
 pub enum MemythosArenaResumeDisposition {
@@ -806,7 +837,7 @@ pub struct MemythosArenaRequestResponse {
     pub request_id: String,
     pub planner_thread_id: String,
     pub planner_turn_id: String,
-    pub composition: MemythosArenaCompositionProvisionResponse,
+    pub composition: MemythosArenaCompositionSnapshot,
     pub resume_assessment: MemythosArenaResumeAssessment,
     #[ts(optional = nullable)]
     pub initial_delivery: Option<MemythosRoomSendInputDelivery>,

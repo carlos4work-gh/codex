@@ -3325,7 +3325,8 @@ impl MemythosRequestProcessor {
                 planner_turn_id: resume.planner_turn_id.clone(),
                 composition: previous
                     .clone()
-                    .expect("retain decision requires an active composition"),
+                    .expect("retain decision requires an active composition")
+                    .into(),
                 resume_assessment: resume.assessment.clone(),
                 initial_delivery: None,
             }
@@ -3456,7 +3457,7 @@ impl MemythosRequestProcessor {
             request_id,
             planner_thread_id: planned.planner_thread_id,
             planner_turn_id: planned.planner_turn_id,
-            composition,
+            composition: composition.into(),
             resume_assessment: resume.map_or(
                 MemythosArenaResumeAssessment {
                     disposition: MemythosArenaResumeDisposition::InitialRound,
