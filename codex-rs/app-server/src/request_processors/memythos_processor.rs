@@ -4927,6 +4927,10 @@ impl MemythosRequestProcessor {
                 &args.message_kind,
             )?);
             args.response_contract = format!("{}_checkpoint", args.message_kind);
+        } else if asynchronous_phase_dispatch {
+            // The concierge returns asynchronously, but each assigned parent must
+            // still receive trigger-turn work. Core serializes it if a turn is active.
+            args.delivery_policy = Some(MemythosArenaDeliveryPolicy::Immediate);
         }
 
         let message_id = self.next_id("mem_room_tool_message", &self.next_delivery_id);
@@ -7330,7 +7334,7 @@ fn build_arena_intake_prompt(
         })
         .unwrap_or_else(|| "not required by the selected method".to_string());
     format!(
-        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own technical coordination, checkpoints, dependencies, exceptions, and communication for the complete method; the client will only observe. You are not a proposer and you do not decide the business outcome. For a competitive method, dispatch exactly one independent peer_proposal assignment to every proposal-bearing bettor, then end this turn immediately. Do not wait synchronously for any bettor. App-server aggregates all bettor responses in the native mailbox and wakes you exactly once when the proposal checkpoint is sealed. That checkpoint turn instructs you to dispatch exactly one consolidated peer_review_and_objection assignment to every bettor and end again. App-server then wakes you once with the sealed review checkpoint; dispatch exactly one peer_bet assignment to every bettor and end again. Tell each bettor to send its peer_bet directly to the judge. App-server owns every canonical aggregate_then_trigger mailbox: it collects every expected bettor, seals each checkpoint, activates the next parent exactly once, and the judge returns judge_verdict through the room. Do not issue a separate verdict_request after bets are dispatched. The verdict must identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never bet or judge as Room Concierge. Do not keep a concierge turn alive while peers work. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own technical coordination, checkpoints, dependencies, exceptions, and communication for the complete method; the client will only observe. You are not a proposer and you do not decide the business outcome. For a competitive method, dispatch exactly one independent peer_proposal assignment to every proposal-bearing bettor, then end this turn immediately. Do not wait synchronously for any bettor. Asynchronous dispatch means your concierge turn ends after assignment; it does not mean queue_only delivery. Omit deliveryPolicy for direct phase assignments and let app-server start or schedule each target parent turn. App-server aggregates all bettor responses in the native mailbox and wakes you exactly once when the proposal checkpoint is sealed. That checkpoint turn instructs you to dispatch exactly one consolidated peer_review_and_objection assignment to every bettor and end again. App-server then wakes you once with the sealed review checkpoint; dispatch exactly one peer_bet assignment to every bettor and end again. Tell each bettor to send its peer_bet directly to the judge. App-server owns every canonical aggregate_then_trigger mailbox: it collects every expected bettor, seals each checkpoint, activates the next parent exactly once, and the judge returns judge_verdict through the room. Do not issue a separate verdict_request after bets are dispatched. The verdict must identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never bet or judge as Room Concierge. Do not keep a concierge turn alive while peers work. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
         params.request_origin,
         params.case_brief,
         params.layer_objective,
@@ -12119,7 +12123,7 @@ mod tests {
                     authority: "peer".to_string(),
                     message_kind: "peer_proposal".to_string(),
                     response_contract: "Return one bounded proposal.".to_string(),
-                    delivery_policy: None,
+                    delivery_policy: Some(MemythosArenaDeliveryPolicy::QueueOnly),
                     aggregate_contract: None,
                 },
             )
@@ -12127,6 +12131,19 @@ mod tests {
             .expect("concierge dispatch should not wait for bettor completion");
         assert!(dispatch.target_turn_id.starts_with("turn_for_"));
         assert!(dispatch.response_text.contains("dispatched asynchronously"));
+        let state = processor.state.lock().await;
+        let dispatch_delivery = state
+            .arena_message_deliveries
+            .iter()
+            .find(|delivery| {
+                delivery.receiver_turn_id.as_deref() == Some(dispatch.target_turn_id.as_str())
+            })
+            .expect("competitive concierge dispatch delivery");
+        assert_eq!(
+            dispatch_delivery.delivery_policy,
+            Some(MemythosArenaDeliveryPolicy::Immediate)
+        );
+        drop(state);
 
         let first = processor
             .room_tool_send_message(

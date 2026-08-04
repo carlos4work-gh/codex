@@ -115,7 +115,7 @@ pub(crate) fn with_memythos_room_tools(
                         "deliveryPolicy": {
                             "type": "string",
                             "enum": ["immediate", "queue_only", "aggregate_then_trigger"],
-                            "description": "Native mailbox policy. Use aggregate_then_trigger when the target must see a complete group before it runs."
+                            "description": "Optional native mailbox policy. Omit it for normal room assignments; app-server canonicalizes competitive phase transitions. queue_only never requests a target response."
                         },
                         "aggregateContract": {
                             "type": "object",
