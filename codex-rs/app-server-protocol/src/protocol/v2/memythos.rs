@@ -708,6 +708,12 @@ pub struct MemythosArenaCompositionLease {
     pub lease_source: String,
     pub memory_scope: String,
     pub goal_ref: String,
+    /// Versioned native identity installed once in root developer instructions.
+    pub identity_context_version: String,
+    /// SHA-256 of the exact stable identity context installed on the parent thread.
+    pub identity_context_sha256: String,
+    /// Native evidence reference for the one-time parent identity bootstrap.
+    pub identity_bootstrap_ref: String,
     pub effort_intent: String,
     pub reasoning_effort: ReasoningEffort,
     #[ts(optional = nullable, type = "number | null")]

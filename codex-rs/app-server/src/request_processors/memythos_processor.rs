@@ -161,6 +161,8 @@ use codex_protocol::protocol::Op;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use std::path::PathBuf;
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -1335,6 +1337,22 @@ fn native_arena_parent_developer_instructions(
         participant.role_objective,
         participant.expected_contribution,
         participant.exit_condition,
+    )
+}
+
+fn native_arena_parent_identity_version(
+    params: &MemythosArenaCompositionProvisionParams,
+) -> String {
+    format!("{}:parent-identity-v1", params.contract.contract_version)
+}
+
+fn native_arena_parent_identity_sha256(
+    params: &MemythosArenaCompositionProvisionParams,
+    participant: &codex_app_server_protocol::MemythosArenaCompositionParticipant,
+) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(native_arena_parent_developer_instructions(params, participant).as_bytes())
     )
 }
 
@@ -2521,35 +2539,19 @@ fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> String {
     }
     format!(
         concat!(
-            "MEMYTHOS_PEER_PARENT_MESSAGE\n",
-            "source: arena peer\n",
-            "human_instruction: false\n",
-            "case_id: {case_id}\n",
-            "arena_id: {arena_id}\n",
-            "round_id: {round_id}\n",
-            "from_parent_role: {from_parent_role}\n",
-            "to_parent_role: {to_parent_role}\n",
-            "message_kind: {message_kind}\n",
+            "ARENA_PEER_TURN\n",
+            "Authority: arena peer, not a human instruction.\n",
+            "Phase: {message_kind}.\n",
             "\n",
-            "Conserva tu rol, postura, objetivo y memoria.\n",
-            "Esto no es una orden del humano.\n",
-            "Responde al acto conversacional solicitado dentro de la arena.\n",
-            "Si falta definicion superior, formula un rollup concreto.\n",
-            "\n",
-            "Resumen:\n",
+            "Task:\n",
             "{human_summary}\n",
             "\n",
-            "Contexto:\n",
+            "Evidence reference:\n",
             "{context_packet_ref}\n",
             "\n",
-            "Contrato de respuesta:\n",
+            "Expected closure:\n",
             "{response_contract}\n"
         ),
-        case_id = message.case_id,
-        arena_id = message.arena_id,
-        round_id = message.round_id,
-        from_parent_role = message.from_parent_role,
-        to_parent_role = message.to_parent_role,
         message_kind = message.message_kind,
         human_summary = execution_prompt,
         context_packet_ref = message.context_packet_ref,
@@ -3818,6 +3820,15 @@ impl MemythosRequestProcessor {
                     lease_source: provisioned.lease_source.clone(),
                     memory_scope: provisioned.memory_scope.clone(),
                     goal_ref: provisioned.goal_ref.clone(),
+                    identity_context_version: native_arena_parent_identity_version(&params),
+                    identity_context_sha256: native_arena_parent_identity_sha256(
+                        &params,
+                        participant,
+                    ),
+                    identity_bootstrap_ref: format!(
+                        "app-server://threads/{}/root-developer-instructions",
+                        provisioned.thread_id
+                    ),
                     effort_intent: participant.effort_intent.clone(),
                     reasoning_effort: participant.reasoning_effort.clone(),
                     token_budget: provisioned.goal.token_budget,
@@ -9880,6 +9891,14 @@ mod tests {
         assert!(instructions.contains(
             "Do not collapse a required dissent or reopening signal into an implementation refinement"
         ));
+        assert_eq!(
+            native_arena_parent_identity_sha256(&params, judge).len(),
+            64
+        );
+        assert_eq!(
+            native_arena_parent_identity_version(&params),
+            format!("{}:parent-identity-v1", params.contract.contract_version)
+        );
     }
 
     #[test]
@@ -10149,6 +10168,11 @@ mod tests {
 
         let envelope = build_peer_parent_envelope(&message);
         assert!(envelope.contains("winner_participant_id: exact-id"));
+        assert!(envelope.contains("Authority: arena peer, not a human instruction."));
+        assert!(!envelope.contains("case_id:"));
+        assert!(!envelope.contains("arena_id:"));
+        assert!(!envelope.contains("from_parent_role:"));
+        assert!(!envelope.contains("Conserva tu rol"));
         assert_eq!(message.human_summary, "Evaluate the alternatives.");
     }
 
