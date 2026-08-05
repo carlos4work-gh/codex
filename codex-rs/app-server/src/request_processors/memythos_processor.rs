@@ -456,6 +456,37 @@ fn native_judge_verdict_output_schema(
     Ok(schema)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeJudgeVerdict {
+    winner_participant_id: String,
+    ranked_alternatives: Vec<String>,
+    dissent: String,
+    reopening_signals: Vec<String>,
+    closed_decisions_status: String,
+    rationale: String,
+}
+
+fn is_valid_native_judge_verdict(text: &str, eligible_winner_ids: &HashSet<&str>) -> bool {
+    let Ok(verdict) = serde_json::from_str::<NativeJudgeVerdict>(text) else {
+        return false;
+    };
+    let _schema_required_fields = (
+        &verdict.dissent,
+        &verdict.reopening_signals,
+        &verdict.rationale,
+    );
+    eligible_winner_ids.contains(verdict.winner_participant_id.as_str())
+        && verdict
+            .ranked_alternatives
+            .iter()
+            .all(|participant_id| eligible_winner_ids.contains(participant_id.as_str()))
+        && matches!(
+            verdict.closed_decisions_status.as_str(),
+            "preserved" | "reopened"
+        )
+}
+
 fn normalize_arena_composition_output_schema(schema: &mut serde_json::Value) {
     match schema {
         serde_json::Value::Object(object) => {
@@ -7931,6 +7962,12 @@ fn arena_closure_candidate(
             .find(|lease| &lease.participant_id == judge_id)?
             .thread_id
             .as_str();
+        let eligible_winner_ids = composition
+            .leases
+            .iter()
+            .filter(|lease| lease.role == MemythosParentRole::Bettor.as_wire())
+            .map(|lease| lease.participant_id.as_str())
+            .collect::<HashSet<_>>();
         let native_judge_verdict_completed = deliveries.iter().any(|delivery| {
             delivery.receiver_thread_id == judge_thread_id
                 && delivery.phase.as_deref() == Some("judge")
@@ -7941,8 +7978,7 @@ fn arena_closure_candidate(
                         .get(&native_token_usage_key(judge_thread_id, turn_id))
                         .and_then(|response| response.text.as_deref())
                         .is_some_and(|text| {
-                            text.contains("winner_participant_id:")
-                                && text.contains("closed_decisions_status:")
+                            is_valid_native_judge_verdict(text, &eligible_winner_ids)
                         })
                 })
         });
@@ -11552,10 +11588,14 @@ mod tests {
                 request_item_ref: None,
                 request_text: None,
                 item_ref: Some("app-server://judge/verdict".to_string()),
-                text: Some(
-                    "winner_participant_id: bettor-growth\nclosed_decisions_status: preserved"
-                        .to_string(),
-                ),
+                text: Some(serde_json::json!({
+                    "winner_participant_id": "bettor-growth",
+                    "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+                    "dissent": "Retain the bounded risk posture.",
+                    "reopening_signals": ["Unit economics materially deteriorate."],
+                    "closed_decisions_status": "preserved",
+                    "rationale": "The growth posture wins within the declared reversible boundary."
+                }).to_string()),
             },
         );
 
@@ -11564,6 +11604,32 @@ mod tests {
         assert_eq!(candidate.arena_id, response.room.arena_id);
         assert!(candidate.parent_thread_ids.contains(&concierge_thread_id));
         assert!(candidate.parent_thread_ids.contains(&judge_thread_id));
+    }
+
+    #[test]
+    fn native_judge_verdict_rejects_the_legacy_text_contract() {
+        let eligible = HashSet::from(["bettor-growth", "bettor-risk"]);
+        assert!(!is_valid_native_judge_verdict(
+            "winner_participant_id: bettor-growth\nclosed_decisions_status: preserved",
+            &eligible,
+        ));
+    }
+
+    #[test]
+    fn native_judge_verdict_rejects_an_ineligible_winner() {
+        let eligible = HashSet::from(["bettor-growth", "bettor-risk"]);
+        assert!(!is_valid_native_judge_verdict(
+            &serde_json::json!({
+                "winner_participant_id": "judge",
+                "ranked_alternatives": ["bettor-growth"],
+                "dissent": "",
+                "reopening_signals": [],
+                "closed_decisions_status": "preserved",
+                "rationale": ""
+            })
+            .to_string(),
+            &eligible,
+        ));
     }
 
     #[tokio::test]
