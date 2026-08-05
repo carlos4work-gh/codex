@@ -9184,7 +9184,13 @@ async fn task_finish_starts_pending_trigger_turn_mailbox_work_before_thread_idle
             Vec::new(),
             "wake after normal completion".to_string(),
             /*trigger_turn*/ true,
-        ),
+        )
+        .with_final_output_json_schema(Some(serde_json::json!({
+            "type": "object",
+            "properties": {"winner": {"type": "string"}},
+            "required": ["winner"],
+            "additionalProperties": false
+        }))),
     )
     .await;
     assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
@@ -9207,6 +9213,21 @@ async fn task_finish_starts_pending_trigger_turn_mailbox_work_before_thread_idle
     assert_eq!(deferred_turn_id, second_turn_id);
     assert_ne!(first_turn_id, second_turn_id);
     assert!(!sess.input_queue.has_trigger_turn_mailbox_items().await);
+    let active_turn = sess.active_turn.lock().await;
+    let applied_schema = active_turn
+        .as_ref()
+        .and_then(|turn| turn.task.as_ref())
+        .and_then(|task| task.turn_context.final_output_json_schema.as_ref());
+    assert_eq!(
+        applied_schema,
+        Some(&serde_json::json!({
+            "type": "object",
+            "properties": {"winner": {"type": "string"}},
+            "required": ["winner"],
+            "additionalProperties": false
+        }))
+    );
+    drop(active_turn);
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 

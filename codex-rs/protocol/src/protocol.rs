@@ -698,6 +698,9 @@ pub struct InterAgentCommunication {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub metadata: Option<ResponseItemMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub final_output_json_schema: Option<Value>,
     pub trigger_turn: bool,
 }
 
@@ -716,6 +719,7 @@ impl InterAgentCommunication {
             content,
             encrypted_content: None,
             metadata: None,
+            final_output_json_schema: None,
             trigger_turn,
         }
     }
@@ -734,8 +738,14 @@ impl InterAgentCommunication {
             content: String::new(),
             encrypted_content: Some(encrypted_content),
             metadata: None,
+            final_output_json_schema: None,
             trigger_turn,
         }
+    }
+
+    pub fn with_final_output_json_schema(mut self, schema: Option<Value>) -> Self {
+        self.final_output_json_schema = schema;
+        self
     }
 
     pub fn to_response_input_item(&self) -> ResponseInputItem {

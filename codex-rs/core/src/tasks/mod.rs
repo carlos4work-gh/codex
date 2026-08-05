@@ -463,7 +463,8 @@ impl Session {
                 .pending_trigger_turn_submission_id()
                 .await
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            self.maybe_start_turn_for_pending_work_with_sub_id(sub_id).await;
+            self.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
+                .await;
         })
     }
 
@@ -493,7 +494,15 @@ impl Session {
                 .input_queue
                 .drain_mailbox_input_items_for_turn(Some(&sub_id))
                 .await;
-            let turn_context = self.new_default_turn_with_sub_id(sub_id).await;
+            let final_output_json_schema = input.iter().find_map(|item| match item {
+                TurnInput::InterAgentCommunication(communication) if communication.trigger_turn => {
+                    communication.final_output_json_schema.clone()
+                }
+                _ => None,
+            });
+            let turn_context = self
+                .new_default_turn_with_sub_id_and_schema(sub_id, final_output_json_schema)
+                .await;
             self.maybe_emit_unknown_model_warning_for_turn(turn_context.as_ref())
                 .await;
             self.start_task(turn_context, input, RegularTask::new())

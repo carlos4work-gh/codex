@@ -1056,6 +1056,12 @@ pub struct MemythosArenaMessage {
     pub aggregate_contract: Option<MemythosArenaAggregateContract>,
     #[ts(optional = nullable)]
     pub response_contract: Option<String>,
+    /// Native Responses API schema applied to the target parent turn.
+    /// This travels with mailbox delivery so aggregate checkpoints keep the
+    /// same output boundary as an OOTB turn/start request.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub output_schema: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]

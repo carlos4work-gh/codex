@@ -38,10 +38,10 @@ use codex_app_server_protocol::MemythosArenaMessageListParams;
 use codex_app_server_protocol::MemythosArenaMessageListResponse;
 use codex_app_server_protocol::MemythosArenaMessageObservationListParams;
 use codex_app_server_protocol::MemythosArenaMessageObservationListResponse;
-use codex_app_server_protocol::MemythosArenaMessageReadParams;
-use codex_app_server_protocol::MemythosArenaMessageReadResponse;
 use codex_app_server_protocol::MemythosArenaMessageObserveParams;
 use codex_app_server_protocol::MemythosArenaMessageObserveResponse;
+use codex_app_server_protocol::MemythosArenaMessageReadParams;
+use codex_app_server_protocol::MemythosArenaMessageReadResponse;
 use codex_app_server_protocol::MemythosArenaMessageSendParams;
 use codex_app_server_protocol::MemythosArenaMessageSendResponse;
 use codex_app_server_protocol::MemythosArenaMessageSendV2Params;
@@ -1856,7 +1856,7 @@ impl PeerParentDeliveryAdapter for NativeMailboxPeerParentDeliveryAdapter {
                 effort: reasoning_effort,
                 summary: None,
                 personality: None,
-                output_schema: None,
+                output_schema: message.output_schema.clone(),
                 collaboration_mode: None,
                 multi_agent_mode: None,
             };
@@ -1949,7 +1949,8 @@ async fn deliver_native_parent_mailbox_message(
         Vec::new(),
         build_peer_parent_envelope(message),
         trigger_turn,
-    );
+    )
+    .with_final_output_json_schema(message.output_schema.clone());
     match thread_manager
         .send_inter_agent_communication(target_thread_id, communication)
         .await
@@ -2139,7 +2140,7 @@ fn native_concierge_checkpoint_prompt(message_kind: &str, message: &str) -> Stri
 
 fn native_judge_checkpoint_prompt(message: &str, eligible_winner_ids: &[String]) -> String {
     format!(
-        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Name exactly one with `winner_participant_id: <exact-id>`, then rank the alternatives, preserve dissent, and state reopening signals. Report `closed_decisions_status: preserved` unless new evidence materially invalidates a declared closed decision; in that exceptional case report `closed_decisions_status: reopened` and identify the evidence and authority required. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
+        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Return only the JSON object required by the native output schema. Select exactly one eligible winner, rank the alternatives, preserve dissent, and state reopening signals. `closed_decisions_status` applies only to explicitly declared closed decisions, not to hypothesis weights, affected scope, or a partial resume. Report `preserved` unless new evidence materially invalidates a declared closed decision; only then report `reopened` and identify the invalidating evidence and authority required. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
         eligible_winner_ids.join(", ")
     )
 }
@@ -2160,14 +2161,14 @@ fn native_bettor_checkpoint_prompt(message_kind: &str, message: &str) -> String 
 fn apply_native_checkpoint_execution_contract(
     state: &MemythosRuntimeState,
     message: &mut MemythosArenaMessage,
-) {
+) -> Result<(), JSONRPCErrorError> {
     if !message.requires_response
         || !matches!(
             message.delivery_policy,
             Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger)
         )
     {
-        return;
+        return Ok(());
     }
 
     match message.to_parent_role.as_str() {
@@ -2193,13 +2194,14 @@ fn apply_native_checkpoint_execution_contract(
                 })
                 .unwrap_or_default();
             if eligible_winner_ids.is_empty() {
-                return;
+                return Ok(());
             }
             message.execution_prompt = Some(native_judge_checkpoint_prompt(
                 &message.human_summary,
                 &eligible_winner_ids,
             ));
             message.response_contract = Some("judge_verdict".to_string());
+            message.output_schema = Some(native_judge_verdict_output_schema(&eligible_winner_ids)?);
         }
         "bettor" => {
             message.execution_prompt = Some(native_bettor_checkpoint_prompt(
@@ -2210,6 +2212,7 @@ fn apply_native_checkpoint_execution_contract(
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn prepare_native_aggregate_delivery(
@@ -4134,7 +4137,7 @@ impl MemythosRequestProcessor {
         }
 
         let aggregate_state = prepare_native_aggregate_delivery(&mut state, &mut message)?;
-        apply_native_checkpoint_execution_contract(&state, &mut message);
+        apply_native_checkpoint_execution_contract(&state, &mut message)?;
         state
             .arena_messages
             .insert(message.message_id.clone(), message.clone());
@@ -5447,6 +5450,7 @@ impl MemythosRequestProcessor {
             delivery_policy: params.delivery_policy,
             aggregate_contract: params.aggregate_contract.clone(),
             response_contract: Some(params.response_contract.clone()),
+            output_schema: params.output_schema.clone(),
         };
         if !params.human_instruction
             && !matches!(
@@ -7179,12 +7183,10 @@ impl MemythosRequestProcessor {
             arena_id,
             thread_id,
             turn_id,
-            round_id: round_id.or_else(|| {
-                activating_delivery.map(|delivery| delivery.round_id.clone())
-            }),
-            phase: phase.or_else(|| {
-                activating_delivery.and_then(|delivery| delivery.phase.clone())
-            }),
+            round_id: round_id
+                .or_else(|| activating_delivery.map(|delivery| delivery.round_id.clone())),
+            phase: phase
+                .or_else(|| activating_delivery.and_then(|delivery| delivery.phase.clone())),
             participant_id,
             activation_reason: activating_delivery.map(native_delivery_activation_reason),
             causation_id: activating_delivery.map(|delivery| delivery.message_id.clone()),
@@ -7549,6 +7551,7 @@ fn native_turn_loopback_candidate(
         delivery_policy,
         aggregate_contract,
         response_contract: None,
+        output_schema: None,
     })
 }
 
@@ -7645,6 +7648,7 @@ fn native_turn_loopback_candidates(
                 delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
                 aggregate_contract: Some(contract),
                 response_contract: None,
+                output_schema: None,
             })
         })
         .collect()
@@ -10262,6 +10266,7 @@ mod tests {
             delivery_policy: None,
             aggregate_contract: None,
             response_contract: Some("judge_verdict".to_string()),
+            output_schema: None,
         };
 
         let envelope = build_peer_parent_envelope(&message);
@@ -10302,6 +10307,7 @@ mod tests {
             delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
             aggregate_contract: None,
             response_contract: None,
+            output_schema: None,
         };
 
         let envelope = build_peer_parent_envelope(&message);
@@ -10348,6 +10354,7 @@ mod tests {
             delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
             aggregate_contract: Some(contract.clone()),
             response_contract: Some("judge_verdict".to_string()),
+            output_schema: None,
         };
         let mut first = message("bet-a", "bettor-a");
         let mut second = message("bet-b", "bettor-b");
@@ -10436,25 +10443,39 @@ mod tests {
             delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
             aggregate_contract: Some(contract.clone()),
             response_contract: None,
+            output_schema: None,
         };
         let mut first = message("bet-growth", &growth_thread_id);
         let mut second = message("bet-risk", &risk_thread_id);
         let mut state = processor.state.lock().await;
         prepare_native_aggregate_delivery(&mut state, &mut first).expect("first bet");
-        apply_native_checkpoint_execution_contract(&state, &mut first);
+        apply_native_checkpoint_execution_contract(&state, &mut first)
+            .expect("open aggregate contract");
         assert!(first.execution_prompt.is_none());
 
         prepare_native_aggregate_delivery(&mut state, &mut second).expect("second bet");
-        apply_native_checkpoint_execution_contract(&state, &mut second);
+        apply_native_checkpoint_execution_contract(&state, &mut second)
+            .expect("sealed aggregate contract");
         let prompt = second
             .execution_prompt
             .as_deref()
             .expect("sealed aggregate must carry the judge contract");
-        assert!(prompt.contains("winner_participant_id: <exact-id>"));
+        assert!(
+            prompt.contains("Return only the JSON object required by the native output schema")
+        );
+        assert!(prompt.contains("not to hypothesis weights, affected scope, or a partial resume"));
         assert!(prompt.contains("bettor-growth"));
         assert!(prompt.contains("bettor-risk"));
         assert!(prompt.contains("returned automatically to the Room Concierge"));
         assert_eq!(second.response_contract.as_deref(), Some("judge_verdict"));
+        assert_eq!(
+            second
+                .output_schema
+                .as_ref()
+                .and_then(|schema| schema.pointer("/properties/winner_participant_id/type"))
+                .and_then(serde_json::Value::as_str),
+            Some("string")
+        );
     }
 
     #[tokio::test]
@@ -10578,6 +10599,7 @@ mod tests {
             delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
             aggregate_contract: Some(contract),
             response_contract: None,
+            output_schema: None,
         };
         let mut state = processor.state.lock().await;
         prepare_native_aggregate_delivery(&mut state, &mut message).expect("first proposal");
@@ -14788,6 +14810,7 @@ mod tests {
                     delivery_policy: None,
                     aggregate_contract: None,
                     response_contract: Some("peer_objection_response".to_string()),
+                    output_schema: None,
                 },
             })
             .await
@@ -14941,6 +14964,7 @@ mod tests {
                     delivery_policy: None,
                     aggregate_contract: None,
                     response_contract: Some("peer_objection_response".to_string()),
+                    output_schema: None,
                 },
             })
             .await
@@ -15073,6 +15097,7 @@ mod tests {
                     delivery_policy: None,
                     aggregate_contract: None,
                     response_contract: Some("peer_objection_response".to_string()),
+                    output_schema: None,
                 },
             })
             .await
@@ -15183,6 +15208,7 @@ mod tests {
                     delivery_policy: None,
                     aggregate_contract: None,
                     response_contract: Some("peer_objection_response".to_string()),
+                    output_schema: None,
                 },
             })
             .await
@@ -15322,6 +15348,7 @@ mod tests {
                         delivery_policy: None,
                         aggregate_contract: None,
                         response_contract: Some("peer_objection_response".to_string()),
+                        output_schema: None,
                     },
                 })
                 .await
@@ -15440,6 +15467,7 @@ mod tests {
                         delivery_policy: None,
                         aggregate_contract: None,
                         response_contract: Some("peer_objection_response".to_string()),
+                        output_schema: None,
                     },
                 })
                 .await
