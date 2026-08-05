@@ -1355,6 +1355,11 @@ impl MessageProcessor {
                 .room_send_on_connection(params, request_id.connection_id)
                 .await
                 .map(Some),
+            ClientRequest::MemythosArenaMessageRead { params, .. } => self
+                .memythos_processor
+                .arena_message_read(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosThreadConsolidate { params, .. } => self
                 .memythos_processor
                 .thread_consolidate(params)

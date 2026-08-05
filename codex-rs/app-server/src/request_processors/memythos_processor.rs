@@ -38,6 +38,8 @@ use codex_app_server_protocol::MemythosArenaMessageListParams;
 use codex_app_server_protocol::MemythosArenaMessageListResponse;
 use codex_app_server_protocol::MemythosArenaMessageObservationListParams;
 use codex_app_server_protocol::MemythosArenaMessageObservationListResponse;
+use codex_app_server_protocol::MemythosArenaMessageReadParams;
+use codex_app_server_protocol::MemythosArenaMessageReadResponse;
 use codex_app_server_protocol::MemythosArenaMessageObserveParams;
 use codex_app_server_protocol::MemythosArenaMessageObserveResponse;
 use codex_app_server_protocol::MemythosArenaMessageSendParams;
@@ -191,6 +193,7 @@ struct MemythosRuntimeState {
     arena_parents: HashMap<String, MemythosArenaParent>,
     arena_compositions: HashMap<String, MemythosArenaCompositionProvisionResponse>,
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
+    arena_messages: HashMap<String, MemythosArenaMessage>,
     arena_message_aggregates: HashMap<String, NativeArenaMessageAggregate>,
     room_activity_events: HashMap<String, Vec<MemythosRoomActivityEvent>>,
     native_parent_turn_responses: HashMap<String, ParentTurnResponse>,
@@ -3189,6 +3192,7 @@ impl MemythosRequestProcessor {
                 arena_parents: HashMap::new(),
                 arena_compositions: HashMap::new(),
                 arena_message_deliveries: Vec::new(),
+                arena_messages: HashMap::new(),
                 arena_message_aggregates: HashMap::new(),
                 room_activity_events: HashMap::new(),
                 native_parent_turn_responses: HashMap::new(),
@@ -4131,6 +4135,9 @@ impl MemythosRequestProcessor {
 
         let aggregate_state = prepare_native_aggregate_delivery(&mut state, &mut message)?;
         apply_native_checkpoint_execution_contract(&state, &mut message);
+        state
+            .arena_messages
+            .insert(message.message_id.clone(), message.clone());
 
         let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
         let delivery_attempt = self
@@ -4295,6 +4302,33 @@ impl MemythosRequestProcessor {
             .collect();
 
         Ok(MemythosArenaMessageListResponse { deliveries }.into())
+    }
+
+    pub(crate) async fn arena_message_read(
+        &self,
+        params: MemythosArenaMessageReadParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state = self.state.lock().await;
+        if !state.arenas.contains_key(&params.arena_id) {
+            return Err(invalid_params(format!("unknown arena id: {}", params.arena_id)));
+        }
+        let message = state
+            .arena_messages
+            .get(&params.message_id)
+            .filter(|message| message.arena_id == params.arena_id)
+            .cloned()
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "unknown message {} in arena {}",
+                    params.message_id, params.arena_id
+                ))
+            })?;
+        let delivered_prompt = build_peer_parent_envelope(&message);
+        Ok(MemythosArenaMessageReadResponse {
+            message,
+            delivered_prompt,
+        }
+        .into())
     }
 
     pub(crate) async fn arena_message_observation_list(

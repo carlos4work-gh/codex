@@ -4115,6 +4115,17 @@ fn memythos_room_native_alias_methods_deserialize() {
     .expect("room/send should deserialize");
     assert_eq!(send.method(), "memythos/room/send");
 
+    let message_read = serde_json::from_value::<crate::ClientRequest>(json!({
+        "method": "memythos/arena/message/read",
+        "id": 31,
+        "params": {
+            "arenaId": "arena-001",
+            "messageId": "message-001"
+        }
+    }))
+    .expect("arena message read should deserialize");
+    assert_eq!(message_read.method(), "memythos/arena/message/read");
+
     let contract_emit = serde_json::from_value::<crate::ClientRequest>(json!({
         "method": "memythos/room/contract/emit",
         "id": 4,

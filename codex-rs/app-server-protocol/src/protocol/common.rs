@@ -734,6 +734,12 @@ client_request_definitions! {
         manual_payload_conversion: manual,
         response: v2::MemythosRoomSendInputResponse,
     },
+    #[experimental("memythos/arena/message/read")]
+    MemythosArenaMessageRead => "memythos/arena/message/read" {
+        params: v2::MemythosArenaMessageReadParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosArenaMessageReadResponse,
+    },
     #[experimental("memythos/thread/consolidate")]
     MemythosThreadConsolidate => "memythos/thread/consolidate" {
         params: v2::MemythosThreadConsolidateParams,

@@ -1212,6 +1212,23 @@ pub struct MemythosArenaMessageListResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageReadParams {
+    pub arena_id: String,
+    pub message_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaMessageReadResponse {
+    pub message: MemythosArenaMessage,
+    /// Exact model-visible mailbox envelope produced by app-server for this message.
+    pub delivered_prompt: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct MemythosParentPeerResponseObservation {
     pub observation_id: String,
     pub message_id: String,
