@@ -320,7 +320,7 @@ fn validate_parent_goal_accepts_delivery(goal: &ThreadGoal) -> Result<(), JSONRP
     Ok(())
 }
 
-fn room_delivery_goal_objective(_room: &MemythosRoom, message: &MemythosArenaMessage) -> String {
+fn room_delivery_goal_objective(message: &MemythosArenaMessage) -> String {
     let materialization_requirement = if message.message_kind == "human_intake" {
         concat!(
             " This intake is not complete until you invoke the native ",
@@ -344,6 +344,13 @@ fn room_delivery_goal_objective(_room: &MemythosRoom, message: &MemythosArenaMes
         message_kind = message.message_kind,
         materialization_requirement = materialization_requirement,
     )
+}
+
+#[derive(Debug, Clone)]
+struct PreparedParentDeliveryGoal {
+    active_goal: ThreadGoal,
+    previous_goal: ThreadGoal,
+    assigned_for_delivery: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -3263,6 +3270,68 @@ impl MemythosRequestProcessor {
         }
     }
 
+    async fn prepare_parent_goal_for_delivery(
+        &self,
+        message: &MemythosArenaMessage,
+    ) -> Result<PreparedParentDeliveryGoal, JSONRPCErrorError> {
+        let current_goal = self
+            .arena_parent_provisioning_adapter
+            .read_parent_goal(&message.to_parent_thread_id)
+            .await?
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "parent thread {} has no provisioned goal",
+                    message.to_parent_thread_id
+                ))
+            })?;
+        match room_delivery_goal_transition(&current_goal.status) {
+            RoomDeliveryGoalTransition::AssignDeliveryGoal => {
+                let active_goal = self
+                    .arena_parent_provisioning_adapter
+                    .transition_parent_goal(
+                        &message.to_parent_thread_id,
+                        Some(&room_delivery_goal_objective(message)),
+                        ThreadGoalStatus::Active,
+                        true,
+                    )
+                    .await?;
+                Ok(PreparedParentDeliveryGoal {
+                    active_goal,
+                    previous_goal: current_goal,
+                    assigned_for_delivery: true,
+                })
+            }
+            RoomDeliveryGoalTransition::PreserveGoal => {
+                validate_parent_goal_accepts_delivery(&current_goal)?;
+                Ok(PreparedParentDeliveryGoal {
+                    active_goal: current_goal.clone(),
+                    previous_goal: current_goal,
+                    assigned_for_delivery: false,
+                })
+            }
+        }
+    }
+
+    async fn rollback_parent_goal_after_failed_delivery(
+        &self,
+        message: &MemythosArenaMessage,
+        prepared: &PreparedParentDeliveryGoal,
+    ) -> Option<String> {
+        if !prepared.assigned_for_delivery {
+            return None;
+        }
+        self.arena_parent_provisioning_adapter
+            .transition_parent_goal(
+                &message.to_parent_thread_id,
+                Some(&prepared.previous_goal.objective),
+                prepared.previous_goal.status.clone(),
+                false,
+            )
+            .await
+            .err()
+            .map(|error| format!("delivery goal rollback also failed: {}", error.message))
+    }
+
     pub(crate) async fn runtime_health(
         &self,
         _params: MemythosRuntimeHealthParams,
@@ -4154,48 +4223,65 @@ impl MemythosRequestProcessor {
         params: MemythosArenaMessageSendParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let mut message = params.message;
-        let mut state = self.state.lock().await;
-        let Some(arena) = state.arenas.get(&message.arena_id) else {
-            return Err(invalid_params(format!(
-                "unknown arena id: {}",
-                message.arena_id
-            )));
-        };
-        let layer_id = arena.layer_id.clone();
-        let sender_key = arena_parent_key(&message.arena_id, &message.from_parent_thread_id);
-        let receiver_key = arena_parent_key(&message.arena_id, &message.to_parent_thread_id);
-        if !state.arena_parents.contains_key(&sender_key) {
-            return Err(invalid_params(format!(
-                "sender parent {} is not registered in arena {}",
-                message.from_parent_thread_id, message.arena_id
-            )));
-        }
-        if !state.arena_parents.contains_key(&receiver_key) {
-            return Err(invalid_params(format!(
-                "receiver parent {} is not registered in arena {}",
-                message.to_parent_thread_id, message.arena_id
-            )));
-        }
+        let (layer_id, aggregate_state, target_reasoning_effort) = {
+            let mut state = self.state.lock().await;
+            let Some(arena) = state.arenas.get(&message.arena_id) else {
+                return Err(invalid_params(format!(
+                    "unknown arena id: {}",
+                    message.arena_id
+                )));
+            };
+            let layer_id = arena.layer_id.clone();
+            let sender_key = arena_parent_key(&message.arena_id, &message.from_parent_thread_id);
+            let receiver_key = arena_parent_key(&message.arena_id, &message.to_parent_thread_id);
+            if !state.arena_parents.contains_key(&sender_key) {
+                return Err(invalid_params(format!(
+                    "sender parent {} is not registered in arena {}",
+                    message.from_parent_thread_id, message.arena_id
+                )));
+            }
+            if !state.arena_parents.contains_key(&receiver_key) {
+                return Err(invalid_params(format!(
+                    "receiver parent {} is not registered in arena {}",
+                    message.to_parent_thread_id, message.arena_id
+                )));
+            }
 
-        let aggregate_state = prepare_native_aggregate_delivery(&mut state, &mut message)?;
-        apply_native_checkpoint_execution_contract(&state, &mut message)?;
-        state
-            .arena_messages
-            .insert(message.message_id.clone(), message.clone());
+            let aggregate_state = prepare_native_aggregate_delivery(&mut state, &mut message)?;
+            apply_native_checkpoint_execution_contract(&state, &mut message)?;
+            state
+                .arena_messages
+                .insert(message.message_id.clone(), message.clone());
+            let target_reasoning_effort = arena_parent_reasoning_effort(
+                &state,
+                &message.arena_id,
+                &message.to_parent_thread_id,
+            );
+            (layer_id, aggregate_state, target_reasoning_effort)
+        };
+
+        let prepared_goal = if message.requires_response {
+            Some(self.prepare_parent_goal_for_delivery(&message).await?)
+        } else {
+            None
+        };
 
         let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
         let delivery_attempt = self
             .peer_parent_delivery_adapter
-            .deliver_peer_parent_message(
-                &message,
-                arena_parent_reasoning_effort(
-                    &state,
-                    &message.arena_id,
-                    &message.to_parent_thread_id,
-                ),
-                ConnectionId(0),
-            )
+            .deliver_peer_parent_message(&message, target_reasoning_effort, ConnectionId(0))
             .await;
+        if delivery_attempt.rejection_reason.is_some()
+            && let Some(prepared_goal) = prepared_goal.as_ref()
+        {
+            let rollback_detail = self
+                .rollback_parent_goal_after_failed_delivery(&message, prepared_goal)
+                .await;
+            if let Some(detail) = rollback_detail {
+                return Err(invalid_params(detail));
+            }
+        }
+        let mut state = self.state.lock().await;
         let aggregate_state = finalize_native_aggregate_delivery(
             &mut state,
             &message,
@@ -4244,6 +4330,15 @@ impl MemythosRequestProcessor {
             failure_reason: None,
         };
         state.arena_message_deliveries.push(delivery.clone());
+        if let Some(prepared_goal) = prepared_goal.as_ref()
+            && let Some(composition) = state.arena_compositions.get_mut(&delivery.arena_id)
+            && let Some(lease) = composition
+                .leases
+                .iter_mut()
+                .find(|lease| lease.thread_id == delivery.receiver_thread_id)
+        {
+            lease.goal_status = prepared_goal.active_goal.status.clone();
+        }
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::ArenaMessage,
@@ -5534,69 +5629,17 @@ impl MemythosRequestProcessor {
             arena_parent_reasoning_effort(&state, &room.arena_id, &target.thread_id)
         };
         let delivery_id = self.next_id("mem_room_delivery", &self.next_delivery_id);
-        let current_goal = self
-            .arena_parent_provisioning_adapter
-            .read_parent_goal(&params.to_parent_thread_id)
-            .await
-            .map_err(|error| {
-                invalid_params(format!(
-                    "failed to read parent goal for room delivery to {}: {}",
-                    params.to_parent_thread_id, error.message
-                ))
-            })?
-            .ok_or_else(|| {
-                invalid_params(format!(
-                    "parent thread {} has no provisioned goal",
-                    params.to_parent_thread_id
-                ))
-            })?;
-        let assignment_objective = room_delivery_goal_objective(&room, &message);
-        let rollback_goal = current_goal.clone();
-        let (delivery_goal, assigned_for_delivery) =
-            match room_delivery_goal_transition(&current_goal.status) {
-                RoomDeliveryGoalTransition::AssignDeliveryGoal => {
-                    let armed = self
-                        .arena_parent_provisioning_adapter
-                        .transition_parent_goal(
-                            &params.to_parent_thread_id,
-                            Some(&assignment_objective),
-                            ThreadGoalStatus::Active,
-                            true,
-                        )
-                        .await
-                        .map_err(|error| {
-                            invalid_params(format!(
-                                "failed to assign parent goal for room delivery to {}: {}",
-                                params.to_parent_thread_id, error.message
-                            ))
-                        })?;
-                    (armed, true)
-                }
-                RoomDeliveryGoalTransition::PreserveGoal => {
-                    validate_parent_goal_accepts_delivery(&current_goal)?;
-                    (current_goal, false)
-                }
-            };
+        let prepared_goal = self.prepare_parent_goal_for_delivery(&message).await?;
         let delivery_attempt = self
             .peer_parent_delivery_adapter
             .deliver_peer_parent_message(&message, target_reasoning_effort, connection_id)
             .await;
         let Some(target_turn_id) = delivery_attempt.receiver_turn_id.clone() else {
-            let rollback_detail = if assigned_for_delivery {
-                self.arena_parent_provisioning_adapter
-                    .transition_parent_goal(
-                        &params.to_parent_thread_id,
-                        Some(&rollback_goal.objective),
-                        rollback_goal.status.clone(),
-                        false,
-                    )
-                    .await
-                    .err()
-                    .map(|error| format!("; delivery goal rollback also failed: {}", error.message))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
+            let rollback_detail = self
+                .rollback_parent_goal_after_failed_delivery(&message, &prepared_goal)
+                .await
+                .map(|detail| format!("; {detail}"))
+                .unwrap_or_default();
             return Err(invalid_params(format!(
                 "room sendInput failed to create target turn: {}{}",
                 delivery_attempt
@@ -5671,7 +5714,7 @@ impl MemythosRequestProcessor {
                 .iter_mut()
                 .find(|lease| lease.thread_id == params.to_parent_thread_id)
         {
-            lease.goal_status = delivery_goal.status;
+            lease.goal_status = prepared_goal.active_goal.status.clone();
         }
         state.arena_message_deliveries.push(delivery);
         self.push_telemetry_ref(
@@ -10264,8 +10307,16 @@ mod tests {
                     Some(100),
                     None,
                     Some(
-                        "winner_participant_id: bettor-growth\nclosed_decisions_status: preserved"
-                            .to_string(),
+                        serde_json::json!({
+                            "winner_participant_id": "bettor-growth",
+                            "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+                            "dissent": "Retain the bounded risk posture.",
+                            "reopening_signals": ["Unit economics materially deteriorate."],
+                            "closed_decisions_status": "preserved",
+                            "resume_scope_status": "not_applicable",
+                            "rationale": "The growth posture wins within the declared reversible boundary."
+                        })
+                        .to_string(),
                     ),
                 )
                 .await
@@ -10273,10 +10324,19 @@ mod tests {
 
         let goals = provisioning.goals.lock().await;
         assert_eq!(goals.len(), 4);
+        let non_complete_goals = goals
+            .values()
+            .filter(|goal| goal.status != ThreadGoalStatus::Complete)
+            .map(|goal| {
+                format!(
+                    "{}={:?}:{}",
+                    goal.thread_id, goal.status, goal.objective
+                )
+            })
+            .collect::<Vec<_>>();
         assert!(
-            goals
-                .values()
-                .all(|goal| goal.status == ThreadGoalStatus::Complete)
+            non_complete_goals.is_empty(),
+            "non-complete goals after judge closure: {non_complete_goals:?}"
         );
         drop(goals);
         let state = processor.state.lock().await;
@@ -10333,14 +10393,6 @@ mod tests {
 
     #[test]
     fn proposal_turn_keeps_future_arena_phases_out_of_the_parent_request() {
-        let room = MemythosRoom {
-            room_id: "room-1".to_string(),
-            case_id: "case-1".to_string(),
-            layer_id: "layer-1".to_string(),
-            arena_id: "arena-1".to_string(),
-            topology: "concierge_hub".to_string(),
-            participants: Vec::new(),
-        };
         let message = MemythosArenaMessage {
             message_id: "proposal-1".to_string(),
             case_id: "case-1".to_string(),
@@ -10363,7 +10415,7 @@ mod tests {
         };
 
         let envelope = build_peer_parent_envelope(&message);
-        let goal = room_delivery_goal_objective(&room, &message);
+        let goal = room_delivery_goal_objective(&message);
         assert!(envelope.starts_with("ARENA_PROPOSAL_TURN\n"));
         assert!(envelope.contains("Develop an independent response"));
         assert!(!envelope.contains("peer_review_and_objection"));
@@ -10515,7 +10567,9 @@ mod tests {
         assert!(
             prompt.contains("Return only the JSON object required by the native output schema")
         );
-        assert!(prompt.contains("measures only whether an explicitly declared closed decision remains valid"));
+        assert!(prompt.contains(
+            "measures only whether an explicitly declared closed decision remains valid"
+        ));
         assert!(prompt.contains("separately describes the work scope"));
         assert!(prompt.contains("closed_decisions_status=preserved"));
         assert!(prompt.contains("resume_scope_status=partially_reopened"));
@@ -11079,6 +11133,71 @@ mod tests {
                 "room delivery must not override {status:?} goals"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn automatic_mailbox_delivery_rearms_a_completed_parent_for_the_current_phase() {
+        let provisioning = Arc::new(FakeArenaParentProvisioningAdapter::default());
+        provisioning.goals.lock().await.insert(
+            "bettor-a".to_string(),
+            ThreadGoal {
+                thread_id: "bettor-a".to_string(),
+                objective: "Complete proposal assignment proposal-1".to_string(),
+                status: ThreadGoalStatus::Complete,
+                token_budget: Some(20_000),
+                tokens_used: 2_000,
+                time_used_seconds: 10,
+                created_at: 0,
+                updated_at: 0,
+            },
+        );
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(RecordOnlyParentConfigurationAdapter),
+            provisioning.clone(),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let message = MemythosArenaMessage {
+            message_id: "bet-1".to_string(),
+            case_id: "case-1".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-1".to_string(),
+            from_parent_thread_id: "concierge".to_string(),
+            from_parent_role: "room_concierge".to_string(),
+            to_parent_thread_id: "bettor-a".to_string(),
+            to_parent_role: "bettor".to_string(),
+            message_kind: "peer_bet".to_string(),
+            human_summary: "Place the final bet from sealed evidence.".to_string(),
+            execution_prompt: None,
+            context_packet_ref: "app-server://rooms/room-1/checkpoints/review".to_string(),
+            artifact_refs: Vec::new(),
+            requires_response: true,
+            delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+            aggregate_contract: None,
+            response_contract: None,
+            output_schema: None,
+        };
+
+        let prepared = processor
+            .prepare_parent_goal_for_delivery(&message)
+            .await
+            .expect("completed proposal goal should be replaced before the bet turn");
+
+        assert!(prepared.assigned_for_delivery);
+        assert_eq!(prepared.previous_goal.status, ThreadGoalStatus::Complete);
+        assert_eq!(prepared.active_goal.status, ThreadGoalStatus::Active);
+        assert!(prepared.active_goal.objective.contains("assignment bet-1"));
+        assert!(prepared.active_goal.objective.contains("phase peer_bet"));
+        assert!(!prepared.active_goal.objective.contains("proposal-1"));
+        let transitions = provisioning.goal_transitions.lock().await;
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].0, "bettor-a");
+        assert_eq!(transitions[0].2, ThreadGoalStatus::Active);
+        assert!(transitions[0].3);
     }
 
     #[test]
