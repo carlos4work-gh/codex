@@ -4166,7 +4166,7 @@ impl MemythosRequestProcessor {
             phase_from_message_kind(&message.message_kind)
         };
         let delivery = MemythosArenaMessageDelivery {
-            delivery_id,
+            delivery_id: delivery_id.clone(),
             message_id: message.message_id.clone(),
             human_summary: message.human_summary.clone(),
             status: delivery_attempt.status,
@@ -5435,6 +5435,7 @@ impl MemythosRequestProcessor {
             };
             return Ok(MemythosRoomSendInputResponse {
                 delivery: MemythosRoomSendInputDelivery {
+                    delivery_id: response.delivery.delivery_id,
                     thread_id: params.to_parent_thread_id,
                     turn_id: response.delivery.receiver_turn_id,
                     round_id: message.round_id,
@@ -5561,7 +5562,7 @@ impl MemythosRequestProcessor {
         });
 
         let delivery = MemythosArenaMessageDelivery {
-            delivery_id,
+            delivery_id: delivery_id.clone(),
             message_id: message.message_id.clone(),
             human_summary: message.human_summary.clone(),
             status: "delivered_to_live_thread".to_string(),
@@ -5675,6 +5676,7 @@ impl MemythosRequestProcessor {
 
         Ok(MemythosRoomSendInputResponse {
             delivery: MemythosRoomSendInputDelivery {
+                delivery_id,
                 thread_id: params.to_parent_thread_id,
                 turn_id: Some(target_turn_id),
                 round_id: message.round_id,
@@ -6962,22 +6964,19 @@ impl MemythosRequestProcessor {
             .unwrap_or_default();
         let delta = subtract_memythos_usage(&current_total, &previous_total);
         let usage_key = native_token_usage_key(thread_id, turn_id);
-        let (round_id, phase, activation_reason) = state
+        let activating_delivery = state
             .arena_message_deliveries
             .iter()
             .rev()
             .find(|delivery| {
                 delivery.receiver_thread_id == thread_id
                     && delivery.receiver_turn_id.as_deref() == Some(turn_id)
-            })
-            .map(|delivery| {
-                (
-                    Some(delivery.round_id.clone()),
-                    delivery.phase.clone(),
-                    delivery.phase.clone(),
-                )
-            })
-            .unwrap_or((None, None, None));
+            });
+        let round_id = activating_delivery.map(|delivery| delivery.round_id.clone());
+        let phase = activating_delivery.and_then(|delivery| delivery.phase.clone());
+        let activation_reason = activating_delivery.map(native_delivery_activation_reason);
+        let causation_id = activating_delivery.map(|delivery| delivery.message_id.clone());
+        let correlation_id = activating_delivery.map(|delivery| delivery.delivery_id.clone());
         let parent = state
             .arena_parents
             .get(&arena_parent_key(&arena_id, thread_id));
@@ -6990,6 +6989,7 @@ impl MemythosRequestProcessor {
             .flat_map(|room| room.participants.iter())
             .find(|participant| participant.thread_id == thread_id)
             .and_then(|participant| participant.goal_ref.clone());
+        let participant_id = native_participant_id_for_thread(&state, &arena_id, thread_id);
         state
             .native_turn_usage
             .entry(usage_key)
@@ -7004,6 +7004,9 @@ impl MemythosRequestProcessor {
                 stance_profile,
                 goal_ref,
                 activation_reason,
+                participant_id,
+                causation_id,
+                correlation_id,
                 usage: delta,
                 cost_weighted_usage: None,
                 evidence_outcome: "not_available".to_string(),
@@ -7122,6 +7125,17 @@ impl MemythosRequestProcessor {
             .room_activity_events
             .get(&room_id)
             .map_or(1, |events| events.len() as u64 + 1);
+        let activating_delivery = turn_id.as_deref().and_then(|turn_id| {
+            state
+                .arena_message_deliveries
+                .iter()
+                .rev()
+                .find(|delivery| {
+                    delivery.receiver_thread_id == thread_id
+                        && delivery.receiver_turn_id.as_deref() == Some(turn_id)
+                })
+        });
+        let participant_id = native_participant_id_for_thread(&state, &arena_id, &thread_id);
         let event = MemythosRoomActivityEvent {
             cursor: cursor.clone(),
             created_at: Utc::now().to_rfc3339(),
@@ -7131,8 +7145,16 @@ impl MemythosRequestProcessor {
             arena_id,
             thread_id,
             turn_id,
-            round_id,
-            phase,
+            round_id: round_id.or_else(|| {
+                activating_delivery.map(|delivery| delivery.round_id.clone())
+            }),
+            phase: phase.or_else(|| {
+                activating_delivery.and_then(|delivery| delivery.phase.clone())
+            }),
+            participant_id,
+            activation_reason: activating_delivery.map(native_delivery_activation_reason),
+            causation_id: activating_delivery.map(|delivery| delivery.message_id.clone()),
+            correlation_id: activating_delivery.map(|delivery| delivery.delivery_id.clone()),
             participant_role,
             channel: channel.to_string(),
             event_kind: event_kind.to_string(),
@@ -7184,6 +7206,48 @@ impl MemythosRequestProcessor {
         let next = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         format!("{prefix}_{next}")
     }
+}
+
+fn native_delivery_activation_reason(delivery: &MemythosArenaMessageDelivery) -> String {
+    match delivery.delivery_policy {
+        Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger) => {
+            "aggregate_checkpoint_sealed".to_string()
+        }
+        Some(MemythosArenaDeliveryPolicy::QueueOnly) => "mailbox_queued".to_string(),
+        Some(MemythosArenaDeliveryPolicy::Immediate) | None => {
+            if delivery.delivery_mechanism == "room_loopback_send_input" {
+                "room_loopback_delivery".to_string()
+            } else {
+                "direct_parent_delivery".to_string()
+            }
+        }
+    }
+}
+
+fn native_participant_id_for_thread(
+    state: &MemythosRuntimeState,
+    arena_id: &str,
+    thread_id: &str,
+) -> Option<String> {
+    state
+        .arena_compositions
+        .get(arena_id)
+        .and_then(|composition| {
+            composition
+                .leases
+                .iter()
+                .find(|lease| lease.thread_id == thread_id)
+                .map(|lease| lease.participant_id.clone())
+        })
+        .or_else(|| {
+            state
+                .rooms
+                .values()
+                .filter(|room| room.arena_id == arena_id)
+                .flat_map(|room| room.participants.iter())
+                .find(|participant| participant.thread_id == thread_id)
+                .map(|participant| participant.parent_key.clone())
+        })
 }
 
 fn room_activity_turn_from_delivery(
@@ -13622,7 +13686,7 @@ mod tests {
             .room_register(room_register_params())
             .await
             .unwrap();
-        processor
+        let send_response = processor
             .room_send_input(MemythosRoomSendInputParams {
                 room_id: "room-001".to_string(),
                 room_message_ref: "artifact://room/messages/message-003.json".to_string(),
@@ -13655,6 +13719,10 @@ mod tests {
             })
             .await
             .unwrap();
+        let ClientResponsePayload::MemythosRoomSendInput(send_response) = send_response else {
+            panic!("expected MemythosRoomSendInput response");
+        };
+        let expected_correlation_id = send_response.delivery.delivery_id;
         assert!(
             processor
                 .record_native_turn_completed(
@@ -13728,7 +13796,32 @@ mod tests {
         assert_eq!(response.usage.turns[0].phase.as_deref(), Some("bet"));
         assert_eq!(
             response.usage.turns[0].activation_reason.as_deref(),
-            Some("bet")
+            Some("room_loopback_delivery")
+        );
+        assert_eq!(
+            response.usage.turns[0].participant_id.as_deref(),
+            Some("case/bpm_e2e/arena/bettor/risk")
+        );
+        assert_eq!(
+            response.usage.turns[0].causation_id.as_deref(),
+            Some("message-003")
+        );
+        let correlation_id = response.usage.turns[0]
+            .correlation_id
+            .as_deref()
+            .expect("native delivery correlation id");
+        assert_eq!(correlation_id, expected_correlation_id);
+        let usage_event = response
+            .events
+            .iter()
+            .find(|event| event.event_kind == "token_usage_observed")
+            .expect("token usage room activity event");
+        assert_eq!(usage_event.phase.as_deref(), Some("bet"));
+        assert_eq!(usage_event.correlation_id.as_deref(), Some(correlation_id));
+        assert_eq!(usage_event.causation_id.as_deref(), Some("message-003"));
+        assert_eq!(
+            usage_event.activation_reason.as_deref(),
+            Some("room_loopback_delivery")
         );
         assert_eq!(response.usage.turns[0].usage.total_tokens, 1_200);
         assert!(response.usage.cost_weighted_usage.is_none());

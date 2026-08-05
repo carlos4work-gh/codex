@@ -1572,6 +1572,12 @@ pub struct MemythosTurnUsageAttribution {
     pub goal_ref: Option<String>,
     #[ts(optional = nullable)]
     pub activation_reason: Option<String>,
+    #[ts(optional = nullable)]
+    pub participant_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub causation_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub correlation_id: Option<String>,
     pub usage: MemythosTokenUsageBreakdown,
     #[ts(optional = nullable)]
     pub cost_weighted_usage: Option<u64>,
@@ -1610,6 +1616,14 @@ pub struct MemythosRoomActivityEvent {
     pub round_id: Option<String>,
     #[ts(optional = nullable)]
     pub phase: Option<String>,
+    #[ts(optional = nullable)]
+    pub participant_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub activation_reason: Option<String>,
+    #[ts(optional = nullable)]
+    pub causation_id: Option<String>,
+    #[ts(optional = nullable)]
+    pub correlation_id: Option<String>,
     pub participant_role: String,
     pub channel: String,
     pub event_kind: String,
@@ -1696,6 +1710,7 @@ pub struct MemythosRoomSendInputParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct MemythosRoomSendInputDelivery {
+    pub delivery_id: String,
     pub thread_id: String,
     #[ts(optional = nullable)]
     pub turn_id: Option<String>,

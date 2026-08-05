@@ -12657,6 +12657,18 @@
           "goalStatus": {
             "$ref": "#/definitions/v2/ThreadGoalStatus"
           },
+          "identityBootstrapRef": {
+            "description": "Native evidence reference for the one-time parent identity bootstrap.",
+            "type": "string"
+          },
+          "identityContextSha256": {
+            "description": "SHA-256 of the exact stable identity context installed on the parent thread.",
+            "type": "string"
+          },
+          "identityContextVersion": {
+            "description": "Versioned native identity installed once in root developer instructions.",
+            "type": "string"
+          },
           "leaseId": {
             "type": "string"
           },
@@ -12700,6 +12712,9 @@
           "effortIntent",
           "goalRef",
           "goalStatus",
+          "identityBootstrapRef",
+          "identityContextSha256",
+          "identityContextVersion",
           "leaseId",
           "leaseSource",
           "memoryScope",
@@ -13915,14 +13930,32 @@
       },
       "MemythosRoomActivityEvent": {
         "properties": {
+          "activationReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "arenaId": {
             "type": "string"
           },
           "authority": {
             "type": "string"
           },
+          "causationId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "channel": {
             "type": "string"
+          },
+          "correlationId": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "createdAt": {
             "type": "string"
@@ -13937,6 +13970,12 @@
             "format": "uint64",
             "minimum": 0.0,
             "type": "integer"
+          },
+          "participantId": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "participantRole": {
             "type": "string"
@@ -14518,6 +14557,9 @@
               }
             ]
           },
+          "deliveryId": {
+            "type": "string"
+          },
           "deliveryMechanism": {
             "type": "string"
           },
@@ -14569,6 +14611,7 @@
           }
         },
         "required": [
+          "deliveryId",
           "deliveryMechanism",
           "deliveryRef",
           "eventRefs",
@@ -14907,6 +14950,18 @@
           "arenaId": {
             "type": "string"
           },
+          "causationId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "correlationId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "costWeightedUsage": {
             "format": "uint64",
             "minimum": 0.0,
@@ -14928,6 +14983,12 @@
             ]
           },
           "parentRole": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "participantId": {
             "type": [
               "string",
               "null"

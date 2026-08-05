@@ -4,4 +4,4 @@
 import type { MemythosArenaAggregateState } from "./MemythosArenaAggregateState";
 import type { MemythosArenaDeliveryPolicy } from "./MemythosArenaDeliveryPolicy";
 
-export type MemythosRoomSendInputDelivery = { threadId: string, turnId?: string | null, roundId: string, eventRefs: Array<string>, roomId: string, roomMessageRef: string, deliveryRef: string, deliveryMechanism: string, humanInstruction: boolean, messageAuthority: string, status: string, deliveryPolicy?: MemythosArenaDeliveryPolicy | null, aggregateState?: MemythosArenaAggregateState | null, };
+export type MemythosRoomSendInputDelivery = { deliveryId: string, threadId: string, turnId?: string | null, roundId: string, eventRefs: Array<string>, roomId: string, roomMessageRef: string, deliveryRef: string, deliveryMechanism: string, humanInstruction: boolean, messageAuthority: string, status: string, deliveryPolicy?: MemythosArenaDeliveryPolicy | null, aggregateState?: MemythosArenaAggregateState | null, };

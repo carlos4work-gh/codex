@@ -4,4 +4,16 @@
 import type { ReasoningEffort } from "../ReasoningEffort";
 import type { ThreadGoalStatus } from "./ThreadGoalStatus";
 
-export type MemythosArenaCompositionLease = { participantId: string, parentKey: string, threadId: string, role: string, effectiveAgentRole: string, stance: string, leaseId: string, leaseSource: string, memoryScope: string, goalRef: string, effortIntent: string, reasoningEffort: ReasoningEffort, tokenBudget?: number | null, goalStatus: ThreadGoalStatus, status: string, };
+export type MemythosArenaCompositionLease = { participantId: string, parentKey: string, threadId: string, role: string, effectiveAgentRole: string, stance: string, leaseId: string, leaseSource: string, memoryScope: string, goalRef: string,
+/**
+ * Versioned native identity installed once in root developer instructions.
+ */
+identityContextVersion: string,
+/**
+ * SHA-256 of the exact stable identity context installed on the parent thread.
+ */
+identityContextSha256: string,
+/**
+ * Native evidence reference for the one-time parent identity bootstrap.
+ */
+identityBootstrapRef: string, effortIntent: string, reasoningEffort: ReasoningEffort, tokenBudget?: number | null, goalStatus: ThreadGoalStatus, status: string, };
