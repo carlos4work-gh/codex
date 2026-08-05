@@ -4309,9 +4309,6 @@ impl MemythosRequestProcessor {
         params: MemythosArenaMessageReadParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let state = self.state.lock().await;
-        if !state.arenas.contains_key(&params.arena_id) {
-            return Err(invalid_params(format!("unknown arena id: {}", params.arena_id)));
-        }
         let message = state
             .arena_messages
             .get(&params.message_id)
@@ -5620,6 +5617,9 @@ impl MemythosRequestProcessor {
             failure_reason: None,
         };
         let mut state = self.state.lock().await;
+        state
+            .arena_messages
+            .insert(message.message_id.clone(), message.clone());
         if let Some(composition) = state.arena_compositions.get_mut(&room.arena_id)
             && let Some(lease) = composition
                 .leases
@@ -13303,6 +13303,23 @@ mod tests {
         assert!(send_response.delivery.event_refs.iter().any(|event_ref| {
             event_ref == "app-server://rooms/room-001/messages/message-001/delivered"
         }));
+
+        let read_response = processor
+            .arena_message_read(MemythosArenaMessageReadParams {
+                arena_id: "arena-room-001".to_string(),
+                message_id: "message-001".to_string(),
+            })
+            .await
+            .unwrap();
+        let ClientResponsePayload::MemythosArenaMessageRead(read_response) = read_response else {
+            panic!("expected MemythosArenaMessageRead response");
+        };
+        assert_eq!(read_response.message.to_parent_thread_id, "thread_risk");
+        assert!(
+            read_response
+                .delivered_prompt
+                .contains("I am not a human; I am an arena peer")
+        );
     }
 
     #[tokio::test]
