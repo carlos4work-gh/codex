@@ -691,6 +691,7 @@ impl NativeArenaCompositionPlanningAdapter {
             "costGoal": params.cost_goal,
             "costContext": params.cost_context,
             "compositionChangeSignal": params.composition_change_signal,
+            "resumeContext": params.resume_context,
             "previousComposition": previous,
             "nativeRoleCatalog": roles,
         })
@@ -728,7 +729,10 @@ impl NativeArenaCompositionPlanningAdapter {
                         "For partial_resume, return at least one active affected participant and at least one supplied candidateChangeRef as a citedChangeRef, ",
                         "with comparabilityInvalidated=false and avoidedFullRound=true. For full_round, cite at least one supplied candidateChangeRef and one affected decision ref, ",
                         "with comparabilityInvalidated=true and avoidedFullRound=false. If no supplied candidateChangeRef supports partial_resume or full_round, use retain_decision. ",
-                        "Never invent refs. Preserve closed decisions that are unaffected, and return only the requested structured assessment."
+                        "Never invent refs. Preserve closed decisions that are unaffected, and return only the requested structured assessment.",
+                        "Treat protectedDecisions as authoritative unless a cited change materially invalidates one. ",
+                        "RevisableSettlement contains hypotheses, weights, and interpretations that may change without reopening protected decisions. ",
+                        "OpenImplementationScope contains downstream questions that may be resolved without reopening either business decisions or the whole settlement."
                     )
                     .to_string(),
                 ),
@@ -7771,7 +7775,7 @@ fn build_arena_intake_prompt(
         })
         .unwrap_or_else(|| "not required by the selected method".to_string());
     format!(
-        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own the arena objective, initial framing, exceptions, dependencies, and communication; the client will only observe. You are not a proposer and you do not decide the business outcome. For a competitive method, dispatch exactly one independent peer_proposal assignment to every proposal-bearing bettor, then end this turn immediately. Do not wait synchronously for any bettor. Asynchronous dispatch means your concierge turn ends after assignment; it does not mean queue_only delivery. Omit deliveryPolicy for direct proposal assignments and let app-server start or schedule each target parent turn. Your initial authorization activates the native phase plan: app-server aggregates all proposals, fans the sealed proposal checkpoint out to every bettor for cross-read and objection, aggregates those responses, fans the sealed review checkpoint out for final bets, and activates the Judge exactly once. These are mechanical mailbox transitions under the arena contract, not new semantic decisions. A material exception wakes you; an ordinary checkpoint does not. The Judge verdict is queued back into your native mailbox for continuity and closes the successful round without requiring you to restate or re-judge it. Do not issue separate cross-read, bet, or verdict requests after proposals are dispatched. The verdict must identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never bet or judge as Room Concierge. Do not keep a concierge turn alive while peers work. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n{}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own the arena objective, initial framing, exceptions, dependencies, and communication; the client will only observe. You are not a proposer and you do not decide the business outcome. For a competitive method, dispatch exactly one independent peer_proposal assignment to every proposal-bearing bettor, then end this turn immediately. Do not wait synchronously for any bettor. Asynchronous dispatch means your concierge turn ends after assignment; it does not mean queue_only delivery. Omit deliveryPolicy for direct proposal assignments and let app-server start or schedule each target parent turn. Your initial authorization activates the native phase plan: app-server aggregates all proposals, fans the sealed proposal checkpoint out to every bettor for cross-read and objection, aggregates those responses, fans the sealed review checkpoint out for final bets, and activates the Judge exactly once. These are mechanical mailbox transitions under the arena contract, not new semantic decisions. A material exception wakes you; an ordinary checkpoint does not. The Judge verdict is queued back into your native mailbox for continuity and closes the successful round without requiring you to restate or re-judge it. Do not issue separate cross-read, bet, or verdict requests after proposals are dispatched. The verdict must identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never bet or judge as Room Concierge. Do not keep a concierge turn alive while peers work. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
         params.request_origin,
         params.case_brief,
         params.layer_objective,
@@ -7781,6 +7785,12 @@ fn build_arena_intake_prompt(
         params.uncertainties.join("\n- "),
         params.reality_evidence.join("\n- "),
         params.cost_goal,
+        params.resume_context.as_ref().map(|resume| format!(
+            "Resume semantic boundary:\nProtected decisions:\n- {}\nRevisable settlement:\n- {}\nOpen implementation scope:\n- {}",
+            resume.protected_decisions.join("\n- "),
+            resume.revisable_settlement.join("\n- "),
+            resume.open_implementation_scope.join("\n- "),
+        )).unwrap_or_else(|| "Resume semantic boundary: initial round; no prior settlement scope supplied.".to_string()),
         contract.coordination.decision_method,
         round_policy,
         participants,
@@ -11100,6 +11110,25 @@ mod tests {
     }
 
     #[test]
+    fn resumed_arena_intake_preserves_three_distinct_semantic_scopes() {
+        let mut params = semantic_arena_request_params();
+        params.resume_context = Some(codex_app_server_protocol::MemythosArenaResumeContext {
+            previous_decision_refs: vec!["decision://slowdown-observed".to_string()],
+            previous_evidence_refs: vec!["evidence://baseline".to_string()],
+            candidate_change_refs: vec!["evidence://instrumentation-defect".to_string()],
+            protected_decisions: vec!["The slowdown was observed".to_string()],
+            revisable_settlement: vec!["Causal hypothesis weights".to_string()],
+            open_implementation_scope: vec!["Repair the attribution window".to_string()],
+        });
+
+        let prompt = build_arena_intake_prompt(&params, &competitive_composition_params().contract);
+
+        assert!(prompt.contains("Protected decisions:\n- The slowdown was observed"));
+        assert!(prompt.contains("Revisable settlement:\n- Causal hypothesis weights"));
+        assert!(prompt.contains("Open implementation scope:\n- Repair the attribution window"));
+    }
+
+    #[test]
     fn competitive_method_consolidates_cross_read_and_objection_into_one_phase() {
         assert_eq!(
             phase_from_message_kind("peer_cross_read").as_deref(),
@@ -11436,6 +11465,9 @@ mod tests {
             previous_decision_refs: vec!["decision://fixture".to_string()],
             previous_evidence_refs: vec!["evidence://baseline".to_string()],
             candidate_change_refs: vec!["evidence://global-invalidation".to_string()],
+            protected_decisions: vec!["The observed slowdown remains a fact".to_string()],
+            revisable_settlement: vec!["Causal hypothesis weights".to_string()],
+            open_implementation_scope: vec!["Instrumentation repair".to_string()],
         });
         let response = processor
             .arena_request(update, ConnectionId(7))

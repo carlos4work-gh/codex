@@ -789,6 +789,15 @@ pub struct MemythosArenaResumeContext {
     pub previous_evidence_refs: Vec<String>,
     #[serde(default)]
     pub candidate_change_refs: Vec<String>,
+    /// Decisions that remain authoritative unless cited evidence materially invalidates them.
+    #[serde(default)]
+    pub protected_decisions: Vec<String>,
+    /// Prior hypotheses, weights, or interpretations that new evidence may revise.
+    #[serde(default)]
+    pub revisable_settlement: Vec<String>,
+    /// Downstream implementation questions that remain open without reopening business decisions.
+    #[serde(default)]
+    pub open_implementation_scope: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
