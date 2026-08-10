@@ -1199,9 +1199,15 @@ impl ArenaParentProvisioningAdapter for NativeArenaParentProvisioningAdapter {
                 let parsed = ThreadId::from_string(thread_id).map_err(|_| {
                     invalid_params(format!("invalid reusable thread id: {thread_id}"))
                 })?;
-                self.thread_manager.get_thread(parsed).await.map_err(|_| {
+                let thread = self.thread_manager.get_thread(parsed).await.map_err(|_| {
                     invalid_params(format!("reusable thread is not live: {thread_id}"))
                 })?;
+                let config = thread.config().await;
+                validate_reusable_parent_identity(
+                    config.developer_instructions.as_deref(),
+                    params,
+                    participant,
+                )?;
                 (thread_id.to_string(), false)
             } else {
                 let mut config = (*self.config).clone();
@@ -1419,6 +1425,26 @@ fn native_arena_parent_identity_sha256(
         "{:x}",
         Sha256::digest(native_arena_parent_developer_instructions(params, participant).as_bytes())
     )
+}
+
+fn validate_reusable_parent_identity(
+    developer_instructions: Option<&str>,
+    params: &MemythosArenaCompositionProvisionParams,
+    participant: &codex_app_server_protocol::MemythosArenaCompositionParticipant,
+) -> Result<(), JSONRPCErrorError> {
+    let expected = native_arena_parent_developer_instructions(params, participant);
+    let identity_matches = developer_instructions
+        .is_some_and(|instructions| instructions == expected || instructions.ends_with(&expected));
+    if identity_matches {
+        return Ok(());
+    }
+
+    Err(invalid_params(format!(
+        "reusable parent {} does not carry identity {} (sha256 {}); revise the arena composition instead of keeping this thread",
+        participant.participant_id,
+        native_arena_parent_identity_version(params),
+        native_arena_parent_identity_sha256(params, participant),
+    )))
 }
 
 #[cfg(test)]
@@ -10187,6 +10213,46 @@ mod tests {
             native_arena_parent_identity_version(&params),
             format!("{}:parent-identity-v1", params.contract.contract_version)
         );
+    }
+
+    #[test]
+    fn reusable_parent_accepts_the_exact_native_identity_after_role_instructions() {
+        let params = competitive_composition_params();
+        let participant = params
+            .contract
+            .participants
+            .iter()
+            .find(|participant| participant.agent_role == "bettor")
+            .expect("bettor participant");
+        let identity = native_arena_parent_developer_instructions(&params, participant);
+        let composed = format!("Native role instructions.\n\n{identity}");
+
+        validate_reusable_parent_identity(Some(&composed), &params, participant)
+            .expect("the live thread should retain its exact native identity suffix");
+    }
+
+    #[test]
+    fn reusable_parent_rejects_missing_or_stale_native_identity() {
+        let params = competitive_composition_params();
+        let participant = params
+            .contract
+            .participants
+            .iter()
+            .find(|participant| participant.agent_role == "bettor")
+            .expect("bettor participant");
+
+        let missing = validate_reusable_parent_identity(None, &params, participant)
+            .expect_err("a parent without bootstrap identity cannot be reused");
+        assert!(missing.message.contains("revise the arena composition"));
+
+        let stale = validate_reusable_parent_identity(
+            Some("Native role instructions.\n\nStale arena identity."),
+            &params,
+            participant,
+        )
+        .expect_err("a stale identity cannot silently enter the next round");
+        assert!(stale.message.contains("parent-identity-v1"));
+        assert!(stale.message.contains("sha256"));
     }
 
     #[test]
