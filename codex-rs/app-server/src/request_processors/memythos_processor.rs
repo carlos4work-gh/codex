@@ -443,9 +443,13 @@ fn native_judge_verdict_output_schema(
                 "type": "array",
                 "items": { "type": "string" }
             },
-            "closed_decisions_status": {
+            "protected_decisions_status": {
                 "type": "string",
                 "enum": ["preserved", "reopened"]
+            },
+            "reopened_decision_refs": {
+                "type": "array",
+                "items": { "type": "string" }
             },
             "resume_scope_status": {
                 "type": "string",
@@ -458,7 +462,8 @@ fn native_judge_verdict_output_schema(
             "ranked_alternatives",
             "dissent",
             "reopening_signals",
-            "closed_decisions_status",
+            "protected_decisions_status",
+            "reopened_decision_refs",
             "resume_scope_status",
             "rationale"
         ],
@@ -475,7 +480,8 @@ struct NativeJudgeVerdict {
     ranked_alternatives: Vec<String>,
     dissent: String,
     reopening_signals: Vec<String>,
-    closed_decisions_status: String,
+    protected_decisions_status: String,
+    reopened_decision_refs: Vec<String>,
     resume_scope_status: String,
     rationale: String,
 }
@@ -488,6 +494,7 @@ fn is_valid_native_judge_verdict(text: &str, eligible_winner_ids: &HashSet<&str>
         &verdict.dissent,
         &verdict.reopening_signals,
         &verdict.rationale,
+        &verdict.reopened_decision_refs,
     );
     eligible_winner_ids.contains(verdict.winner_participant_id.as_str())
         && verdict
@@ -495,7 +502,7 @@ fn is_valid_native_judge_verdict(text: &str, eligible_winner_ids: &HashSet<&str>
             .iter()
             .all(|participant_id| eligible_winner_ids.contains(participant_id.as_str()))
         && matches!(
-            verdict.closed_decisions_status.as_str(),
+            verdict.protected_decisions_status.as_str(),
             "preserved" | "reopened"
         )
         && matches!(
@@ -2192,7 +2199,7 @@ fn native_concierge_checkpoint_prompt(message_kind: &str, message: &str) -> Stri
 
 fn native_judge_checkpoint_prompt(message: &str, eligible_winner_ids: &[String]) -> String {
     format!(
-        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Return only the JSON object required by the native output schema. Select exactly one eligible winner, rank the alternatives, preserve dissent, and state reopening signals. `closed_decisions_status` measures only whether an explicitly declared closed decision remains valid: report `preserved` unless new evidence materially invalidates that decision; only then report `reopened`. `resume_scope_status` separately describes the work scope: use `not_applicable` for an initial round, `retained` when a resume changes no hypothesis or decision scope, `partially_reopened` when new evidence reopens only affected hypotheses, weights, or bounded scope while protected decisions remain valid, and `fully_reopened` only when the whole decision scope must be reconsidered. A partial resume therefore normally reports `closed_decisions_status=preserved` and `resume_scope_status=partially_reopened`. Identify the evidence and affected authority in the rationale. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
+        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Return only the JSON object required by the native output schema. Select exactly one eligible winner, rank the alternatives, preserve dissent, and state reopening signals. `protected_decisions_status` measures only whether protected guardrails, authority boundaries, or explicit invariants remain valid; changing an affected winner, hypothesis weight, or bounded decision does not reopen protected decisions. Report every bounded decision changed by this resume in `reopened_decision_refs`, using native refs when available and stable semantic refs otherwise; use an empty array when none changed. `resume_scope_status` separately describes the work scope: use `not_applicable` for an initial round, `retained` when a resume changes no hypothesis or decision scope, `partially_reopened` when new evidence reopens only affected hypotheses, weights, or bounded scope while protected decisions remain valid, and `fully_reopened` only when the whole decision scope must be reconsidered. A partial resume therefore normally reports `protected_decisions_status=preserved`, one or more `reopened_decision_refs`, and `resume_scope_status=partially_reopened`. Identify the evidence and affected authority in the rationale. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
         eligible_winner_ids.join(", ")
     )
 }
@@ -9437,7 +9444,13 @@ mod tests {
             schema["required"]
                 .as_array()
                 .expect("required fields")
-                .contains(&serde_json::json!("closed_decisions_status"))
+                .contains(&serde_json::json!("protected_decisions_status"))
+        );
+        assert!(
+            schema["required"]
+                .as_array()
+                .expect("required fields")
+                .contains(&serde_json::json!("reopened_decision_refs"))
         );
         assert!(
             schema["required"]
@@ -10322,7 +10335,8 @@ mod tests {
                             "ranked_alternatives": ["bettor-growth", "bettor-risk"],
                             "dissent": "Retain the bounded risk posture.",
                             "reopening_signals": ["Unit economics materially deteriorate."],
-                            "closed_decisions_status": "preserved",
+                            "protected_decisions_status": "preserved",
+                            "reopened_decision_refs": [],
                             "resume_scope_status": "not_applicable",
                             "rationale": "The growth posture wins within the declared reversible boundary."
                         })
@@ -10577,11 +10591,10 @@ mod tests {
         assert!(
             prompt.contains("Return only the JSON object required by the native output schema")
         );
-        assert!(prompt.contains(
-            "measures only whether an explicitly declared closed decision remains valid"
-        ));
+        assert!(prompt.contains("measures only whether protected guardrails"));
         assert!(prompt.contains("separately describes the work scope"));
-        assert!(prompt.contains("closed_decisions_status=preserved"));
+        assert!(prompt.contains("protected_decisions_status=preserved"));
+        assert!(prompt.contains("reopened_decision_refs"));
         assert!(prompt.contains("resume_scope_status=partially_reopened"));
         assert!(prompt.contains("bettor-growth"));
         assert!(prompt.contains("bettor-risk"));
@@ -10671,7 +10684,7 @@ mod tests {
                 request_text: None,
                 item_ref: Some("app-server://judge/verdict".to_string()),
                 text: Some(
-                    "winner_participant_id: bettor-risk\nclosed_decisions_status: preserved"
+                    "winner_participant_id: bettor-risk\nprotected_decisions_status: preserved"
                         .to_string(),
                 ),
             },
@@ -11771,7 +11784,8 @@ mod tests {
                     "ranked_alternatives": ["bettor-growth", "bettor-risk"],
                     "dissent": "Retain the bounded risk posture.",
                     "reopening_signals": ["Unit economics materially deteriorate."],
-                    "closed_decisions_status": "preserved",
+                    "protected_decisions_status": "preserved",
+                    "reopened_decision_refs": [],
                     "resume_scope_status": "not_applicable",
                     "rationale": "The growth posture wins within the declared reversible boundary."
                 }).to_string()),
@@ -11789,7 +11803,7 @@ mod tests {
     fn native_judge_verdict_rejects_the_legacy_text_contract() {
         let eligible = HashSet::from(["bettor-growth", "bettor-risk"]);
         assert!(!is_valid_native_judge_verdict(
-            "winner_participant_id: bettor-growth\nclosed_decisions_status: preserved",
+            "winner_participant_id: bettor-growth\nprotected_decisions_status: preserved",
             &eligible,
         ));
     }
@@ -11803,7 +11817,8 @@ mod tests {
                 "ranked_alternatives": ["bettor-growth"],
                 "dissent": "",
                 "reopening_signals": [],
-                "closed_decisions_status": "preserved",
+                "protected_decisions_status": "preserved",
+                "reopened_decision_refs": [],
                 "resume_scope_status": "not_applicable",
                 "rationale": ""
             })
@@ -11821,7 +11836,8 @@ mod tests {
                 "ranked_alternatives": ["bettor-measurement", "bettor-seasonal"],
                 "dissent": "Seasonality remains a bounded alternative.",
                 "reopening_signals": ["A verified instrumentation break."],
-                "closed_decisions_status": "preserved",
+                "protected_decisions_status": "preserved",
+                "reopened_decision_refs": ["decision://forecast/winner-and-weights"],
                 "resume_scope_status": "partially_reopened",
                 "rationale": "Only affected hypothesis weights are reopened."
             })
