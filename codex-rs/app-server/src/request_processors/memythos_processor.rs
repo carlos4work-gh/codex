@@ -1419,12 +1419,21 @@ fn native_arena_parent_task_contract(
         .iter()
         .find(|participant| participant.participant_id == lease.participant_id)?;
     if composition.applied_revision.is_some() {
+        let final_validation_boundaries = if participant.agent_role == "judge" {
+            format!(
+                "\nFinal validation boundaries for this verdict:\n- {}\nValidate the verdict against every boundary. Preserve any exact predicate or invariant verbatim in the corresponding structured verdict field; do not replace it with a newly derived trigger.",
+                composition.contract.completion_criteria.join("\n- "),
+            )
+        } else {
+            String::new()
+        };
         Some(format!(
-            "Native current task delta for a revised arena composition:\nBounded revised objective: {}\nCurrent role objective: {}\nExpected changed contribution: {}\nExit condition: {}.\nThe arena's previously registered completion criteria remain authoritative validation boundaries. Do not restate, re-argue, or summarize them unless new evidence changes one or a criterion blocks this contribution. Focus the response on the semantic delta created by the revised objective.",
+            "Native current task delta for a revised arena composition:\nBounded revised objective: {}\nCurrent role objective: {}\nExpected changed contribution: {}\nExit condition: {}.\nThe arena's previously registered completion criteria remain authoritative validation boundaries. Do not restate, re-argue, or summarize them unless new evidence changes one or a criterion blocks this contribution. Focus the response on the semantic delta created by the revised objective.{}",
             composition.contract.shared_objective,
             participant.role_objective,
             participant.expected_contribution,
             participant.exit_condition,
+            final_validation_boundaries,
         ))
     } else {
         Some(format!(
@@ -12376,6 +12385,27 @@ mod tests {
         assert!(revised_task_contract.contains("Native current task delta"));
         assert!(!revised_task_contract.contains("Mandatory completion criteria"));
         assert!(revised_task_contract.contains("Do not restate, re-argue, or summarize"));
+        assert!(revised_task_contract.contains("Final validation boundaries for this verdict"));
+        assert!(revised_task_contract.contains("Judge selects a supported position"));
+        assert!(revised_task_contract.contains("Preserve any exact predicate or invariant verbatim"));
+
+        let revised_bettor = second
+            .leases
+            .iter()
+            .find(|lease| lease.participant_id == "bettor-growth")
+            .expect("revised bettor lease");
+        let revised_bettor_task_contract = {
+            let state = processor.state.lock().await;
+            native_arena_parent_task_contract(
+                &state,
+                &second.room.arena_id,
+                &revised_bettor.thread_id,
+            )
+            .expect("revised bettor task contract")
+        };
+        assert!(revised_bettor_task_contract.contains("Native current task delta"));
+        assert!(!revised_bettor_task_contract.contains("Final validation boundaries"));
+        assert!(!revised_bettor_task_contract.contains("Judge selects a supported position"));
     }
 
     #[tokio::test]

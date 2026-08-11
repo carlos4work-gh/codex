@@ -2134,6 +2134,10 @@
         "messageKind": {
           "type": "string"
         },
+        "outputSchema": {
+          "default": null,
+          "description": "Native Responses API schema applied to the target parent turn. This travels with mailbox delivery so aggregate checkpoints keep the same output boundary as an OOTB turn/start request."
+        },
         "requiresResponse": {
           "type": "boolean"
         },
@@ -2178,6 +2182,14 @@
           },
           "type": "array"
         },
+        "openImplementationScope": {
+          "default": [],
+          "description": "Downstream implementation questions that remain open without reopening business decisions.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "previousDecisionRefs": {
           "default": [],
           "items": {
@@ -2187,6 +2199,22 @@
         },
         "previousEvidenceRefs": {
           "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "protectedDecisions": {
+          "default": [],
+          "description": "Decisions that remain authoritative unless cited evidence materially invalidates them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "revisableSettlement": {
+          "default": [],
+          "description": "Prior hypotheses, weights, or interpretations that new evidence may revise.",
           "items": {
             "type": "string"
           },
