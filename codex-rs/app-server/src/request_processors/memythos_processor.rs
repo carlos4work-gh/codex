@@ -10576,9 +10576,14 @@ mod tests {
         let goal = room_delivery_goal_objective(&message);
         assert!(envelope.starts_with("ARENA_PROPOSAL_TURN\n"));
         assert!(envelope.contains("Develop an independent response"));
+        assert!(envelope.contains("Evidence reference:\napp-server://rooms/room-1/intake"));
+        assert!(envelope.contains("Expected closure:\nnone"));
         assert!(!envelope.contains("peer_review_and_objection"));
         assert!(!envelope.contains("peer_bet"));
         assert!(!envelope.contains("judge_verdict"));
+        assert!(!envelope.contains("JSON"));
+        assert!(!envelope.contains("checklist"));
+        assert!(message.output_schema.is_none());
         assert!(!goal.contains("arena-1"));
         assert!(!goal.contains("round-1"));
         assert!(!goal.contains("Act as the persistent parent role"));
