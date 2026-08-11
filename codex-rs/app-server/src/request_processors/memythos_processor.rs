@@ -1418,14 +1418,24 @@ fn native_arena_parent_task_contract(
         .participants
         .iter()
         .find(|participant| participant.participant_id == lease.participant_id)?;
-    Some(format!(
-        "Native current task contract:\nShared arena objective: {}\nMandatory completion criteria:\n- {}\nCurrent role objective: {}\nExpected contribution: {}\nExit condition: {}.",
-        composition.contract.shared_objective,
-        composition.contract.completion_criteria.join("\n- "),
-        participant.role_objective,
-        participant.expected_contribution,
-        participant.exit_condition,
-    ))
+    if composition.applied_revision.is_some() {
+        Some(format!(
+            "Native current task delta for a revised arena composition:\nBounded revised objective: {}\nCurrent role objective: {}\nExpected changed contribution: {}\nExit condition: {}.\nThe arena's previously registered completion criteria remain authoritative validation boundaries. Do not restate, re-argue, or summarize them unless new evidence changes one or a criterion blocks this contribution. Focus the response on the semantic delta created by the revised objective.",
+            composition.contract.shared_objective,
+            participant.role_objective,
+            participant.expected_contribution,
+            participant.exit_condition,
+        ))
+    } else {
+        Some(format!(
+            "Native current task contract:\nShared arena objective: {}\nMandatory completion criteria:\n- {}\nCurrent role objective: {}\nExpected contribution: {}\nExit condition: {}.",
+            composition.contract.shared_objective,
+            composition.contract.completion_criteria.join("\n- "),
+            participant.role_objective,
+            participant.expected_contribution,
+            participant.exit_condition,
+        ))
+    }
 }
 
 fn append_native_arena_parent_task_contract(
@@ -2267,7 +2277,7 @@ fn native_concierge_checkpoint_prompt(message_kind: &str, message: &str) -> Stri
 
 fn native_judge_checkpoint_prompt(message: &str, eligible_winner_ids: &[String]) -> String {
     format!(
-        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Return only the JSON object required by the native output schema. Select exactly one eligible winner, rank the alternatives, preserve dissent, and state reopening signals. `protected_decisions_status` measures only whether protected guardrails, authority boundaries, or explicit invariants remain valid; changing an affected winner, hypothesis weight, or bounded decision does not reopen protected decisions. Report every bounded decision changed by this resume in `reopened_decision_refs`, using native refs when available and stable semantic refs otherwise; use an empty array when none changed. `resume_scope_status` separately describes the work scope: use `not_applicable` for an initial round, `retained` when a resume changes no hypothesis or decision scope, `partially_reopened` when new evidence reopens only affected hypotheses, weights, or bounded scope while protected decisions remain valid, and `fully_reopened` only when the whole decision scope must be reconsidered. A partial resume therefore normally reports `protected_decisions_status=preserved`, one or more `reopened_decision_refs`, and `resume_scope_status=partially_reopened`. Identify the evidence and affected authority in the rationale. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
+        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Return only the JSON object required by the native output schema. Select exactly one eligible winner, rank the alternatives, preserve dissent, and state reopening signals. The winner identifies the contribution that best resolves this bounded arena objective; winning a round does not by itself make that participant's hypothesis the global lead diagnosis, override protected decisions, or grant authority beyond the active objective. Keep that distinction explicit whenever the evidence still requires a mixed, provisional, or unsettled posture. `protected_decisions_status` measures only whether protected guardrails, authority boundaries, or explicit invariants remain valid; changing an affected winner, hypothesis weight, or bounded decision does not reopen protected decisions. Report every bounded decision changed by this resume in `reopened_decision_refs`, using native refs when available and stable semantic refs otherwise; use an empty array when none changed. `resume_scope_status` separately describes the work scope: use `not_applicable` for an initial round, `retained` when a resume changes no hypothesis or decision scope, `partially_reopened` when new evidence reopens only affected hypotheses, weights, or bounded scope while protected decisions remain valid, and `fully_reopened` only when the whole decision scope must be reconsidered. A partial resume therefore normally reports `protected_decisions_status=preserved`, one or more `reopened_decision_refs`, and `resume_scope_status=partially_reopened`. On a resumed composition, explain only changed evidence, changed bounded decisions, and remaining dissent; reference unchanged contract constraints without reproducing them. Identify the evidence and affected authority in the rationale. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
         eligible_winner_ids.join(", ")
     )
 }
@@ -2275,10 +2285,10 @@ fn native_judge_checkpoint_prompt(message: &str, eligible_winner_ids: &[String])
 fn native_bettor_checkpoint_prompt(message_kind: &str, message: &str) -> String {
     let next_action = match message_kind {
         "peer_review_and_objection" => {
-            "All expected independent proposals are now sealed in your native mailbox. Read every proposal, compare it with your own position, identify material agreements and objections, and return one substantive peer review with an explicitly revised position. Do not merely summarize the room."
+            "All expected independent proposals are now sealed in your native mailbox. Read every proposal, compare it with your own position, identify material agreements and objections, and return one substantive peer review with an explicitly revised position. Do not merely summarize the room. If this is a revised composition, report only what changed in your position, why it changed, and the remaining material objection; do not reproduce unchanged arena constraints."
         }
         "peer_bet" => {
-            "All expected peer reviews and objections are now sealed in your native mailbox. Read the complete checkpoint, update your position from the shared evidence, and return one final bet. Name the exact participant proposal you support, justify the commitment, preserve material dissent, and state reopening signals."
+            "All expected peer reviews and objections are now sealed in your native mailbox. Read the complete checkpoint, update your position from the shared evidence, and return one final bet. Name the exact participant proposal you support, justify the commitment, preserve material dissent, and state reopening signals. If this is a revised composition, keep the bet to the changed commitment, decisive new evidence, and material dissent; reference unchanged guardrails without restating them."
         }
         _ => "Read the complete sealed mailbox checkpoint and complete your assigned arena phase.",
     };
@@ -10818,6 +10828,8 @@ mod tests {
         assert!(prompt.contains("protected_decisions_status=preserved"));
         assert!(prompt.contains("reopened_decision_refs"));
         assert!(prompt.contains("resume_scope_status=partially_reopened"));
+        assert!(prompt.contains("does not by itself make that participant's hypothesis the global lead diagnosis"));
+        assert!(prompt.contains("explain only changed evidence"));
         assert!(prompt.contains("bettor-growth"));
         assert!(prompt.contains("bettor-risk"));
         assert!(prompt.contains("returned automatically to the Room Concierge"));
@@ -12271,6 +12283,21 @@ mod tests {
         let ClientResponsePayload::MemythosArenaCompositionProvision(first) = first else {
             panic!("expected initial composition response");
         };
+        let initial_judge = first
+            .leases
+            .iter()
+            .find(|lease| lease.participant_id == "judge")
+            .expect("initial judge lease");
+        let initial_task_contract = {
+            let state = processor.state.lock().await;
+            native_arena_parent_task_contract(
+                &state,
+                &first.room.arena_id,
+                &initial_judge.thread_id,
+            )
+            .expect("initial task contract")
+        };
+        assert!(initial_task_contract.contains("Mandatory completion criteria"));
 
         let implicit_error = processor
             .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
@@ -12332,6 +12359,23 @@ mod tests {
                 .map(|lease| lease.thread_id.as_str())
                 .collect::<Vec<_>>()
         );
+        let revised_judge = second
+            .leases
+            .iter()
+            .find(|lease| lease.participant_id == "judge")
+            .expect("revised judge lease");
+        let revised_task_contract = {
+            let state = processor.state.lock().await;
+            native_arena_parent_task_contract(
+                &state,
+                &second.room.arena_id,
+                &revised_judge.thread_id,
+            )
+            .expect("revised task contract")
+        };
+        assert!(revised_task_contract.contains("Native current task delta"));
+        assert!(!revised_task_contract.contains("Mandatory completion criteria"));
+        assert!(revised_task_contract.contains("Do not restate, re-argue, or summarize"));
     }
 
     #[tokio::test]
