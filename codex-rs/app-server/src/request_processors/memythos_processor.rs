@@ -3803,14 +3803,15 @@ impl MemythosRequestProcessor {
         if let Some(resume) = resume.as_ref()
             && resume.assessment.disposition == MemythosArenaResumeDisposition::RetainDecision
         {
+            let mut composition = previous
+                .clone()
+                .expect("retain decision requires an active composition");
+            mark_composition_leases_reused(&mut composition);
             return Ok(MemythosArenaRequestResponse {
                 request_id: self.next_id("mem_arena_request", &self.next_delivery_id),
                 planner_thread_id: resume.planner_thread_id.clone(),
                 planner_turn_id: resume.planner_turn_id.clone(),
-                composition: previous
-                    .clone()
-                    .expect("retain decision requires an active composition")
-                    .into(),
+                composition: composition.into(),
                 resume_assessment: resume.assessment.clone(),
                 initial_delivery: None,
             }
@@ -3993,7 +3994,7 @@ impl MemythosRequestProcessor {
                 "native arena intake returned an unexpected response",
             ));
         };
-        let composition = {
+        let mut composition = {
             let state = self.state.lock().await;
             state
                 .arena_compositions
@@ -4001,6 +4002,11 @@ impl MemythosRequestProcessor {
                 .cloned()
                 .unwrap_or(composition)
         };
+        if resume.as_ref().is_some_and(|resume| {
+            resume.assessment.disposition == MemythosArenaResumeDisposition::PartialResume
+        }) {
+            mark_composition_leases_reused(&mut composition);
+        }
         Ok(MemythosArenaRequestResponse {
             request_id,
             planner_thread_id,
@@ -7999,15 +8005,6 @@ fn native_turn_loopback_candidates(
     let Some(phase) = incoming.phase.as_deref() else {
         return Vec::new();
     };
-    let Some(response_text) = state
-        .native_parent_turn_responses
-        .get(&native_token_usage_key(thread_id, turn_id))
-        .and_then(|response| response.text.as_deref())
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-    else {
-        return Vec::new();
-    };
     let Some(room) = state
         .rooms
         .values()
@@ -8019,6 +8016,27 @@ fn native_turn_loopback_candidates(
         .participants
         .iter()
         .find(|participant| participant.thread_id == thread_id)
+    else {
+        return Vec::new();
+    };
+
+    if source.parent_role == "room_concierge" && phase == "arena_intake" {
+        return native_arena_intake_assignments(
+            state,
+            room,
+            incoming,
+            source,
+            turn_id,
+            native_event_ref,
+        );
+    }
+
+    let Some(response_text) = state
+        .native_parent_turn_responses
+        .get(&native_token_usage_key(thread_id, turn_id))
+        .and_then(|response| response.text.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
     else {
         return Vec::new();
     };
@@ -8177,6 +8195,121 @@ fn native_turn_loopback_candidates(
         .collect()
 }
 
+fn native_arena_intake_assignments(
+    state: &MemythosRuntimeState,
+    room: &MemythosRoom,
+    incoming: &MemythosArenaMessageDelivery,
+    concierge: &MemythosRoomParticipant,
+    turn_id: &str,
+    native_event_ref: &str,
+) -> Vec<MemythosArenaMessage> {
+    let Some(plan) = state
+        .arena_resume_execution_plans
+        .get(&arena_round_key(&incoming.arena_id, &incoming.round_id))
+    else {
+        return Vec::new();
+    };
+    if plan.mode == MemythosArenaResumeExecutionMode::RetainDecision {
+        return Vec::new();
+    }
+
+    let affected_ids = plan
+        .affected_participant_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let composition = state.arena_compositions.get(&incoming.arena_id);
+    let participant_id_for_thread = |thread_id: &str| {
+        composition.and_then(|composition| {
+            composition
+                .leases
+                .iter()
+                .find(|lease| lease.thread_id == thread_id)
+                .map(|lease| lease.participant_id.as_str())
+        })
+    };
+    let message_kind = if plan.mode
+        == MemythosArenaResumeExecutionMode::ReassessAffectedPositions
+    {
+        "resume_reassessment"
+    } else {
+        "peer_proposal"
+    };
+    let concierge_framing = state
+        .native_parent_turn_responses
+        .get(&native_token_usage_key(&concierge.thread_id, turn_id))
+        .and_then(|response| response.text.as_deref())
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+
+    room.participants
+        .iter()
+        .filter(|participant| participant.parent_role == "bettor")
+        .filter(|participant| {
+            plan.mode != MemythosArenaResumeExecutionMode::ReassessAffectedPositions
+                || participant_id_for_thread(&participant.thread_id)
+                    .is_some_and(|participant_id| affected_ids.contains(participant_id))
+        })
+        .filter(|target| {
+            !state.arena_message_deliveries.iter().any(|delivery| {
+                delivery.arena_id == incoming.arena_id
+                    && delivery.round_id == incoming.round_id
+                    && delivery.sender_thread_id == concierge.thread_id
+                    && delivery.receiver_thread_id == target.thread_id
+                    && delivery.phase.as_deref()
+                        == phase_from_message_kind(message_kind).as_deref()
+            })
+        })
+        .map(|target| {
+            let assignment = if message_kind == "resume_reassessment" {
+                format!(
+                    "Reassess only your affected position against the new evidence and protected decisions. Preserve settled scope, identify what changed, revise your commitment if warranted, and return the bounded reassessment for native Judge aggregation.\n\nArena intake: {}{}",
+                    incoming.human_summary,
+                    concierge_framing
+                        .map(|framing| format!("\n\nConcierge framing: {framing}"))
+                        .unwrap_or_default(),
+                )
+            } else {
+                format!(
+                    "Produce an independent proposal from your assigned stance for this arena objective. State your thesis, evidence, tradeoffs, objections, and falsification signals. Do not coordinate with peers yet; your completed response will enter native cross-read.\n\nArena intake: {}{}",
+                    incoming.human_summary,
+                    concierge_framing
+                        .map(|framing| format!("\n\nConcierge framing: {framing}"))
+                        .unwrap_or_default(),
+                )
+            };
+            MemythosArenaMessage {
+                message_id: format!(
+                    "intake-loopback-{turn_id}-{}-{message_kind}",
+                    target.thread_id
+                ),
+                case_id: room.case_id.clone(),
+                arena_id: incoming.arena_id.clone(),
+                round_id: incoming.round_id.clone(),
+                from_parent_thread_id: concierge.thread_id.clone(),
+                from_parent_role: concierge.parent_role.clone(),
+                to_parent_thread_id: target.thread_id.clone(),
+                to_parent_role: target.parent_role.clone(),
+                message_kind: message_kind.to_string(),
+                human_summary: assignment.clone(),
+                execution_prompt: Some(assignment),
+                context_packet_ref: native_event_ref.to_string(),
+                artifact_refs: Vec::new(),
+                requires_response: true,
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
+                response_contract: Some(if message_kind == "resume_reassessment" {
+                    "Return one bounded reassessment for the native Judge checkpoint."
+                        .to_string()
+                } else {
+                    "Return one independent proposal for native peer cross-read.".to_string()
+                }),
+                output_schema: None,
+            }
+        })
+        .collect()
+}
+
 fn build_arena_intake_prompt(
     params: &MemythosArenaRequestParams,
     contract: &MemythosArenaCompositionContract,
@@ -8213,10 +8346,10 @@ fn build_arena_intake_prompt(
     let execution_instruction = match execution_plan.mode {
         MemythosArenaResumeExecutionMode::InitialRound
         | MemythosArenaResumeExecutionMode::FullRound => concat!(
-            "Dispatch exactly one independent peer_proposal assignment to every proposal-bearing ",
-            "bettor. Asynchronous dispatch means your concierge turn ends after assignment; it ",
-            "does not mean queue_only delivery. Your initial authorization activates the native ",
-            "phase plan: app-server aggregates all proposals, fans the sealed proposal checkpoint ",
+            "App-server will dispatch exactly one independent peer_proposal assignment to every ",
+            "proposal-bearing bettor after this intake turn completes. Your responsibility is to ",
+            "frame the objective, semantic boundaries, and material exceptions without issuing ",
+            "phase commands. The native phase plan aggregates all proposals, fans the sealed proposal checkpoint ",
             "out to every bettor for cross-read and objection, aggregates those responses, fans ",
             "the sealed review checkpoint out for final bets, and activates the Judge exactly ",
             "once. These are mechanical mailbox transitions under the arena contract, not new ",
@@ -8228,9 +8361,10 @@ fn build_arena_intake_prompt(
         .to_string(),
         MemythosArenaResumeExecutionMode::ReassessAffectedPositions => format!(
             concat!(
-                "This is a bounded partial resume. Dispatch exactly one resume_reassessment ",
-                "assignment to each affected participant id and no proposal, cross-read, or ",
-                "separate bet assignment. Each affected parent uses OOTB thread memory and the ",
+                "This is a bounded partial resume. App-server will dispatch exactly one ",
+                "resume_reassessment assignment to each affected participant id after this intake ",
+                "turn completes, with no proposal, cross-read, or separate bet assignment. Each ",
+                "affected parent uses OOTB thread memory and the ",
                 "cited novelty refs to return one changed position, remaining material objections, ",
                 "revised bet, and reopening breakpoints. Affected participant ids: {}. ",
                 "Source round: {}. Cited change refs: {}."
@@ -8244,7 +8378,7 @@ fn build_arena_intake_prompt(
         }
     };
     format!(
-        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n{}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nNative resume execution mode: {:?}\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own the arena objective, initial framing, exceptions, dependencies, and communication; the client will only observe. You are not a proposer and you do not decide the business outcome. Dispatch only the assignments authorized by the native execution plan, then end this turn immediately. Do not wait synchronously for any parent. Omit deliveryPolicy for direct assignments and let app-server start or schedule each target parent turn. Mechanical mailbox transitions are app-server responsibilities, not new semantic decisions. A material exception wakes you; an ordinary checkpoint does not. The Judge verdict is queued back into your native mailbox for continuity and closes the successful round without requiring you to restate or re-judge it. Never bet or judge as Room Concierge. Do not keep a concierge turn alive while peers work. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n{}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nNative resume execution mode: {:?}\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own the arena objective, initial framing, exceptions, dependencies, and communication; the client will only observe. You are not a proposer and you do not decide the business outcome. Frame the authorized work and end this turn; app-server dispatches the phase assignments after your turn completes. Do not call tools to activate proposals, reassessments, cross-reads, bets, or the Judge. Mechanical mailbox transitions are app-server responsibilities, not new semantic decisions. A material exception wakes you; an ordinary checkpoint does not. The Judge verdict is queued back into your native mailbox for continuity and closes the successful round without requiring you to restate or re-judge it. Never bet or judge as Room Concierge. Do not keep a concierge turn alive while peers work. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
         params.request_origin,
         params.case_brief,
         params.layer_objective,
@@ -8473,6 +8607,12 @@ fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
 
 fn arena_round_key(arena_id: &str, round_id: &str) -> String {
     format!("{arena_id}::{round_id}")
+}
+
+fn mark_composition_leases_reused(composition: &mut MemythosArenaCompositionProvisionResponse) {
+    for lease in &mut composition.leases {
+        lease.lease_source = "app_server_native_reused".to_string();
+    }
 }
 
 fn arena_closure_candidate(
@@ -11863,8 +12003,8 @@ mod tests {
         assert!(prompt.contains("Do not ask the client to activate phases"));
         assert!(prompt.contains("You are the Room Concierge and own the arena objective"));
         assert!(prompt.contains("mechanical mailbox transitions under the arena contract"));
-        assert!(prompt.contains("end this turn immediately"));
-        assert!(prompt.contains("Do not wait synchronously for any parent"));
+        assert!(prompt.contains("app-server dispatches the phase assignments"));
+        assert!(prompt.contains("Do not call tools to activate proposals"));
         assert!(prompt.contains("an ordinary checkpoint does not"));
         assert!(prompt.contains("Do not keep a concierge turn alive while peers work"));
         assert!(prompt.contains("Do not issue separate cross-read, bet, or verdict requests"));
@@ -11903,7 +12043,8 @@ mod tests {
             build_arena_intake_prompt(&params, &competitive_composition_params().contract, &plan);
 
         assert!(prompt.contains("bounded partial resume"));
-        assert!(prompt.contains("exactly one resume_reassessment"));
+        assert!(prompt.contains("resume_reassessment assignment"));
+        assert!(prompt.contains("App-server will dispatch exactly one"));
         assert!(prompt.contains("Affected participant ids: bettor-growth"));
         assert!(prompt.contains("Source round: arena-composition-round-1"));
         assert!(prompt.contains("no proposal, cross-read, or separate bet assignment"));
@@ -12619,7 +12760,7 @@ mod tests {
                 .composition
                 .leases
                 .iter()
-                .all(|lease| lease.lease_source == "created")
+                .all(|lease| lease.lease_source == "app_server_native_reused")
         );
         assert_eq!(
             first
@@ -12635,6 +12776,42 @@ mod tests {
                 .map(|lease| (&lease.participant_id, &lease.thread_id))
                 .collect::<Vec<_>>(),
             "new evidence is a task delta and must not replace parent identity"
+        );
+
+        let resumed_turn_id = resumed_delivery
+            .turn_id
+            .as_deref()
+            .expect("partial resume concierge turn");
+        assert!(
+            processor
+                .record_native_turn_completed(
+                    &resumed_delivery.thread_id,
+                    resumed_turn_id,
+                    "completed",
+                    Some(500),
+                    Some(100),
+                    None,
+                    Some("The bounded resume is framed for the affected position.".to_string()),
+                )
+                .await
+        );
+        let state = processor.state.lock().await;
+        let reassessments = state
+            .arena_message_deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.round_id == resumed_delivery.round_id
+                    && delivery.phase.as_deref() == Some("resume_reassessment")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reassessments.len(), 1);
+        assert_eq!(
+            reassessments[0].sender_thread_id,
+            resumed_delivery.thread_id
+        );
+        assert_ne!(
+            reassessments[0].receiver_thread_id,
+            resumed_delivery.thread_id
         );
     }
 
@@ -12673,6 +12850,13 @@ mod tests {
         );
         assert!(response.resume_assessment.avoided_full_round);
         assert!(response.initial_delivery.is_none());
+        assert!(
+            response
+                .composition
+                .leases
+                .iter()
+                .all(|lease| lease.lease_source == "app_server_native_reused")
+        );
         assert_eq!(
             provisioning.goal_transitions.lock().await.len(),
             goal_transition_count,
