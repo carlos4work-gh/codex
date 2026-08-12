@@ -523,7 +523,6 @@ pub(crate) use memythos_processor::MemythosRoomToolSendToRoomArgs;
 pub(crate) use memythos_processor::NativeArenaCompositionPlanningAdapter;
 pub(crate) use memythos_processor::NativeArenaParentProvisioningAdapter;
 pub(crate) use memythos_processor::NativeMailboxPeerParentDeliveryAdapter;
-pub(crate) use memythos_processor::NativeParentTurnControlAdapter;
 pub(crate) use memythos_processor::ThreadGoalParentSnapshotAdapter;
 pub(crate) use memythos_processor::ThreadManagerParentConfigurationAdapter;
 pub(crate) use memythos_processor::ThreadTurnsParentResponseAdapter;
