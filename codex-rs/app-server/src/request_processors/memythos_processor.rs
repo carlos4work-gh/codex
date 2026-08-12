@@ -6201,7 +6201,7 @@ impl MemythosRequestProcessor {
         let prepared_goal = self.prepare_parent_goal_for_delivery(&message).await?;
         let delivery_attempt = self
             .peer_parent_delivery_adapter
-            .deliver_peer_parent_message(&message, target_reasoning_effort, connection_id)
+            .deliver_peer_parent_message(&message, target_reasoning_effort.clone(), connection_id)
             .await;
         let Some(target_turn_id) = delivery_attempt.receiver_turn_id.clone() else {
             let rollback_detail = self
