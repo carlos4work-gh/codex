@@ -3634,10 +3634,19 @@ impl MemythosRequestProcessor {
             }
             RoomDeliveryGoalTransition::PreserveGoal => {
                 validate_parent_goal_accepts_delivery(&current_goal)?;
+                let active_goal = self
+                    .arena_parent_provisioning_adapter
+                    .transition_parent_goal(
+                        &message.to_parent_thread_id,
+                        Some(&room_delivery_goal_objective(message)),
+                        ThreadGoalStatus::Active,
+                        true,
+                    )
+                    .await?;
                 Ok(PreparedParentDeliveryGoal {
-                    active_goal: current_goal.clone(),
+                    active_goal,
                     previous_goal: current_goal,
-                    assigned_for_delivery: false,
+                    assigned_for_delivery: true,
                 })
             }
         }
@@ -12660,6 +12669,69 @@ mod tests {
         let transitions = provisioning.goal_transitions.lock().await;
         assert_eq!(transitions.len(), 1);
         assert_eq!(transitions[0].0, "bettor-a");
+        assert_eq!(transitions[0].2, ThreadGoalStatus::Active);
+        assert!(transitions[0].3);
+    }
+
+    #[tokio::test]
+    async fn automatic_mailbox_delivery_rearms_an_active_parent_for_each_assignment() {
+        let provisioning = Arc::new(FakeArenaParentProvisioningAdapter::default());
+        provisioning.goals.lock().await.insert(
+            "concierge".to_string(),
+            ThreadGoal {
+                thread_id: "concierge".to_string(),
+                objective: "Complete initial room intake".to_string(),
+                status: ThreadGoalStatus::Active,
+                token_budget: Some(20_000),
+                tokens_used: 2_000,
+                time_used_seconds: 10,
+                created_at: 0,
+                updated_at: 0,
+            },
+        );
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(RecordOnlyParentConfigurationAdapter),
+            provisioning.clone(),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let message = MemythosArenaMessage {
+            message_id: "resume-1".to_string(),
+            case_id: "case-1".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-2".to_string(),
+            from_parent_thread_id: "human-intake".to_string(),
+            from_parent_role: "human".to_string(),
+            to_parent_thread_id: "concierge".to_string(),
+            to_parent_role: "room_concierge".to_string(),
+            message_kind: "human_intake".to_string(),
+            human_summary: "Resume from the accepted parent contract.".to_string(),
+            execution_prompt: None,
+            context_packet_ref: "app-server://rooms/room-1/checkpoints/resume".to_string(),
+            artifact_refs: Vec::new(),
+            requires_response: true,
+            delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+            aggregate_contract: None,
+            response_contract: None,
+            output_schema: None,
+        };
+
+        let prepared = processor
+            .prepare_parent_goal_for_delivery(&message)
+            .await
+            .expect("active parent should receive a fresh bounded assignment");
+
+        assert!(prepared.assigned_for_delivery);
+        assert_eq!(prepared.previous_goal.status, ThreadGoalStatus::Active);
+        assert_eq!(prepared.active_goal.status, ThreadGoalStatus::Active);
+        assert!(prepared.active_goal.objective.contains("assignment resume-1"));
+        let transitions = provisioning.goal_transitions.lock().await;
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].0, "concierge");
         assert_eq!(transitions[0].2, ThreadGoalStatus::Active);
         assert!(transitions[0].3);
     }

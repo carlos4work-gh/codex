@@ -336,6 +336,61 @@ async fn one_shot_arm_before_runtime_registration_is_applied_on_thread_start() -
 }
 
 #[tokio::test]
+async fn one_shot_external_goal_mutation_cancels_pending_completion() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let goal_service = Arc::new(GoalService::new());
+    goal_service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("first bounded assignment"),
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Set(Some(10_000)),
+            },
+        )
+        .await?;
+    let armed_goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("goal should exist before arming"))?;
+    goal_service.arm_completion_after_next_turn(thread_id, armed_goal.goal_id);
+
+    goal_service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("replacement assignment after rollback"),
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Keep,
+            },
+        )
+        .await?;
+
+    let harness = GoalExtensionHarness::new_with_goal_service(
+        runtime.clone(),
+        thread_id,
+        goal_service,
+    )
+    .await?;
+    harness.start_turn("turn-after-cancel", &TokenUsage::default()).await;
+    harness.stop_turn("turn-after-cancel").await;
+
+    let goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("goal should remain active"))?;
+    assert_eq!(codex_state::ThreadGoalStatus::Active, goal.status);
+    assert_eq!("replacement assignment after rollback", goal.objective);
+    Ok(())
+}
+
+#[tokio::test]
 async fn tool_finish_accounts_active_goal_progress_and_emits_event() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;

@@ -142,13 +142,21 @@ impl GoalRuntimeHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(goal_id);
     }
 
+    pub fn cancel_completion_after_next_turn(&self) {
+        *self
+            .inner
+            .complete_after_turn_goal_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
     pub(crate) async fn complete_armed_goal_for_turn(&self, turn_id: &str) -> Result<(), String> {
         let expected_goal_id = self
             .inner
             .complete_after_turn_goal_id
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .take();
         let Some(expected_goal_id) = expected_goal_id else {
             return Ok(());
         };
@@ -204,14 +212,6 @@ impl GoalRuntimeHandle {
             Some(turn_id.to_string()),
             protocol_goal_from_state(goal),
         );
-        let mut armed = self
-            .inner
-            .complete_after_turn_goal_id
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if armed.as_deref() == Some(expected_goal_id.as_str()) {
-            *armed = None;
-        }
         Ok(())
     }
 

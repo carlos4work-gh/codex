@@ -104,6 +104,13 @@ impl GoalService {
         }
     }
 
+    pub fn cancel_completion_after_next_turn(&self, thread_id: ThreadId) {
+        self.pending_completions().remove(&thread_id.to_string());
+        if let Some(runtime) = self.runtime_for_thread(thread_id) {
+            runtime.cancel_completion_after_next_turn();
+        }
+    }
+
     pub async fn arm_current_goal_completion_after_next_turn(
         &self,
         state_db: &codex_state::StateRuntime,
@@ -168,6 +175,10 @@ impl GoalService {
         }
 
         let runtime = self.runtime_for_thread(thread_id);
+        // A normal goal mutation supersedes any previously armed one-shot turn.
+        // The app-server arm path performs this mutation first and arms the
+        // resulting persisted goal immediately afterwards.
+        self.cancel_completion_after_next_turn(thread_id);
         // Hold this through the prepare/write window so idle continuation cannot
         // launch from goal state that this external mutation is about to change.
         let _goal_state_permit = match runtime.as_ref() {
@@ -284,6 +295,7 @@ impl GoalService {
         state_db: &codex_state::StateRuntime,
         thread_id: ThreadId,
     ) -> Result<bool, GoalServiceError> {
+        self.cancel_completion_after_next_turn(thread_id);
         let runtime = self.runtime_for_thread(thread_id);
         // Hold this through the prepare/write window so idle continuation cannot
         // launch from goal state that this external mutation is about to change.
