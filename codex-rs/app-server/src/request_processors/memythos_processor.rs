@@ -6364,6 +6364,12 @@ impl MemythosRequestProcessor {
                 params.room_id, message.message_id
             )),
         );
+        drop(state);
+        self.spawn_parent_turn_governor(
+            params.to_parent_thread_id.clone(),
+            target_turn_id.clone(),
+            target_reasoning_effort,
+        );
 
         Ok(MemythosRoomSendInputResponse {
             delivery: MemythosRoomSendInputDelivery {
