@@ -8743,7 +8743,7 @@ fn arena_closure_candidate(
         let execution_plan = state
             .arena_resume_execution_plans
             .get(&arena_round_key(arena_id, active_round_id));
-        let judge_phase = if execution_plan.is_some_and(|plan| {
+        if execution_plan.is_some_and(|plan| {
             plan.mode == MemythosArenaResumeExecutionMode::ReassessAffectedPositions
         }) {
             let execution_plan = execution_plan.expect("partial resume plan was checked above");
@@ -8774,7 +8774,6 @@ fn arena_closure_candidate(
             {
                 return None;
             }
-            "resume_reassessment"
         } else {
             if distinct_completed_targets("proposal") < minimum_positions
                 || distinct_completed_targets("peer_review_and_objection") < minimum_positions
@@ -8783,11 +8782,12 @@ fn arena_closure_candidate(
             {
                 return None;
             }
-            "judge"
-        };
+        }
         let native_judge_verdict_completed = deliveries.iter().any(|delivery| {
             delivery.receiver_thread_id == judge_thread_id
-                && delivery.phase.as_deref() == Some(judge_phase)
+                // Reassessments are evidence inputs. Their sealed aggregate wakes the Judge
+                // through the canonical judge phase, so terminal closure always observes judge.
+                && delivery.phase.as_deref() == Some("judge")
                 && delivery.status == "receiver_turn_completed"
                 && delivery.receiver_turn_id.as_deref().is_some_and(|turn_id| {
                     state
@@ -13292,6 +13292,126 @@ mod tests {
         assert_eq!(candidate.arena_id, response.room.arena_id);
         assert!(candidate.parent_thread_ids.contains(&concierge_thread_id));
         assert!(candidate.parent_thread_ids.contains(&judge_thread_id));
+    }
+
+    #[tokio::test]
+    async fn partial_resume_closes_after_affected_reassessment_and_canonical_judge_verdict() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let response = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(response) = response else {
+            panic!("expected arena composition provision response");
+        };
+        let thread_for = |participant_id: &str| {
+            response
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == participant_id)
+                .expect("participant lease should exist")
+                .thread_id
+                .clone()
+        };
+        let concierge_thread_id = thread_for("concierge");
+        let growth_thread_id = thread_for("bettor-growth");
+        let judge_thread_id = thread_for("judge");
+        let round_id = "arena-composition-resume-1";
+
+        let mut state = processor.state.lock().await;
+        state.arena_resume_execution_plans.insert(
+            arena_round_key(&response.room.arena_id, round_id),
+            partial_resume_execution_plan(vec![
+                "concierge".to_string(),
+                "bettor-growth".to_string(),
+                "judge".to_string(),
+            ]),
+        );
+        for (index, sender, receiver, phase, human_instruction) in [
+            (
+                0,
+                "human",
+                concierge_thread_id.as_str(),
+                "arena_intake",
+                true,
+            ),
+            (
+                1,
+                concierge_thread_id.as_str(),
+                growth_thread_id.as_str(),
+                "resume_reassessment",
+                false,
+            ),
+            (
+                2,
+                growth_thread_id.as_str(),
+                judge_thread_id.as_str(),
+                "judge",
+                false,
+            ),
+        ] {
+            state
+                .arena_message_deliveries
+                .push(MemythosArenaMessageDelivery {
+                    delivery_id: format!("resume-delivery-{index}"),
+                    message_id: format!("resume-message-{index}"),
+                    human_summary: format!("Completed {phase} delivery"),
+                    status: "receiver_turn_completed".to_string(),
+                    sender_thread_id: sender.to_string(),
+                    receiver_thread_id: receiver.to_string(),
+                    arena_id: response.room.arena_id.clone(),
+                    round_id: round_id.to_string(),
+                    phase: Some(phase.to_string()),
+                    delivery_mechanism: "native_test".to_string(),
+                    delivery_policy: None,
+                    aggregate_id: None,
+                    aggregate_state: None,
+                    checkpoint_state: None,
+                    checkpoint_event_refs: Vec::new(),
+                    receiver_turn_id: Some(format!("resume-turn-{index}")),
+                    receiver_response_event_ref: Some(format!("resume-item-{index}")),
+                    delivered_as_human_instruction: human_instruction,
+                    memory_replay_required: false,
+                    event_refs: Vec::new(),
+                    rejection_reason: None,
+                    failure_reason: None,
+                });
+        }
+        state.native_parent_turn_responses.insert(
+            native_token_usage_key(&judge_thread_id, "resume-turn-2"),
+            ParentTurnResponse {
+                status: Some(TurnStatus::Completed),
+                request_item_ref: None,
+                request_text: None,
+                item_ref: Some("app-server://judge/resume-verdict".to_string()),
+                text: Some(
+                    serde_json::json!({
+                        "winner_participant_id": "bettor-growth",
+                        "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+                        "dissent": "Retain the bounded risk posture.",
+                        "reopening_signals": ["A verified instrumentation break."],
+                        "protected_decisions_status": "preserved",
+                        "reopened_decision_refs": ["decision://forecast/winner"],
+                        "resume_scope_status": "partially_reopened",
+                        "rationale": "The affected position was reassessed without reopening unrelated decisions."
+                    })
+                    .to_string(),
+                ),
+            },
+        );
+
+        let candidate = arena_closure_candidate(&state, &response.room.arena_id, &judge_thread_id)
+            .expect("canonical judge completion should close a bounded partial resume");
+        assert_eq!(candidate.arena_id, response.room.arena_id);
     }
 
     #[test]
