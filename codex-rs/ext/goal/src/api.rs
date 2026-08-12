@@ -86,6 +86,7 @@ impl GoalSetOutcome {
 #[derive(Debug, Default)]
 pub struct GoalService {
     runtimes: Mutex<HashMap<String, Weak<GoalRuntimeHandle>>>,
+    pending_completion_after_turn: Mutex<HashMap<String, String>>,
 }
 
 impl GoalService {
@@ -94,8 +95,12 @@ impl GoalService {
     }
 
     pub fn arm_completion_after_next_turn(&self, thread_id: ThreadId, goal_id: String) {
+        let key = thread_id.to_string();
+        self.pending_completions()
+            .insert(key.clone(), goal_id.clone());
         if let Some(runtime) = self.runtime_for_thread(thread_id) {
-            runtime.arm_completion_after_next_turn(goal_id);
+            let armed_goal_id = self.pending_completions().remove(&key).unwrap_or(goal_id);
+            runtime.arm_completion_after_next_turn(armed_goal_id);
         }
     }
 
@@ -318,8 +323,12 @@ impl GoalService {
     }
 
     pub(crate) fn register_runtime(&self, runtime: &Arc<GoalRuntimeHandle>) {
+        let key = runtime.thread_id().to_string();
         self.runtimes()
-            .insert(runtime.thread_id().to_string(), Arc::downgrade(runtime));
+            .insert(key.clone(), Arc::downgrade(runtime));
+        if let Some(goal_id) = self.pending_completions().remove(&key) {
+            runtime.arm_completion_after_next_turn(goal_id);
+        }
     }
 
     pub(crate) fn unregister_runtime(&self, runtime: &Arc<GoalRuntimeHandle>) {
@@ -346,5 +355,11 @@ impl GoalService {
 
     fn runtimes(&self) -> std::sync::MutexGuard<'_, HashMap<String, Weak<GoalRuntimeHandle>>> {
         self.runtimes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn pending_completions(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.pending_completion_after_turn
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }

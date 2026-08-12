@@ -294,6 +294,48 @@ async fn armed_one_shot_goal_completes_during_turn_stop() -> anyhow::Result<()> 
 }
 
 #[tokio::test]
+async fn one_shot_arm_before_runtime_registration_is_applied_on_thread_start() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let goal_service = Arc::new(GoalService::new());
+    goal_service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("complete provisioned parent intake"),
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Set(Some(10_000)),
+            },
+        )
+        .await?;
+    let armed_goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("goal should exist before arming"))?;
+    goal_service.arm_completion_after_next_turn(thread_id, armed_goal.goal_id);
+
+    let harness = GoalExtensionHarness::new_with_goal_service(
+        runtime.clone(),
+        thread_id,
+        goal_service,
+    )
+    .await?;
+    harness.start_turn("turn-provisioned-parent", &TokenUsage::default()).await;
+    harness.stop_turn("turn-provisioned-parent").await;
+
+    let goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("goal should exist"))?;
+    assert_eq!(codex_state::ThreadGoalStatus::Complete, goal.status);
+    Ok(())
+}
+
+#[tokio::test]
 async fn tool_finish_accounts_active_goal_progress_and_emits_event() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
@@ -1214,9 +1256,16 @@ impl GoalExtensionHarness {
         runtime: Arc<codex_state::StateRuntime>,
         thread_id: ThreadId,
     ) -> anyhow::Result<Self> {
+        Self::new_with_goal_service(runtime, thread_id, Arc::new(GoalService::new())).await
+    }
+
+    async fn new_with_goal_service(
+        runtime: Arc<codex_state::StateRuntime>,
+        thread_id: ThreadId,
+        goal_service: Arc<GoalService>,
+    ) -> anyhow::Result<Self> {
         let sink = Arc::new(RecordingEventSink::default());
         let mut builder = ExtensionRegistryBuilder::<()>::with_event_sink(sink.clone());
-        let goal_service = Arc::new(GoalService::new());
         install_with_backend(
             &mut builder,
             runtime,
