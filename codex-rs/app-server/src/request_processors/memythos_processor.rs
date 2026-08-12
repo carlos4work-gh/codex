@@ -11141,7 +11141,7 @@ mod tests {
         let provisioning = Arc::new(FakeArenaParentProvisioningAdapter::default());
         let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
             AppServerRpcTransport::InProcess,
-            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
             Arc::new(RecordOnlyParentGoalSnapshotAdapter),
             Arc::new(RecordOnlyThreadConsolidationAdapter),
             Arc::new(RecordOnlyParentTurnResponseAdapter),
