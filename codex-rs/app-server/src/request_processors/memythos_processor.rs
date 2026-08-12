@@ -3949,6 +3949,47 @@ impl MemythosRequestProcessor {
                 arena_round_key(&params.arena_id, &round_id),
                 resume_assessment.resume_execution_plan.clone(),
             );
+            if resume_assessment.disposition == MemythosArenaResumeDisposition::PartialResume {
+                if let Some(arena) = state.arenas.get_mut(&params.arena_id) {
+                    arena.lifecycle_state = MemythosArenaLifecycleState::Running;
+                }
+                if let Some(composition) = state.arena_compositions.get_mut(&params.arena_id) {
+                    composition.lifecycle_state =
+                        MemythosArenaCompositionLifecycleState::ActiveProposals;
+                }
+                for parent in state
+                    .arena_parents
+                    .values_mut()
+                    .filter(|parent| parent.arena_id == params.arena_id)
+                {
+                    parent.lifecycle_state = MemythosArenaLifecycleState::Running;
+                }
+                for attachment in state
+                    .thread_attachments
+                    .values_mut()
+                    .filter(|attachment| attachment.arena_id == params.arena_id)
+                {
+                    attachment.lifecycle_state = MemythosArenaLifecycleState::Running;
+                }
+                self.push_telemetry_ref(
+                    &mut state,
+                    MemythosTelemetryRefKind::ArenaState,
+                    MemythosTelemetrySource::AppServerNative,
+                    Some(params.layer_id.clone()),
+                    Some(params.arena_id.clone()),
+                    None,
+                    Some(format!(
+                        "app-server://memythos/arenas/{}/rounds/{round_id}/resumed",
+                        params.arena_id
+                    )),
+                    None,
+                    MemythosEventChannel::StateTransition,
+                    format!(
+                        "Arena {} reopened its existing native parent composition for partial resume round {round_id}.",
+                        params.arena_id
+                    ),
+                );
+            }
         }
         let mut metadata = serde_json::Map::new();
         metadata.insert(
@@ -4552,11 +4593,7 @@ impl MemythosRequestProcessor {
         let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
         let delivery_attempt = self
             .peer_parent_delivery_adapter
-            .deliver_peer_parent_message(
-                &message,
-                target_reasoning_effort.clone(),
-                ConnectionId(0),
-            )
+            .deliver_peer_parent_message(&message, target_reasoning_effort.clone(), ConnectionId(0))
             .await;
         if delivery_attempt.rejection_reason.is_some()
             && let Some(prepared_goal) = prepared_goal.as_ref()
@@ -7030,7 +7067,7 @@ impl MemythosRequestProcessor {
         failure_reason: Option<String>,
         last_agent_message: Option<String>,
     ) -> bool {
-        let (matched_delivery, closure_candidate, loopbacks, completed_delivery_message_ids) = {
+        let (matched_delivery, arena_id, loopbacks, completed_delivery_message_ids) = {
             let mut state = self.state.lock().await;
             let Some((layer_id, arena_id)) = find_attachment_context(&state, thread_id) else {
                 return false;
@@ -7194,11 +7231,6 @@ impl MemythosRequestProcessor {
                 );
             }
 
-            let closure_candidate = if status == "completed" {
-                arena_closure_candidate(&state, &arena_id, thread_id)
-            } else {
-                None
-            };
             let loopbacks = if status == "completed" {
                 native_turn_loopback_candidates(&state, thread_id, turn_id, &native_event_ref)
             } else {
@@ -7206,7 +7238,7 @@ impl MemythosRequestProcessor {
             };
             (
                 matched_delivery,
-                closure_candidate,
+                arena_id,
                 loopbacks,
                 completed_delivery_message_ids,
             )
@@ -7236,8 +7268,16 @@ impl MemythosRequestProcessor {
             }
         }
 
-        if let Some(candidate) = closure_candidate {
-            self.close_arena_parent_goals(candidate).await;
+        if status == "completed" {
+            // A completed turn can materialize the final queue-only loopback (for example the
+            // judge verdict). Closure must observe that delivery, not the state from before it.
+            let closure_candidate = {
+                let state = self.state.lock().await;
+                arena_closure_candidate(&state, &arena_id, thread_id)
+            };
+            if let Some(candidate) = closure_candidate {
+                self.close_arena_parent_goals(candidate).await;
+            }
         }
 
         matched_delivery
@@ -8228,9 +8268,7 @@ fn native_arena_intake_assignments(
                 .map(|lease| lease.participant_id.as_str())
         })
     };
-    let message_kind = if plan.mode
-        == MemythosArenaResumeExecutionMode::ReassessAffectedPositions
-    {
+    let message_kind = if plan.mode == MemythosArenaResumeExecutionMode::ReassessAffectedPositions {
         "resume_reassessment"
     } else {
         "peer_proposal"
@@ -12587,7 +12625,12 @@ mod tests {
         assert!(prepared.assigned_for_delivery);
         assert_eq!(prepared.previous_goal.status, ThreadGoalStatus::Active);
         assert_eq!(prepared.active_goal.status, ThreadGoalStatus::Active);
-        assert!(prepared.active_goal.objective.contains("assignment resume-1"));
+        assert!(
+            prepared
+                .active_goal
+                .objective
+                .contains("assignment resume-1")
+        );
         let transitions = provisioning.goal_transitions.lock().await;
         assert_eq!(transitions.len(), 1);
         assert_eq!(transitions[0].0, "concierge");
@@ -12719,6 +12762,25 @@ mod tests {
         let ClientResponsePayload::MemythosArenaRequest(first) = first else {
             panic!("expected initial semantic arena request response");
         };
+        {
+            let mut state = processor.state.lock().await;
+            state
+                .arenas
+                .get_mut("arena-composition")
+                .expect("provisioned arena")
+                .lifecycle_state = MemythosArenaLifecycleState::ClosedCleanly;
+            state
+                .arena_compositions
+                .get_mut("arena-composition")
+                .expect("provisioned composition")
+                .lifecycle_state = MemythosArenaCompositionLifecycleState::Closed;
+            for parent in state.arena_parents.values_mut() {
+                parent.lifecycle_state = MemythosArenaLifecycleState::ClosedCleanly;
+            }
+            for attachment in state.thread_attachments.values_mut() {
+                attachment.lifecycle_state = MemythosArenaLifecycleState::ClosedCleanly;
+            }
+        }
         let mut update = semantic_arena_request_params();
         update.composition_change_signal = Some(
             "upstream contract changed; verify whether the current perspectives remain sufficient"
@@ -12777,6 +12839,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             "new evidence is a task delta and must not replace parent identity"
         );
+        {
+            let state = processor.state.lock().await;
+            assert_eq!(
+                state
+                    .arenas
+                    .get("arena-composition")
+                    .map(|arena| arena.lifecycle_state),
+                Some(MemythosArenaLifecycleState::Running)
+            );
+            assert_eq!(
+                state
+                    .arena_compositions
+                    .get("arena-composition")
+                    .map(|composition| composition.lifecycle_state),
+                Some(MemythosArenaCompositionLifecycleState::ActiveProposals)
+            );
+            assert!(
+                state.arena_parents.values().all(|parent| {
+                    parent.lifecycle_state == MemythosArenaLifecycleState::Running
+                })
+            );
+            assert!(state.thread_attachments.values().all(|attachment| {
+                attachment.lifecycle_state == MemythosArenaLifecycleState::Running
+            }));
+        }
 
         let resumed_turn_id = resumed_delivery
             .turn_id
