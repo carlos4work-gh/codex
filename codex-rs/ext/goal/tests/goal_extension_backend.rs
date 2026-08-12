@@ -243,6 +243,57 @@ async fn create_goal_resets_baseline_before_turn_stop_accounting() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn armed_one_shot_goal_completes_during_turn_stop() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    harness
+        .goal_service
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("complete one bounded assignment"),
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Set(Some(10_000)),
+            },
+        )
+        .await?;
+    let armed_goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("goal should exist before arming"))?;
+    harness
+        .goal_service
+        .arm_completion_after_next_turn(thread_id, armed_goal.goal_id);
+
+    harness
+        .start_turn("turn-one-shot", &TokenUsage::default())
+        .await;
+    harness
+        .record_token_usage(
+            "turn-one-shot",
+            &token_usage(
+                /*input_tokens*/ 20, /*cached_input_tokens*/ 5, /*output_tokens*/ 8,
+                /*reasoning_output_tokens*/ 2, /*total_tokens*/ 30,
+            ),
+        )
+        .await;
+    harness.stop_turn("turn-one-shot").await;
+
+    let goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("goal should exist"))?;
+    assert_eq!(codex_state::ThreadGoalStatus::Complete, goal.status);
+    assert_eq!(23, goal.tokens_used);
+    Ok(())
+}
+
+#[tokio::test]
 async fn tool_finish_accounts_active_goal_progress_and_emits_event() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;

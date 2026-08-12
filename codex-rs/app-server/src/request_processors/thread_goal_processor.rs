@@ -59,8 +59,16 @@ impl ThreadGoalRequestProcessor {
         &self,
         params: ThreadGoalSetParams,
     ) -> Result<ThreadGoal, JSONRPCErrorError> {
-        self.thread_goal_set_internal_with_runtime_effects(params, false)
+        let goal = self
+            .thread_goal_set_internal_with_runtime_effects(params, false)
+            .await?;
+        let thread_id = parse_thread_id_for_request(goal.thread_id.as_str())?;
+        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        self.goal_service
+            .arm_current_goal_completion_after_next_turn(&state_db, thread_id)
             .await
+            .map_err(goal_service_error)?;
+        Ok(goal)
     }
 
     async fn thread_goal_set_internal_with_runtime_effects(

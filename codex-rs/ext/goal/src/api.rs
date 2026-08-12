@@ -93,6 +93,33 @@ impl GoalService {
         Self::default()
     }
 
+    pub fn arm_completion_after_next_turn(&self, thread_id: ThreadId, goal_id: String) {
+        if let Some(runtime) = self.runtime_for_thread(thread_id) {
+            runtime.arm_completion_after_next_turn(goal_id);
+        }
+    }
+
+    pub async fn arm_current_goal_completion_after_next_turn(
+        &self,
+        state_db: &codex_state::StateRuntime,
+        thread_id: ThreadId,
+    ) -> Result<(), GoalServiceError> {
+        let goal = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
+            })?
+            .ok_or_else(|| {
+                GoalServiceError::Internal(format!(
+                    "cannot arm one-shot completion without a persisted goal for {thread_id}"
+                ))
+            })?;
+        self.arm_completion_after_next_turn(thread_id, goal.goal_id);
+        Ok(())
+    }
+
     pub async fn get_thread_goal(
         &self,
         state_db: &codex_state::StateRuntime,
