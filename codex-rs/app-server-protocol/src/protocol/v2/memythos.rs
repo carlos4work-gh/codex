@@ -779,6 +779,31 @@ pub enum MemythosArenaResumeDisposition {
     FullRound,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
+pub enum MemythosArenaResumeExecutionMode {
+    InitialRound,
+    RetainDecision,
+    ReassessAffectedPositions,
+    FullRound,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosArenaResumeExecutionPlan {
+    pub mode: MemythosArenaResumeExecutionMode,
+    #[serde(default)]
+    pub affected_participant_ids: Vec<String>,
+    #[ts(optional = nullable)]
+    pub source_round_id: Option<String>,
+    #[serde(default)]
+    pub affected_decision_refs: Vec<String>,
+    #[serde(default)]
+    pub cited_change_refs: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -814,6 +839,7 @@ pub struct MemythosArenaResumeAssessment {
     pub affected_decision_refs: Vec<String>,
     pub comparability_invalidated: bool,
     pub avoided_full_round: bool,
+    pub resume_execution_plan: MemythosArenaResumeExecutionPlan,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

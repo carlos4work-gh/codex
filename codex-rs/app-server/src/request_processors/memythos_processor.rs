@@ -59,6 +59,8 @@ use codex_app_server_protocol::MemythosArenaRequestParams;
 use codex_app_server_protocol::MemythosArenaRequestResponse;
 use codex_app_server_protocol::MemythosArenaResumeAssessment;
 use codex_app_server_protocol::MemythosArenaResumeDisposition;
+use codex_app_server_protocol::MemythosArenaResumeExecutionMode;
+use codex_app_server_protocol::MemythosArenaResumeExecutionPlan;
 use codex_app_server_protocol::MemythosArenaRunParams;
 use codex_app_server_protocol::MemythosArenaRunResponse;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
@@ -195,6 +197,7 @@ struct MemythosRuntimeState {
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
     arena_messages: HashMap<String, MemythosArenaMessage>,
     arena_message_aggregates: HashMap<String, NativeArenaMessageAggregate>,
+    arena_resume_execution_plans: HashMap<String, MemythosArenaResumeExecutionPlan>,
     room_activity_events: HashMap<String, Vec<MemythosRoomActivityEvent>>,
     native_parent_turn_responses: HashMap<String, ParentTurnResponse>,
     structured_contracts: HashMap<String, MemythosStructuredContract>,
@@ -324,8 +327,8 @@ fn room_delivery_goal_objective(message: &MemythosArenaMessage) -> String {
     let materialization_requirement = if message.message_kind == "human_intake" {
         concat!(
             " This intake is not complete until you invoke the native ",
-            "memythos_room_send_message tool and dispatch the first proposal assignment from ",
-            "the Room Concierge to every configured proposal-bearing parent. A prose statement ",
+            "memythos_room_send_message tool and dispatch exactly the assignments authorized by ",
+            "the native execution plan in the intake. A prose statement ",
             "that you activated or will activate the arena is not materialized progress and must ",
             "not be reported as completion."
         )
@@ -745,6 +748,8 @@ impl NativeArenaCompositionPlanningAdapter {
                         "For partial_resume, return at least one active affected participant and at least one supplied candidateChangeRef as a citedChangeRef, ",
                         "with comparabilityInvalidated=false and avoidedFullRound=true. For full_round, cite at least one supplied candidateChangeRef and one affected decision ref, ",
                         "with comparabilityInvalidated=true and avoidedFullRound=false. If no supplied candidateChangeRef supports partial_resume or full_round, use retain_decision. ",
+                        "Always return a resumeExecutionPlan matching the disposition: retain_decision uses retain_decision, partial_resume uses reassess_affected_positions, and full_round uses full_round. ",
+                        "The plan must repeat the exact affected participant ids, affected decision refs, and cited change refs from the assessment. Use the supplied sourceRoundId exactly; never invent it. ",
                         "Never invent refs. Preserve closed decisions that are unaffected, and return only the requested structured assessment.",
                         "Treat protectedDecisions as authoritative unless a cited change materially invalidates one. ",
                         "RevisableSettlement contains hypotheses, weights, and interpretations that may change without reopening protected decisions. ",
@@ -777,6 +782,7 @@ impl NativeArenaCompositionPlanningAdapter {
             "activeParticipantIds": previous.contract.participants.iter().map(|participant| participant.participant_id.as_str()).collect::<Vec<_>>(),
             "previousCompositionVersion": previous.composition_version,
             "previousContractRefs": previous.event_refs,
+            "sourceRoundId": format!("{}-round-{}", params.arena_id, previous.composition_version),
         }))
         .map_err(|err| invalid_params(format!("failed to serialize novelty context: {err}")))?;
         let turn = self
@@ -2189,6 +2195,70 @@ fn canonical_native_judge_bet_contract(
     })
 }
 
+fn canonical_native_judge_reassessment_contract(
+    state: &MemythosRuntimeState,
+    room: &MemythosRoom,
+    round_id: &str,
+    judge: &MemythosRoomParticipant,
+) -> Result<MemythosArenaAggregateContract, JSONRPCErrorError> {
+    let plan = state
+        .arena_resume_execution_plans
+        .get(&arena_round_key(&room.arena_id, round_id))
+        .ok_or_else(|| invalid_params("partial resume round has no native execution plan"))?;
+    if plan.mode != MemythosArenaResumeExecutionMode::ReassessAffectedPositions {
+        return Err(invalid_params(
+            "resume reassessment aggregation requires a reassess_affected_positions plan",
+        ));
+    }
+    let composition = state
+        .arena_compositions
+        .get(&room.arena_id)
+        .ok_or_else(|| invalid_params("partial resume round has no native composition"))?;
+    let affected_ids = plan.affected_participant_ids.iter().collect::<HashSet<_>>();
+    let affected_bettor_ids = composition
+        .leases
+        .iter()
+        .filter(|lease| {
+            lease.role == MemythosParentRole::Bettor.as_wire()
+                && affected_ids.contains(&lease.participant_id)
+        })
+        .map(|lease| lease.participant_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut expected_source_thread_ids = composition
+        .leases
+        .iter()
+        .filter(|lease| {
+            lease.role == MemythosParentRole::Bettor.as_wire()
+                && affected_bettor_ids.contains(lease.participant_id.as_str())
+        })
+        .map(|lease| lease.thread_id.clone())
+        .collect::<Vec<_>>();
+    expected_source_thread_ids.sort();
+    expected_source_thread_ids.dedup();
+    if affected_bettor_ids.is_empty()
+        || expected_source_thread_ids.len() != affected_bettor_ids.len()
+    {
+        return Err(invalid_params(format!(
+            "partial resume expected {} active affected bettors but resolved {} live parent threads",
+            affected_bettor_ids.len(),
+            expected_source_thread_ids.len()
+        )));
+    }
+    Ok(MemythosArenaAggregateContract {
+        aggregate_id: format!("{}::{round_id}::judge_reassessment", room.room_id),
+        recipient_thread_id: judge.thread_id.clone(),
+        quorum: expected_source_thread_ids.len() as u32,
+        expected_source_thread_ids,
+        phase_id: "resume_reassessment".to_string(),
+        deadline_ref: None,
+        completion_criteria_ref: format!(
+            "app-server://rooms/{}/rounds/{round_id}/checkpoints/all-affected-reassessments",
+            room.room_id
+        ),
+        late_arrival_policy: MemythosArenaLateArrivalPolicy::Reject,
+    })
+}
+
 fn canonical_native_concierge_phase_contract(
     room: &MemythosRoom,
     round_id: &str,
@@ -2243,13 +2313,17 @@ fn canonical_native_bettor_phase_contract(
         .participants
         .iter()
         .filter(|participant| participant.parent_role == "bettor")
+        // The recipient already owns its position in native thread memory. A
+        // peer checkpoint contains only the other parents' contributions and
+        // must never wake a parent from its own turn completion callback.
+        .filter(|participant| participant.thread_id != recipient.thread_id)
         .map(|participant| participant.thread_id.clone())
         .collect::<Vec<_>>();
     expected_source_thread_ids.sort();
     expected_source_thread_ids.dedup();
-    if expected_source_thread_ids.len() < 2 {
+    if expected_source_thread_ids.is_empty() {
         return Err(invalid_params(format!(
-            "competitive room {} requires at least two bettor parents before {source_phase} fanout",
+            "competitive room {} requires at least one peer source before {source_phase} fanout",
             room.room_id
         )));
     }
@@ -3344,6 +3418,7 @@ impl MemythosRequestProcessor {
                 arena_message_deliveries: Vec::new(),
                 arena_messages: HashMap::new(),
                 arena_message_aggregates: HashMap::new(),
+                arena_resume_execution_plans: HashMap::new(),
                 room_activity_events: HashMap::new(),
                 native_parent_turn_responses: HashMap::new(),
                 structured_contracts: HashMap::new(),
@@ -3732,49 +3807,76 @@ impl MemythosRequestProcessor {
             }
             .into());
         }
-        let planned = self
-            .arena_composition_planning_adapter
-            .plan(&params, previous.as_ref(), connection_id)
-            .await?;
-        if planned.contract.arena_id != params.arena_id {
-            return Err(invalid_params(format!(
-                "native planner returned arena id {} for requested arena {}",
-                planned.contract.arena_id, params.arena_id
-            )));
-        }
-        validate_planned_arena_cost_context(&params, &planned.contract)?;
-        let mut revision_params = params.clone();
-        if revision_params.composition_change_signal.is_none()
-            && let Some(resume) = resume.as_ref()
-        {
-            revision_params.composition_change_signal = Some(resume.assessment.rationale.clone());
-        }
-        let revision = previous
-            .as_ref()
-            .map(|previous| {
-                build_native_composition_revision(&revision_params, previous, &planned.contract)
-            })
-            .transpose()?;
-        let provision = self
-            .arena_composition_provision(
-                MemythosArenaCompositionProvisionParams {
-                    case_id: params.case_id.clone(),
-                    layer_id: params.layer_id.clone(),
-                    room_id: params.room_id.clone(),
-                    cwd: params.cwd.clone(),
-                    upstream_authority_scope: params.available_authority.clone(),
-                    contract: planned.contract,
-                    revision,
-                },
-                connection_id,
-            )
-            .await?;
-        let ClientResponsePayload::MemythosArenaCompositionProvision(composition) = provision
-        else {
-            return Err(invalid_params(
-                "native arena provisioning returned an unexpected response",
-            ));
-        };
+        let (composition, planner_thread_id, planner_turn_id) =
+            if resume.as_ref().is_some_and(|resume| {
+                resume.assessment.disposition == MemythosArenaResumeDisposition::PartialResume
+            }) {
+                let resume = resume
+                    .as_ref()
+                    .expect("partial resume branch requires a native assessment");
+                (
+                    previous
+                        .clone()
+                        .expect("partial resume requires an active composition"),
+                    resume.planner_thread_id.clone(),
+                    resume.planner_turn_id.clone(),
+                )
+            } else {
+                let planned = self
+                    .arena_composition_planning_adapter
+                    .plan(&params, previous.as_ref(), connection_id)
+                    .await?;
+                if planned.contract.arena_id != params.arena_id {
+                    return Err(invalid_params(format!(
+                        "native planner returned arena id {} for requested arena {}",
+                        planned.contract.arena_id, params.arena_id
+                    )));
+                }
+                validate_planned_arena_cost_context(&params, &planned.contract)?;
+                let mut revision_params = params.clone();
+                if revision_params.composition_change_signal.is_none()
+                    && let Some(resume) = resume.as_ref()
+                {
+                    revision_params.composition_change_signal =
+                        Some(resume.assessment.rationale.clone());
+                }
+                let revision = previous
+                    .as_ref()
+                    .map(|previous| {
+                        build_native_composition_revision(
+                            &revision_params,
+                            previous,
+                            &planned.contract,
+                        )
+                    })
+                    .transpose()?;
+                let provision = self
+                    .arena_composition_provision(
+                        MemythosArenaCompositionProvisionParams {
+                            case_id: params.case_id.clone(),
+                            layer_id: params.layer_id.clone(),
+                            room_id: params.room_id.clone(),
+                            cwd: params.cwd.clone(),
+                            upstream_authority_scope: params.available_authority.clone(),
+                            contract: planned.contract,
+                            revision,
+                        },
+                        connection_id,
+                    )
+                    .await?;
+                let ClientResponsePayload::MemythosArenaCompositionProvision(composition) =
+                    provision
+                else {
+                    return Err(invalid_params(
+                        "native arena provisioning returned an unexpected response",
+                    ));
+                };
+                (
+                    composition,
+                    planned.planner_thread_id,
+                    planned.planner_turn_id,
+                )
+            };
         let target_participant_id = composition
             .contract
             .coordination
@@ -3791,13 +3893,53 @@ impl MemythosRequestProcessor {
                     target_participant_id
                 ))
             })?;
+        let resume_assessment = resume.as_ref().map_or_else(
+            || MemythosArenaResumeAssessment {
+                disposition: MemythosArenaResumeDisposition::InitialRound,
+                rationale: "No prior arena composition exists; run the initial round.".to_string(),
+                affected_participant_ids: Vec::new(),
+                cited_change_refs: Vec::new(),
+                affected_decision_refs: Vec::new(),
+                comparability_invalidated: false,
+                avoided_full_round: false,
+                resume_execution_plan: MemythosArenaResumeExecutionPlan {
+                    mode: MemythosArenaResumeExecutionMode::InitialRound,
+                    affected_participant_ids: Vec::new(),
+                    source_round_id: None,
+                    affected_decision_refs: Vec::new(),
+                    cited_change_refs: Vec::new(),
+                },
+            },
+            |resume| resume.assessment.clone(),
+        );
         let request_id = self.next_id("mem_arena_request", &self.next_delivery_id);
+        let round_id = if resume.as_ref().is_some_and(|resume| {
+            resume.assessment.disposition == MemythosArenaResumeDisposition::PartialResume
+        }) {
+            format!("{}-resume-{request_id}", params.arena_id)
+        } else {
+            format!(
+                "{}-round-{}",
+                params.arena_id, composition.composition_version
+            )
+        };
         let room_message_ref = format!(
             "app-server://rooms/{}/human-intake/{}",
             params.room_id, request_id
         );
         let delivery_ref = format!("{room_message_ref}/delivery");
-        let prompt = build_arena_intake_prompt(&params, &composition.contract);
+        let prompt = build_arena_intake_prompt(
+            &params,
+            &composition.contract,
+            &resume_assessment.resume_execution_plan,
+        );
+        {
+            let mut state = self.state.lock().await;
+            state.arena_resume_execution_plans.insert(
+                arena_round_key(&params.arena_id, &round_id),
+                resume_assessment.resume_execution_plan.clone(),
+            );
+        }
         let mut metadata = serde_json::Map::new();
         metadata.insert(
             "memythos_phase".to_string(),
@@ -3809,10 +3951,7 @@ impl MemythosRequestProcessor {
         );
         metadata.insert(
             "memythos_round_id".to_string(),
-            serde_json::Value::String(format!(
-                "{}-round-{}",
-                params.arena_id, composition.composition_version
-            )),
+            serde_json::Value::String(round_id),
         );
         let delivery = self
             .room_send_input_on_connection(
@@ -3855,22 +3994,10 @@ impl MemythosRequestProcessor {
         };
         Ok(MemythosArenaRequestResponse {
             request_id,
-            planner_thread_id: planned.planner_thread_id,
-            planner_turn_id: planned.planner_turn_id,
+            planner_thread_id,
+            planner_turn_id,
             composition: composition.into(),
-            resume_assessment: resume.map_or(
-                MemythosArenaResumeAssessment {
-                    disposition: MemythosArenaResumeDisposition::InitialRound,
-                    rationale: "No prior arena composition exists; run the initial round."
-                        .to_string(),
-                    affected_participant_ids: Vec::new(),
-                    cited_change_refs: Vec::new(),
-                    affected_decision_refs: Vec::new(),
-                    comparability_invalidated: false,
-                    avoided_full_round: false,
-                },
-                |resume| resume.assessment,
-            ),
+            resume_assessment,
             initial_delivery: Some(delivery.delivery),
         }
         .into())
@@ -5285,6 +5412,14 @@ impl MemythosRequestProcessor {
         let (eligible_winner_ids, existing_native_judge_turn, target_task_contract) = {
             let state = self.state.lock().await;
             let composition = state.arena_compositions.get(&room.arena_id);
+            validate_resume_execution_message(
+                &state,
+                &room,
+                &inherited_round_id,
+                &args.message_kind,
+                &source,
+                &target,
+            )?;
             validate_competitive_round_progress(
                 decision_method.as_ref(),
                 &args.message_kind,
@@ -7666,6 +7801,7 @@ fn phase_from_message_kind(message_kind: &str) -> Option<String> {
         | "peer_review_and_objection" => Some("peer_review_and_objection".to_string()),
         "dispatch_bets" | "peer_bet" => Some("bet".to_string()),
         "request_judge" | "verdict_request" | "judge_verdict" => Some("judge".to_string()),
+        "resume_reassessment" => Some("resume_reassessment".to_string()),
         "notify_coordinator" => Some("learning".to_string()),
         _ => None,
     }
@@ -7760,7 +7896,27 @@ fn native_turn_loopback_candidate(
                     true,
                 )
             }
-            ("judge", "judge") => {
+            ("bettor", "resume_reassessment") => {
+                let target = room
+                    .participants
+                    .iter()
+                    .find(|participant| participant.parent_role == "judge")?;
+                let contract = canonical_native_judge_reassessment_contract(
+                    state,
+                    room,
+                    &incoming.round_id,
+                    target,
+                )
+                .ok()?;
+                (
+                    target,
+                    "resume_reassessment",
+                    Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                    Some(contract),
+                    true,
+                )
+            }
+            ("judge", "judge") | ("judge", "resume_reassessment") => {
                 let target = room
                     .participants
                     .iter()
@@ -7861,9 +8017,108 @@ fn native_turn_loopback_candidates(
         }
     };
 
+    if phase == "proposal" {
+        let bettor_threads = room
+            .participants
+            .iter()
+            .filter(|participant| participant.parent_role == "bettor")
+            .map(|participant| participant.thread_id.as_str())
+            .collect::<HashSet<_>>();
+        let completed_proposals = state
+            .arena_message_deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.arena_id == incoming.arena_id
+                    && delivery.round_id == incoming.round_id
+                    && delivery.phase.as_deref() == Some("proposal")
+                    && delivery.status == "receiver_turn_completed"
+                    && bettor_threads.contains(delivery.receiver_thread_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        let completed_sources = completed_proposals
+            .iter()
+            .map(|delivery| delivery.receiver_thread_id.as_str())
+            .collect::<HashSet<_>>();
+        if completed_sources.len() != bettor_threads.len() {
+            return Vec::new();
+        }
+
+        return completed_proposals
+            .into_iter()
+            .flat_map(|proposal| {
+                let source_thread_id = proposal.receiver_thread_id.as_str();
+                let source_turn_id = proposal.receiver_turn_id.as_deref()?;
+                let source_participant = room
+                    .participants
+                    .iter()
+                    .find(|participant| participant.thread_id == source_thread_id)?;
+                let proposal_text = state
+                    .native_parent_turn_responses
+                    .get(&native_token_usage_key(source_thread_id, source_turn_id))?
+                    .text
+                    .as_deref()?
+                    .trim();
+                Some(
+                    room.participants
+                        .iter()
+                        .filter(|target| target.parent_role == "bettor")
+                        .filter(move |target| target.thread_id != source_thread_id)
+                        .filter_map(move |target| {
+                            let contract = canonical_native_bettor_phase_contract(
+                                room,
+                                &incoming.round_id,
+                                target,
+                                source_phase,
+                            )
+                            .ok()?;
+                            let duplicate = state.arena_message_deliveries.iter().any(|delivery| {
+                                delivery.arena_id == incoming.arena_id
+                                    && delivery.round_id == incoming.round_id
+                                    && delivery.sender_thread_id == source_thread_id
+                                    && delivery.receiver_thread_id == target.thread_id
+                                    && delivery.phase.as_deref()
+                                        == phase_from_message_kind(message_kind).as_deref()
+                            });
+                            if duplicate {
+                                return None;
+                            }
+                            Some(MemythosArenaMessage {
+                                message_id: format!(
+                                    "turn-loopback-{source_turn_id}-{}",
+                                    target.thread_id
+                                ),
+                                case_id: incoming.arena_id.clone(),
+                                arena_id: incoming.arena_id.clone(),
+                                round_id: incoming.round_id.clone(),
+                                from_parent_thread_id: source_thread_id.to_string(),
+                                from_parent_role: source_participant.parent_role.clone(),
+                                to_parent_thread_id: target.thread_id.clone(),
+                                to_parent_role: target.parent_role.clone(),
+                                message_kind: message_kind.to_string(),
+                                human_summary: proposal_text.to_string(),
+                                execution_prompt: None,
+                                context_packet_ref: native_event_ref.to_string(),
+                                artifact_refs: Vec::new(),
+                                requires_response: true,
+                                delivery_policy: Some(
+                                    MemythosArenaDeliveryPolicy::AggregateThenTrigger,
+                                ),
+                                aggregate_contract: Some(contract),
+                                response_contract: None,
+                                output_schema: None,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten()
+            .collect();
+    }
+
     room.participants
         .iter()
         .filter(|participant| participant.parent_role == "bettor")
+        .filter(|participant| participant.thread_id != thread_id)
         .filter_map(|target| {
             let contract = canonical_native_bettor_phase_contract(
                 room,
@@ -7909,6 +8164,7 @@ fn native_turn_loopback_candidates(
 fn build_arena_intake_prompt(
     params: &MemythosArenaRequestParams,
     contract: &MemythosArenaCompositionContract,
+    execution_plan: &MemythosArenaResumeExecutionPlan,
 ) -> String {
     let participants = contract
         .participants
@@ -7938,8 +8194,41 @@ fn build_arena_intake_prompt(
             )
         })
         .unwrap_or_else(|| "not required by the selected method".to_string());
+    let execution_instruction = match execution_plan.mode {
+        MemythosArenaResumeExecutionMode::InitialRound
+        | MemythosArenaResumeExecutionMode::FullRound => concat!(
+            "Dispatch exactly one independent peer_proposal assignment to every proposal-bearing ",
+            "bettor. Asynchronous dispatch means your concierge turn ends after assignment; it ",
+            "does not mean queue_only delivery. Your initial authorization activates the native ",
+            "phase plan: app-server aggregates all proposals, fans the sealed proposal checkpoint ",
+            "out to every bettor for cross-read and objection, aggregates those responses, fans ",
+            "the sealed review checkpoint out for final bets, and activates the Judge exactly ",
+            "once. These are mechanical mailbox transitions under the arena contract, not new ",
+            "semantic decisions. Do not issue separate cross-read, bet, or verdict requests after ",
+            "proposals are dispatched. The verdict must identify the winning participant by its ",
+            "exact participant id, rank the alternatives, preserve dissent, state reopening ",
+            "signals, and report whether closed decisions remained preserved."
+        )
+        .to_string(),
+        MemythosArenaResumeExecutionMode::ReassessAffectedPositions => format!(
+            concat!(
+                "This is a bounded partial resume. Dispatch exactly one resume_reassessment ",
+                "assignment to each affected participant id and no proposal, cross-read, or ",
+                "separate bet assignment. Each affected parent uses OOTB thread memory and the ",
+                "cited novelty refs to return one changed position, remaining material objections, ",
+                "revised bet, and reopening breakpoints. Affected participant ids: {}. ",
+                "Source round: {}. Cited change refs: {}."
+            ),
+            execution_plan.affected_participant_ids.join(", "),
+            execution_plan.source_round_id.as_deref().unwrap_or("none"),
+            execution_plan.cited_change_refs.join(", "),
+        ),
+        MemythosArenaResumeExecutionMode::RetainDecision => {
+            "The prior decision is retained; do not dispatch arena work.".to_string()
+        }
+    };
     format!(
-        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n{}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own the arena objective, initial framing, exceptions, dependencies, and communication; the client will only observe. You are not a proposer and you do not decide the business outcome. For a competitive method, dispatch exactly one independent peer_proposal assignment to every proposal-bearing bettor, then end this turn immediately. Do not wait synchronously for any bettor. Asynchronous dispatch means your concierge turn ends after assignment; it does not mean queue_only delivery. Omit deliveryPolicy for direct proposal assignments and let app-server start or schedule each target parent turn. Your initial authorization activates the native phase plan: app-server aggregates all proposals, fans the sealed proposal checkpoint out to every bettor for cross-read and objection, aggregates those responses, fans the sealed review checkpoint out for final bets, and activates the Judge exactly once. These are mechanical mailbox transitions under the arena contract, not new semantic decisions. A material exception wakes you; an ordinary checkpoint does not. The Judge verdict is queued back into your native mailbox for continuity and closes the successful round without requiring you to restate or re-judge it. Do not issue separate cross-read, bet, or verdict requests after proposals are dispatched. The verdict must identify the winning participant by its exact participant id, rank the alternatives, preserve dissent, state reopening signals, and report whether closed decisions remained preserved. Never bet or judge as Room Concierge. Do not keep a concierge turn alive while peers work. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
+        "Client request origin: {}\nCase: {}\nLayer objective: {}\nExpected deliverable: {}\nCompletion criteria:\n- {}\nClosed decisions:\n- {}\nUncertainties:\n- {}\nReality evidence:\n- {}\nCost goal: {}\n{}\n\nNative arena contract:\nDecision method: {:?}\nRound policy: {}\nParticipants:\n{}\n\nNative resume execution mode: {:?}\n{}\n\nThis request activates one autonomous native arena run. You are the Room Concierge and own the arena objective, initial framing, exceptions, dependencies, and communication; the client will only observe. You are not a proposer and you do not decide the business outcome. Dispatch only the assignments authorized by the native execution plan, then end this turn immediately. Do not wait synchronously for any parent. Omit deliveryPolicy for direct assignments and let app-server start or schedule each target parent turn. Mechanical mailbox transitions are app-server responsibilities, not new semantic decisions. A material exception wakes you; an ordinary checkpoint does not. The Judge verdict is queued back into your native mailbox for continuity and closes the successful round without requiring you to restate or re-judge it. Never bet or judge as Room Concierge. Do not keep a concierge turn alive while peers work. Do not ask the client to activate phases, create parents, assemble contracts, or recover partial provisioning; those are app-server responsibilities.",
         params.request_origin,
         params.case_brief,
         params.layer_objective,
@@ -7958,6 +8247,8 @@ fn build_arena_intake_prompt(
         contract.coordination.decision_method,
         round_policy,
         participants,
+        execution_plan.mode,
+        execution_instruction,
     )
 }
 
@@ -7969,7 +8260,7 @@ fn validate_room_message_kind(
         && phase_from_message_kind(message_kind).is_none()
     {
         return Err(invalid_params(format!(
-            "competitive arena room acts require an explicit semantic phase messageKind; {message_kind} is ambiguous. Use peer_proposal, peer_review_and_objection, peer_bet, verdict_request, judge_verdict, or notify_coordinator"
+            "competitive arena room acts require an explicit semantic phase messageKind; {message_kind} is ambiguous. Use peer_proposal, peer_review_and_objection, peer_bet, resume_reassessment, verdict_request, judge_verdict, or notify_coordinator"
         )));
     }
     Ok(())
@@ -7996,6 +8287,10 @@ fn validate_room_message_route(
                 || (message_kind == "peer_bet" && source_role == "bettor" && target_role == "judge")
         }
         "verdict_request" => source_role == "room_concierge" && target_role == "judge",
+        "resume_reassessment" => {
+            (source_role == "room_concierge" && target_role == "bettor")
+                || (source_role == "bettor" && target_role == "judge")
+        }
         "judge_verdict" => source_role == "judge" && target_role == "room_concierge",
         "notify_coordinator" => {
             (source_role == "room_concierge"
@@ -8012,7 +8307,7 @@ fn validate_room_message_route(
         Ok(())
     } else {
         Err(invalid_params(format!(
-            "competitive arena message route is invalid: {source_role} --{message_kind}--> {target_role}. Peer phases flow only between room_concierge and bettor; verdict_request flows room_concierge to judge; judge_verdict flows judge to room_concierge; notify_coordinator flows between room_concierge and coordinator"
+            "competitive arena message route is invalid: {source_role} --{message_kind}--> {target_role}. Peer phases flow only between room_concierge and bettor; resume_reassessment flows room_concierge to affected bettors and then to judge; verdict_request flows room_concierge to judge; judge_verdict flows judge to room_concierge; notify_coordinator flows between room_concierge and coordinator"
         )))
     }
 }
@@ -8073,6 +8368,66 @@ fn validate_competitive_round_progress(
     Ok(())
 }
 
+fn validate_resume_execution_message(
+    state: &MemythosRuntimeState,
+    room: &MemythosRoom,
+    round_id: &str,
+    message_kind: &str,
+    source: &MemythosRoomParticipant,
+    target: &MemythosRoomParticipant,
+) -> Result<(), JSONRPCErrorError> {
+    let Some(plan) = state
+        .arena_resume_execution_plans
+        .get(&arena_round_key(&room.arena_id, round_id))
+    else {
+        return Ok(());
+    };
+    match plan.mode {
+        MemythosArenaResumeExecutionMode::ReassessAffectedPositions => {
+            if source.parent_role == "room_concierge" {
+                if message_kind != "resume_reassessment" {
+                    return Err(invalid_params(format!(
+                        "partial resume round {round_id} only authorizes resume_reassessment assignments; received {message_kind}"
+                    )));
+                }
+                let target_is_affected =
+                    state
+                        .arena_compositions
+                        .get(&room.arena_id)
+                        .is_some_and(|composition| {
+                            composition.leases.iter().any(|lease| {
+                                lease.thread_id == target.thread_id
+                                    && lease.role == MemythosParentRole::Bettor.as_wire()
+                                    && plan.affected_participant_ids.iter().any(|participant_id| {
+                                        participant_id == &lease.participant_id
+                                    })
+                            })
+                        });
+                if !target_is_affected {
+                    return Err(invalid_params(format!(
+                        "partial resume target thread {} is not leased to the native affected participant set",
+                        target.thread_id
+                    )));
+                }
+            }
+        }
+        MemythosArenaResumeExecutionMode::InitialRound
+        | MemythosArenaResumeExecutionMode::FullRound => {
+            if message_kind == "resume_reassessment" {
+                return Err(invalid_params(format!(
+                    "round {round_id} uses a full phase plan and cannot dispatch resume_reassessment"
+                )));
+            }
+        }
+        MemythosArenaResumeExecutionMode::RetainDecision => {
+            return Err(invalid_params(format!(
+                "retained round {round_id} cannot dispatch arena work"
+            )));
+        }
+    }
+    Ok(())
+}
+
 const MEMYTHOS_TELEMETRY_SUMMARY_MAX_CHARS: usize = 240;
 
 fn find_attachment_context(
@@ -8098,6 +8453,10 @@ fn find_attachment_context(
 
 fn arena_parent_key(arena_id: &str, thread_id: &str) -> String {
     format!("{arena_id}::{thread_id}")
+}
+
+fn arena_round_key(arena_id: &str, round_id: &str) -> String {
+    format!("{arena_id}::{round_id}")
 }
 
 fn arena_closure_candidate(
@@ -8170,14 +8529,6 @@ fn arena_closure_candidate(
                 .collect::<HashSet<_>>()
                 .len()
         };
-        if distinct_completed_targets("proposal") < minimum_positions
-            || distinct_completed_targets("peer_review_and_objection") < minimum_positions
-            || distinct_completed_targets("bet") < minimum_positions
-            || distinct_completed_targets("judge") < 1
-        {
-            return None;
-        }
-
         let judge_id = composition
             .contract
             .coordination
@@ -8195,9 +8546,54 @@ fn arena_closure_candidate(
             .filter(|lease| lease.role == MemythosParentRole::Bettor.as_wire())
             .map(|lease| lease.participant_id.as_str())
             .collect::<HashSet<_>>();
+        let execution_plan = state
+            .arena_resume_execution_plans
+            .get(&arena_round_key(arena_id, active_round_id));
+        let judge_phase = if execution_plan.is_some_and(|plan| {
+            plan.mode == MemythosArenaResumeExecutionMode::ReassessAffectedPositions
+        }) {
+            let execution_plan = execution_plan.expect("partial resume plan was checked above");
+            let affected_ids = execution_plan
+                .affected_participant_ids
+                .iter()
+                .collect::<HashSet<_>>();
+            let expected_affected_threads = composition
+                .leases
+                .iter()
+                .filter(|lease| {
+                    lease.role == MemythosParentRole::Bettor.as_wire()
+                        && affected_ids.contains(&lease.participant_id)
+                })
+                .map(|lease| lease.thread_id.as_str())
+                .collect::<HashSet<_>>();
+            let completed_affected_threads = deliveries
+                .iter()
+                .filter(|delivery| {
+                    delivery.phase.as_deref() == Some("resume_reassessment")
+                        && delivery.receiver_thread_id != judge_thread_id
+                        && delivery.status == "receiver_turn_completed"
+                })
+                .map(|delivery| delivery.receiver_thread_id.as_str())
+                .collect::<HashSet<_>>();
+            if expected_affected_threads.is_empty()
+                || completed_affected_threads != expected_affected_threads
+            {
+                return None;
+            }
+            "resume_reassessment"
+        } else {
+            if distinct_completed_targets("proposal") < minimum_positions
+                || distinct_completed_targets("peer_review_and_objection") < minimum_positions
+                || distinct_completed_targets("bet") < minimum_positions
+                || distinct_completed_targets("judge") < 1
+            {
+                return None;
+            }
+            "judge"
+        };
         let native_judge_verdict_completed = deliveries.iter().any(|delivery| {
             delivery.receiver_thread_id == judge_thread_id
-                && delivery.phase.as_deref() == Some("judge")
+                && delivery.phase.as_deref() == Some(judge_phase)
                 && delivery.status == "receiver_turn_completed"
                 && delivery.receiver_turn_id.as_deref().is_some_and(|turn_id| {
                     state
@@ -8869,6 +9265,24 @@ fn validate_native_resume_assessment(
             "native novelty assessment references inactive participant {unknown}"
         )));
     }
+    let plan = &assessment.resume_execution_plan;
+    if plan.affected_participant_ids != assessment.affected_participant_ids
+        || plan.affected_decision_refs != assessment.affected_decision_refs
+        || plan.cited_change_refs != assessment.cited_change_refs
+    {
+        return Err(invalid_params(
+            "native resume execution plan must exactly mirror affected participants, decisions, and cited change refs from its assessment",
+        ));
+    }
+    let expected_source_round_id = format!(
+        "{}-round-{}",
+        previous.contract.arena_id, previous.composition_version
+    );
+    if plan.source_round_id.as_deref() != Some(expected_source_round_id.as_str()) {
+        return Err(invalid_params(format!(
+            "native resume execution plan must cite source round {expected_source_round_id}"
+        )));
+    }
     match assessment.disposition {
         MemythosArenaResumeDisposition::InitialRound => Err(invalid_params(
             "active arena novelty assessment cannot return initial_round",
@@ -8877,6 +9291,7 @@ fn validate_native_resume_assessment(
             if !assessment.affected_participant_ids.is_empty()
                 || assessment.comparability_invalidated
                 || !assessment.avoided_full_round
+                || plan.mode != MemythosArenaResumeExecutionMode::RetainDecision
             {
                 return Err(invalid_params(
                     "retain_decision must preserve comparability, affect no participants, and record the avoided full round",
@@ -8889,6 +9304,7 @@ fn validate_native_resume_assessment(
                 || assessment.cited_change_refs.is_empty()
                 || assessment.comparability_invalidated
                 || !assessment.avoided_full_round
+                || plan.mode != MemythosArenaResumeExecutionMode::ReassessAffectedPositions
             {
                 return Err(invalid_params(
                     "partial_resume requires affected participants and cited change refs while preserving comparability and avoiding a full round",
@@ -8901,6 +9317,7 @@ fn validate_native_resume_assessment(
                 || assessment.affected_decision_refs.is_empty()
                 || !assessment.comparability_invalidated
                 || assessment.avoided_full_round
+                || plan.mode != MemythosArenaResumeExecutionMode::FullRound
             {
                 return Err(invalid_params(
                     "full_round requires cited change refs, affected decisions, and explicit comparability invalidation",
@@ -9912,6 +10329,10 @@ mod tests {
                 .find(|participant| participant.agent_role == "bettor")
                 .map(|participant| vec![participant.participant_id.clone()])
                 .unwrap_or_else(|| all_participant_ids.clone());
+            let source_round_id = format!(
+                "{}-round-{}",
+                previous.contract.arena_id, previous.composition_version
+            );
             Box::pin(async move {
                 Ok(PlannedArenaResume {
                     planner_thread_id: "novelty-thread".to_string(),
@@ -9921,22 +10342,36 @@ mod tests {
                             disposition: MemythosArenaResumeDisposition::FullRound,
                             rationale: "fixture evidence invalidates comparability across all bets"
                                 .to_string(),
-                            affected_participant_ids: all_participant_ids,
-                            cited_change_refs: candidate_change_refs,
+                            affected_participant_ids: all_participant_ids.clone(),
+                            cited_change_refs: candidate_change_refs.clone(),
                             affected_decision_refs: vec!["decision://fixture".to_string()],
                             comparability_invalidated: true,
                             avoided_full_round: false,
+                            resume_execution_plan: MemythosArenaResumeExecutionPlan {
+                                mode: MemythosArenaResumeExecutionMode::FullRound,
+                                affected_participant_ids: all_participant_ids.clone(),
+                                source_round_id: Some(source_round_id.clone()),
+                                affected_decision_refs: vec!["decision://fixture".to_string()],
+                                cited_change_refs: candidate_change_refs.clone(),
+                            },
                         }
                     } else if has_change {
                         MemythosArenaResumeAssessment {
                             disposition: MemythosArenaResumeDisposition::PartialResume,
                             rationale: "fixture material change affects the selected live parents"
                                 .to_string(),
-                            affected_participant_ids: partial_participant_ids,
+                            affected_participant_ids: partial_participant_ids.clone(),
                             cited_change_refs: vec!["evidence://fixture-change".to_string()],
                             affected_decision_refs: vec!["decision://fixture".to_string()],
                             comparability_invalidated: false,
                             avoided_full_round: true,
+                            resume_execution_plan: MemythosArenaResumeExecutionPlan {
+                                mode: MemythosArenaResumeExecutionMode::ReassessAffectedPositions,
+                                affected_participant_ids: partial_participant_ids.clone(),
+                                source_round_id: Some(source_round_id.clone()),
+                                affected_decision_refs: vec!["decision://fixture".to_string()],
+                                cited_change_refs: vec!["evidence://fixture-change".to_string()],
+                            },
                         }
                     } else {
                         MemythosArenaResumeAssessment {
@@ -9947,6 +10382,13 @@ mod tests {
                             affected_decision_refs: Vec::new(),
                             comparability_invalidated: false,
                             avoided_full_round: true,
+                            resume_execution_plan: MemythosArenaResumeExecutionPlan {
+                                mode: MemythosArenaResumeExecutionMode::RetainDecision,
+                                affected_participant_ids: Vec::new(),
+                                source_round_id: Some(source_round_id.clone()),
+                                affected_decision_refs: Vec::new(),
+                                cited_change_refs: Vec::new(),
+                            },
                         }
                     },
                 })
@@ -9981,25 +10423,36 @@ mod tests {
             previous: &'a MemythosArenaCompositionProvisionResponse,
             _connection_id: ConnectionId,
         ) -> ArenaResumePlanningFuture<'a> {
-            let affected_participant_ids = previous
+            let affected_participant_ids: Vec<String> = previous
                 .contract
                 .participants
                 .iter()
                 .map(|participant| participant.participant_id.clone())
                 .collect();
+            let source_round_id = format!(
+                "{}-round-{}",
+                previous.contract.arena_id, previous.composition_version
+            );
             Box::pin(async move {
                 Ok(PlannedArenaResume {
                     planner_thread_id: "novelty-thread".to_string(),
                     planner_turn_id: "novelty-turn".to_string(),
                     assessment: MemythosArenaResumeAssessment {
-                        disposition: MemythosArenaResumeDisposition::PartialResume,
-                        rationale: "fixture evidence gap requires one additional perspective"
+                        disposition: MemythosArenaResumeDisposition::FullRound,
+                        rationale: "fixture evidence gap invalidates method comparability and requires one additional perspective"
                             .to_string(),
-                        affected_participant_ids,
+                        affected_participant_ids: affected_participant_ids.clone(),
                         cited_change_refs: vec!["evidence://fixture-gap".to_string()],
                         affected_decision_refs: vec!["decision://fixture".to_string()],
-                        comparability_invalidated: false,
-                        avoided_full_round: true,
+                        comparability_invalidated: true,
+                        avoided_full_round: false,
+                        resume_execution_plan: MemythosArenaResumeExecutionPlan {
+                            mode: MemythosArenaResumeExecutionMode::FullRound,
+                            affected_participant_ids: affected_participant_ids.clone(),
+                            source_round_id: Some(source_round_id),
+                            affected_decision_refs: vec!["decision://fixture".to_string()],
+                            cited_change_refs: vec!["evidence://fixture-gap".to_string()],
+                        },
                     },
                 })
             })
@@ -10239,6 +10692,28 @@ mod tests {
             }),
             composition_change_signal: None,
             resume_context: None,
+        }
+    }
+
+    fn initial_resume_execution_plan() -> MemythosArenaResumeExecutionPlan {
+        MemythosArenaResumeExecutionPlan {
+            mode: MemythosArenaResumeExecutionMode::InitialRound,
+            affected_participant_ids: Vec::new(),
+            source_round_id: None,
+            affected_decision_refs: Vec::new(),
+            cited_change_refs: Vec::new(),
+        }
+    }
+
+    fn partial_resume_execution_plan(
+        affected_participant_ids: Vec<String>,
+    ) -> MemythosArenaResumeExecutionPlan {
+        MemythosArenaResumeExecutionPlan {
+            mode: MemythosArenaResumeExecutionMode::ReassessAffectedPositions,
+            affected_participant_ids,
+            source_round_id: Some("arena-composition-round-1".to_string()),
+            affected_decision_refs: vec!["decision://fixture".to_string()],
+            cited_change_refs: vec!["evidence://fixture-change".to_string()],
         }
     }
 
@@ -10587,12 +11062,7 @@ mod tests {
         let non_complete_goals = goals
             .values()
             .filter(|goal| goal.status != ThreadGoalStatus::Complete)
-            .map(|goal| {
-                format!(
-                    "{}={:?}:{}",
-                    goal.thread_id, goal.status, goal.objective
-                )
-            })
+            .map(|goal| format!("{}={:?}:{}", goal.thread_id, goal.status, goal.objective))
             .collect::<Vec<_>>();
         assert!(
             non_complete_goals.is_empty(),
@@ -10837,7 +11307,9 @@ mod tests {
         assert!(prompt.contains("protected_decisions_status=preserved"));
         assert!(prompt.contains("reopened_decision_refs"));
         assert!(prompt.contains("resume_scope_status=partially_reopened"));
-        assert!(prompt.contains("does not by itself make that participant's hypothesis the global lead diagnosis"));
+        assert!(prompt.contains(
+            "does not by itself make that participant's hypothesis the global lead diagnosis"
+        ));
         assert!(prompt.contains("explain only changed evidence"));
         assert!(prompt.contains("bettor-growth"));
         assert!(prompt.contains("bettor-risk"));
@@ -11016,80 +11488,97 @@ mod tests {
         let ClientResponsePayload::MemythosArenaCompositionProvision(response) = response else {
             panic!("expected arena composition provision response");
         };
-        let source = response
+        let bettor_threads = response
+            .room
+            .participants
+            .iter()
+            .filter(|participant| participant.parent_role == "bettor")
+            .map(|participant| participant.thread_id.clone())
+            .collect::<Vec<_>>();
+        assert!(bettor_threads.len() >= 2);
+        let concierge_thread_id = response
             .leases
             .iter()
-            .find(|lease| lease.participant_id == "bettor-growth")
-            .expect("growth bettor")
+            .find(|lease| lease.participant_id == "concierge")
+            .expect("concierge")
             .thread_id
             .clone();
-        let turn_id = "proposal-turn-growth";
         let mut state = processor.state.lock().await;
-        state
-            .arena_message_deliveries
-            .push(MemythosArenaMessageDelivery {
-                delivery_id: "proposal-assignment-growth".to_string(),
-                message_id: "proposal-request-growth".to_string(),
-                human_summary: "Develop an independent proposal.".to_string(),
-                status: "receiver_turn_completed".to_string(),
-                sender_thread_id: response
-                    .leases
-                    .iter()
-                    .find(|lease| lease.participant_id == "concierge")
-                    .expect("concierge")
-                    .thread_id
-                    .clone(),
-                receiver_thread_id: source.clone(),
-                arena_id: response.room.arena_id.clone(),
-                round_id: "round-1".to_string(),
-                phase: Some("proposal".to_string()),
-                delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
-                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
-                aggregate_id: None,
-                aggregate_state: None,
-                checkpoint_state: None,
-                checkpoint_event_refs: Vec::new(),
-                receiver_turn_id: Some(turn_id.to_string()),
-                receiver_response_event_ref: None,
-                delivered_as_human_instruction: false,
-                memory_replay_required: false,
-                event_refs: Vec::new(),
-                rejection_reason: None,
-                failure_reason: None,
-            });
-        state.native_parent_turn_responses.insert(
-            native_token_usage_key(&source, turn_id),
-            ParentTurnResponse {
-                status: Some(TurnStatus::Completed),
-                request_item_ref: None,
-                request_text: None,
-                item_ref: Some("app-server://proposal-growth".to_string()),
-                text: Some("Growth proposal with explicit tradeoffs.".to_string()),
-            },
-        );
+        for (index, bettor_thread_id) in bettor_threads.iter().enumerate() {
+            let turn_id = format!("proposal-turn-{index}");
+            state
+                .arena_message_deliveries
+                .push(MemythosArenaMessageDelivery {
+                    delivery_id: format!("proposal-assignment-{index}"),
+                    message_id: format!("proposal-request-{index}"),
+                    human_summary: "Develop an independent proposal.".to_string(),
+                    status: "receiver_turn_completed".to_string(),
+                    sender_thread_id: concierge_thread_id.clone(),
+                    receiver_thread_id: bettor_thread_id.clone(),
+                    arena_id: response.room.arena_id.clone(),
+                    round_id: "round-1".to_string(),
+                    phase: Some("proposal".to_string()),
+                    delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+                    delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                    aggregate_id: None,
+                    aggregate_state: None,
+                    checkpoint_state: None,
+                    checkpoint_event_refs: Vec::new(),
+                    receiver_turn_id: Some(turn_id.clone()),
+                    receiver_response_event_ref: None,
+                    delivered_as_human_instruction: false,
+                    memory_replay_required: false,
+                    event_refs: Vec::new(),
+                    rejection_reason: None,
+                    failure_reason: None,
+                });
+            state.native_parent_turn_responses.insert(
+                native_token_usage_key(bettor_thread_id, &turn_id),
+                ParentTurnResponse {
+                    status: Some(TurnStatus::Completed),
+                    request_item_ref: None,
+                    request_text: None,
+                    item_ref: Some(format!("app-server://proposal-{index}")),
+                    text: Some(format!("Proposal {index} with explicit tradeoffs.")),
+                },
+            );
+        }
 
+        let source = bettor_threads.last().expect("last bettor");
+        let turn_id = format!("proposal-turn-{}", bettor_threads.len() - 1);
         let fanout = native_turn_loopback_candidates(
             &state,
-            &source,
-            turn_id,
-            "app-server://proposal-growth/completed",
+            source,
+            &turn_id,
+            "app-server://proposal-set/completed",
         );
-        assert_eq!(fanout.len(), 2);
+        assert_eq!(
+            fanout.len(),
+            bettor_threads.len() * (bettor_threads.len() - 1)
+        );
         assert!(fanout.iter().all(|message| {
             message.to_parent_role == "bettor"
+                && message.to_parent_thread_id != message.from_parent_thread_id
                 && message.message_kind == "peer_review_and_objection"
                 && message.delivery_policy
                     == Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger)
                 && message.aggregate_contract.as_ref().is_some_and(|contract| {
                     contract.phase_id == "proposal"
-                        && contract.expected_source_thread_ids.len() == 2
+                        && contract.expected_source_thread_ids.len() == bettor_threads.len() - 1
+                        && contract.quorum
+                            == u32::try_from(bettor_threads.len() - 1)
+                                .expect("bettor quorum fits u32")
                 })
         }));
-        assert!(
-            fanout
-                .iter()
-                .any(|message| message.to_parent_thread_id == source)
-        );
+        for bettor_thread_id in &bettor_threads {
+            assert_eq!(
+                fanout
+                    .iter()
+                    .filter(|message| message.to_parent_thread_id == *bettor_thread_id)
+                    .count(),
+                bettor_threads.len() - 1
+            );
+        }
     }
 
     #[test]
@@ -11344,7 +11833,8 @@ mod tests {
         let params = semantic_arena_request_params();
         let contract = competitive_composition_params().contract;
 
-        let prompt = build_arena_intake_prompt(&params, &contract);
+        let prompt =
+            build_arena_intake_prompt(&params, &contract, &initial_resume_execution_plan());
 
         assert!(prompt.contains("one autonomous native arena run"));
         assert!(prompt.contains("the client will only observe"));
@@ -11358,7 +11848,7 @@ mod tests {
         assert!(prompt.contains("You are the Room Concierge and own the arena objective"));
         assert!(prompt.contains("mechanical mailbox transitions under the arena contract"));
         assert!(prompt.contains("end this turn immediately"));
-        assert!(prompt.contains("Do not wait synchronously for any bettor"));
+        assert!(prompt.contains("Do not wait synchronously for any parent"));
         assert!(prompt.contains("an ordinary checkpoint does not"));
         assert!(prompt.contains("Do not keep a concierge turn alive while peers work"));
         assert!(prompt.contains("Do not issue separate cross-read, bet, or verdict requests"));
@@ -11377,11 +11867,312 @@ mod tests {
             open_implementation_scope: vec!["Repair the attribution window".to_string()],
         });
 
-        let prompt = build_arena_intake_prompt(&params, &competitive_composition_params().contract);
+        let prompt = build_arena_intake_prompt(
+            &params,
+            &competitive_composition_params().contract,
+            &initial_resume_execution_plan(),
+        );
 
         assert!(prompt.contains("Protected decisions:\n- The slowdown was observed"));
         assert!(prompt.contains("Revisable settlement:\n- Causal hypothesis weights"));
         assert!(prompt.contains("Open implementation scope:\n- Repair the attribution window"));
+    }
+
+    #[test]
+    fn partial_resume_intake_authorizes_only_one_combined_reassessment_per_affected_parent() {
+        let params = semantic_arena_request_params();
+        let plan = partial_resume_execution_plan(vec!["bettor-growth".to_string()]);
+
+        let prompt =
+            build_arena_intake_prompt(&params, &competitive_composition_params().contract, &plan);
+
+        assert!(prompt.contains("bounded partial resume"));
+        assert!(prompt.contains("exactly one resume_reassessment"));
+        assert!(prompt.contains("Affected participant ids: bettor-growth"));
+        assert!(prompt.contains("Source round: arena-composition-round-1"));
+        assert!(prompt.contains("no proposal, cross-read, or separate bet assignment"));
+        assert!(!prompt.contains("Dispatch exactly one independent peer_proposal"));
+    }
+
+    #[tokio::test]
+    async fn partial_resume_resolves_contract_participants_through_native_leases() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let provision = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("competitive composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(provision) = provision else {
+            panic!("expected composition provision response");
+        };
+        let round_id = "arena-composition-round-2";
+        let plan = partial_resume_execution_plan(vec![
+            "concierge".to_string(),
+            "bettor-growth".to_string(),
+            "judge".to_string(),
+        ]);
+        let mut state = processor.state.lock().await;
+        state
+            .arena_resume_execution_plans
+            .insert(arena_round_key(&provision.room.arena_id, round_id), plan);
+        let room = provision.room;
+        let concierge = room
+            .participants
+            .iter()
+            .find(|participant| participant.parent_role == "room_concierge")
+            .expect("concierge parent");
+        let growth = room
+            .participants
+            .iter()
+            .find(|participant| participant.thread_id.contains("bettor-growth"))
+            .expect("growth parent");
+        let risk = room
+            .participants
+            .iter()
+            .find(|participant| participant.thread_id.contains("bettor-risk"))
+            .expect("risk parent");
+        let judge = room
+            .participants
+            .iter()
+            .find(|participant| participant.parent_role == "judge")
+            .expect("judge parent");
+
+        validate_resume_execution_message(
+            &state,
+            &room,
+            round_id,
+            "resume_reassessment",
+            concierge,
+            growth,
+        )
+        .expect("affected parent should be authorized");
+        assert!(
+            validate_resume_execution_message(
+                &state,
+                &room,
+                round_id,
+                "resume_reassessment",
+                concierge,
+                risk,
+            )
+            .is_err(),
+            "unaffected parent must not be scheduled"
+        );
+        let aggregate =
+            canonical_native_judge_reassessment_contract(&state, &room, round_id, judge)
+                .expect("partial judge aggregate should resolve live leased threads");
+        assert_eq!(aggregate.quorum, 1);
+        assert_eq!(
+            aggregate.expected_source_thread_ids,
+            vec![growth.thread_id.clone()]
+        );
+        assert_eq!(aggregate.phase_id, "resume_reassessment");
+    }
+
+    #[tokio::test]
+    async fn completed_partial_reassessments_trigger_exactly_one_native_judge_turn() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let provision = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("competitive composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(provision) = provision else {
+            panic!("expected composition provision response");
+        };
+        let participant = |participant_id: &str| {
+            provision
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == participant_id)
+                .expect("participant lease should exist")
+        };
+        let concierge = participant("concierge");
+        let growth = participant("bettor-growth");
+        let risk = participant("bettor-risk");
+        let judge = participant("judge");
+        let round_id = "arena-composition-round-2";
+        let assignment =
+            |participant_id: &str, thread_id: &str, turn_id: &str| MemythosArenaMessageDelivery {
+                delivery_id: format!("resume-assignment-{participant_id}"),
+                message_id: format!("resume-request-{participant_id}"),
+                human_summary: "Reassess only the affected position.".to_string(),
+                status: "receiver_turn_running".to_string(),
+                sender_thread_id: concierge.thread_id.clone(),
+                receiver_thread_id: thread_id.to_string(),
+                arena_id: provision.room.arena_id.clone(),
+                round_id: round_id.to_string(),
+                phase: Some("resume_reassessment".to_string()),
+                delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_id: None,
+                aggregate_state: None,
+                checkpoint_state: None,
+                checkpoint_event_refs: Vec::new(),
+                receiver_turn_id: Some(turn_id.to_string()),
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: Vec::new(),
+                rejection_reason: None,
+                failure_reason: None,
+            };
+        {
+            let mut state = processor.state.lock().await;
+            state.arena_resume_execution_plans.insert(
+                arena_round_key(&provision.room.arena_id, round_id),
+                partial_resume_execution_plan(vec![
+                    "concierge".to_string(),
+                    "bettor-growth".to_string(),
+                    "bettor-risk".to_string(),
+                    "judge".to_string(),
+                ]),
+            );
+            state.arena_message_deliveries.push(assignment(
+                "bettor-growth",
+                &growth.thread_id,
+                "turn-resume-growth",
+            ));
+            state.arena_message_deliveries.push(assignment(
+                "bettor-risk",
+                &risk.thread_id,
+                "turn-resume-risk",
+            ));
+        }
+
+        assert!(
+            processor
+                .record_native_turn_completed(
+                    &growth.thread_id,
+                    "turn-resume-growth",
+                    "completed",
+                    Some(1_000),
+                    Some(250),
+                    None,
+                    Some("Growth revises its position and bounded bet.".to_string()),
+                )
+                .await
+        );
+        {
+            let state = processor.state.lock().await;
+            let deliveries = state
+                .arena_message_deliveries
+                .iter()
+                .filter(|delivery| {
+                    delivery
+                        .aggregate_id
+                        .as_deref()
+                        .is_some_and(|id| id.ends_with("::judge_reassessment"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(deliveries.len(), 1);
+            assert_eq!(
+                deliveries[0].aggregate_state,
+                Some(MemythosArenaAggregateState::Collecting)
+            );
+            assert!(deliveries[0].receiver_turn_id.is_none());
+        }
+
+        assert!(
+            processor
+                .record_native_turn_completed(
+                    &risk.thread_id,
+                    "turn-resume-risk",
+                    "completed",
+                    Some(1_100),
+                    Some(275),
+                    None,
+                    Some("Risk revises its objections, bet, and breakpoints.".to_string()),
+                )
+                .await
+        );
+        let delivery_count = {
+            let state = processor.state.lock().await;
+            let deliveries = state
+                .arena_message_deliveries
+                .iter()
+                .filter(|delivery| {
+                    delivery
+                        .aggregate_id
+                        .as_deref()
+                        .is_some_and(|id| id.ends_with("::judge_reassessment"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(deliveries.len(), 2);
+            assert_eq!(
+                deliveries
+                    .iter()
+                    .filter(|delivery| delivery.receiver_turn_id.is_some())
+                    .count(),
+                1,
+                "the final affected reassessment must trigger one judge turn"
+            );
+            assert!(
+                deliveries
+                    .iter()
+                    .all(|delivery| delivery.receiver_thread_id == judge.thread_id)
+            );
+            assert_eq!(
+                deliveries
+                    .iter()
+                    .filter(|delivery| {
+                        delivery.phase.as_deref() == Some("resume_reassessment")
+                            && delivery.receiver_turn_id.is_none()
+                    })
+                    .count(),
+                1,
+                "the incomplete aggregate must remain a reassessment collection"
+            );
+            assert_eq!(
+                deliveries
+                    .iter()
+                    .filter(|delivery| {
+                        delivery.phase.as_deref() == Some("judge")
+                            && delivery.receiver_turn_id.is_some()
+                    })
+                    .count(),
+                1,
+                "the sealed aggregate must become the single judge activation"
+            );
+            assert_eq!(
+                deliveries[1].aggregate_state,
+                Some(MemythosArenaAggregateState::RecipientTriggered)
+            );
+            state.arena_message_deliveries.len()
+        };
+
+        processor
+            .record_native_turn_completed(
+                &risk.thread_id,
+                "turn-resume-risk",
+                "completed",
+                Some(1_100),
+                Some(275),
+                None,
+                Some("Risk revises its objections, bet, and breakpoints.".to_string()),
+            )
+            .await;
+        assert_eq!(
+            processor.state.lock().await.arena_message_deliveries.len(),
+            delivery_count,
+            "turn completion replay must not duplicate a reassessment or judge wake"
+        );
     }
 
     #[test]
@@ -11502,10 +12293,7 @@ mod tests {
         );
 
         processor
-            .complete_parent_goal_after_successful_delivery(
-                "bettor-a",
-                &["review-1".to_string()],
-            )
+            .complete_parent_goal_after_successful_delivery("bettor-a", &["review-1".to_string()])
             .await;
 
         let goal = provisioning
@@ -11691,7 +12479,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn arena_request_replans_an_active_arena_from_a_semantic_change_signal() {
+    async fn arena_request_partially_resumes_without_replanning_the_active_composition() {
         let contract = competitive_composition_params().contract;
         let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
             AppServerRpcTransport::InProcess,
@@ -11719,12 +12507,12 @@ mod tests {
         let response = processor
             .arena_request(update, ConnectionId(7))
             .await
-            .expect("semantic change signal should replan inside app-server");
+            .expect("semantic change signal should resume inside app-server");
         let ClientResponsePayload::MemythosArenaRequest(response) = response else {
             panic!("expected semantic arena request response");
         };
 
-        assert_eq!(response.composition.composition_version, 2);
+        assert_eq!(response.composition.composition_version, 1);
         assert_eq!(
             response.resume_assessment.disposition,
             MemythosArenaResumeDisposition::PartialResume
@@ -11739,23 +12527,35 @@ mod tests {
             .as_ref()
             .expect("material resume delivery");
         assert_eq!(first_delivery.round_id, "arena-composition-round-1");
-        assert_eq!(resumed_delivery.round_id, "arena-composition-round-2");
+        assert!(
+            resumed_delivery
+                .round_id
+                .starts_with("arena-composition-resume-mem_arena_request"),
+            "partial resume needs a distinct round id without pretending the composition changed"
+        );
         assert_ne!(first_delivery.round_id, resumed_delivery.round_id);
-        let revision = response
-            .composition
-            .applied_revision
-            .expect("native revision should be recorded");
-        assert_eq!(revision.actions.len(), 4);
-        assert!(revision.actions.iter().all(|action| {
-            action.action == MemythosArenaCompositionRevisionActionKind::Keep
-                && action.thread_id.is_some()
-        }));
+        assert!(response.composition.applied_revision.is_none());
         assert!(
             response
                 .composition
                 .leases
                 .iter()
-                .all(|lease| lease.lease_source == "reused")
+                .all(|lease| lease.lease_source == "created")
+        );
+        assert_eq!(
+            first
+                .composition
+                .leases
+                .iter()
+                .map(|lease| (&lease.participant_id, &lease.thread_id))
+                .collect::<Vec<_>>(),
+            response
+                .composition
+                .leases
+                .iter()
+                .map(|lease| (&lease.participant_id, &lease.thread_id))
+                .collect::<Vec<_>>(),
+            "new evidence is a task delta and must not replace parent identity"
         );
     }
 
@@ -12387,7 +13187,9 @@ mod tests {
         assert!(revised_task_contract.contains("Do not restate, re-argue, or summarize"));
         assert!(revised_task_contract.contains("Final validation boundaries for this verdict"));
         assert!(revised_task_contract.contains("Judge selects a supported position"));
-        assert!(revised_task_contract.contains("Preserve any exact predicate or invariant verbatim"));
+        assert!(
+            revised_task_contract.contains("Preserve any exact predicate or invariant verbatim")
+        );
 
         let revised_bettor = second
             .leases
@@ -13372,13 +14174,11 @@ mod tests {
                         && delivery.phase.as_deref() == Some("peer_review_and_objection")
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(responses.len(), 2);
-            assert!(responses.iter().all(|delivery| {
-                matches!(
-                    delivery.aggregate_state,
-                    Some(MemythosArenaAggregateState::Collecting)
-                ) && delivery.receiver_turn_id.is_none()
-            }));
+            assert_eq!(
+                responses.len(),
+                0,
+                "peer fanout must wait until the proposal set is sealed"
+            );
         }
 
         assert!(
@@ -13406,7 +14206,12 @@ mod tests {
                     ) && delivery.phase.as_deref() == Some("peer_review_and_objection")
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(responses.len(), 4);
+            assert_eq!(responses.len(), 2);
+            assert!(
+                responses
+                    .iter()
+                    .all(|delivery| { delivery.sender_thread_id != delivery.receiver_thread_id })
+            );
             assert_eq!(
                 responses
                     .iter()

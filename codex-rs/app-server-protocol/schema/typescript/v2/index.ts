@@ -284,6 +284,8 @@ export type { MemythosArenaParent } from "./MemythosArenaParent";
 export type { MemythosArenaResumeAssessment } from "./MemythosArenaResumeAssessment";
 export type { MemythosArenaResumeContext } from "./MemythosArenaResumeContext";
 export type { MemythosArenaResumeDisposition } from "./MemythosArenaResumeDisposition";
+export type { MemythosArenaResumeExecutionMode } from "./MemythosArenaResumeExecutionMode";
+export type { MemythosArenaResumeExecutionPlan } from "./MemythosArenaResumeExecutionPlan";
 export type { MemythosArenaRoundPolicy } from "./MemythosArenaRoundPolicy";
 export type { MemythosEventChannel } from "./MemythosEventChannel";
 export type { MemythosLayer } from "./MemythosLayer";

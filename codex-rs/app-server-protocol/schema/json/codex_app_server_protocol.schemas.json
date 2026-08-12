@@ -13375,13 +13375,17 @@
           },
           "rationale": {
             "type": "string"
+          },
+          "resumeExecutionPlan": {
+            "$ref": "#/definitions/v2/MemythosArenaResumeExecutionPlan"
           }
         },
         "required": [
           "avoidedFullRound",
           "comparabilityInvalidated",
           "disposition",
-          "rationale"
+          "rationale",
+          "resumeExecutionPlan"
         ],
         "type": "object"
       },
@@ -13443,6 +13447,53 @@
           "full_round"
         ],
         "type": "string"
+      },
+      "MemythosArenaResumeExecutionMode": {
+        "enum": [
+          "initial_round",
+          "retain_decision",
+          "reassess_affected_positions",
+          "full_round"
+        ],
+        "type": "string"
+      },
+      "MemythosArenaResumeExecutionPlan": {
+        "properties": {
+          "affectedDecisionRefs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "affectedParticipantIds": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "citedChangeRefs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mode": {
+            "$ref": "#/definitions/v2/MemythosArenaResumeExecutionMode"
+          },
+          "sourceRoundId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
       },
       "MemythosArenaRoundPolicy": {
         "properties": {
