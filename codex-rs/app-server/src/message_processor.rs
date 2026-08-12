@@ -36,6 +36,7 @@ use crate::request_processors::MemythosRequestProcessor;
 use crate::request_processors::NativeArenaCompositionPlanningAdapter;
 use crate::request_processors::NativeArenaParentProvisioningAdapter;
 use crate::request_processors::NativeMailboxPeerParentDeliveryAdapter;
+use crate::request_processors::NativeParentTurnControlAdapter;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
@@ -522,7 +523,7 @@ impl MessageProcessor {
             Arc::clone(&skills_watcher),
             Arc::clone(&memythos_processor_holder),
         );
-        let memythos_processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+        let memythos_processor = MemythosRequestProcessor::new_for_transport_with_native_adapters_and_turn_control(
             rpc_transport,
             Arc::new(NativeMailboxPeerParentDeliveryAdapter::new(
                 turn_processor.clone(),
@@ -538,6 +539,7 @@ impl MessageProcessor {
             Arc::new(ThreadTurnsParentResponseAdapter::new(
                 thread_processor.clone(),
             )),
+            Arc::new(NativeParentTurnControlAdapter::new(turn_processor.clone())),
             Arc::new(ThreadManagerParentConfigurationAdapter::new(Arc::clone(
                 &thread_manager,
             ))),

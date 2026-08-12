@@ -148,7 +148,9 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::TurnItemsView;
+use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_core::StartThreadOptions;
@@ -2886,6 +2888,134 @@ pub(crate) trait ParentTurnResponseAdapter: Send + Sync {
     }
 }
 
+pub(crate) type ParentTurnControlFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), JSONRPCErrorError>> + Send + 'a>>;
+
+pub(crate) trait ParentTurnControlAdapter: Send + Sync {
+    fn request_wrap_up<'a>(
+        &'a self,
+        thread_id: &'a str,
+        turn_id: &'a str,
+    ) -> ParentTurnControlFuture<'a>;
+
+    fn interrupt<'a>(
+        &'a self,
+        thread_id: &'a str,
+        turn_id: &'a str,
+    ) -> ParentTurnControlFuture<'a>;
+}
+
+#[derive(Debug)]
+#[cfg(test)]
+struct RecordOnlyParentTurnControlAdapter;
+
+#[cfg(test)]
+impl ParentTurnControlAdapter for RecordOnlyParentTurnControlAdapter {
+    fn request_wrap_up<'a>(
+        &'a self,
+        _thread_id: &'a str,
+        _turn_id: &'a str,
+    ) -> ParentTurnControlFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn interrupt<'a>(
+        &'a self,
+        _thread_id: &'a str,
+        _turn_id: &'a str,
+    ) -> ParentTurnControlFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParentTurnExecutionWindow {
+    wrap_up_after: Duration,
+    interrupt_grace: Duration,
+}
+
+fn parent_turn_execution_window(
+    reasoning_effort: Option<&ReasoningEffort>,
+) -> ParentTurnExecutionWindow {
+    let wrap_up_after = match reasoning_effort.map(ReasoningEffort::as_str) {
+        Some("none") | Some("minimal") | Some("low") => Duration::from_secs(45),
+        Some("high") => Duration::from_secs(120),
+        Some("xhigh") => Duration::from_secs(180),
+        _ => Duration::from_secs(75),
+    };
+    ParentTurnExecutionWindow {
+        wrap_up_after,
+        interrupt_grace: Duration::from_secs(30),
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct NativeParentTurnControlAdapter {
+    turn_processor: TurnRequestProcessor,
+}
+
+impl NativeParentTurnControlAdapter {
+    pub(crate) fn new(turn_processor: TurnRequestProcessor) -> Self {
+        Self { turn_processor }
+    }
+}
+
+impl ParentTurnControlAdapter for NativeParentTurnControlAdapter {
+    fn request_wrap_up<'a>(
+        &'a self,
+        thread_id: &'a str,
+        turn_id: &'a str,
+    ) -> ParentTurnControlFuture<'a> {
+        Box::pin(async move {
+            let request_id = ConnectionRequestId {
+                connection_id: ConnectionId(0),
+                request_id: RequestId::String(format!("memythos-turn-wrap-up:{turn_id}")),
+            };
+            self.turn_processor
+                .turn_steer(
+                    &request_id,
+                    TurnSteerParams {
+                        thread_id: thread_id.to_string(),
+                        client_user_message_id: Some(format!("memythos-wrap-up:{turn_id}")),
+                        input: vec![UserInput::Text {
+                            text: "Your native arena assignment has reached its planned execution window. Stop opening new analysis. Preserve the strongest completed evidence, state any unresolved uncertainty explicitly, and close this turn now with the best bounded response available."
+                                .to_string(),
+                            text_elements: vec![],
+                        }],
+                        responsesapi_client_metadata: None,
+                        additional_context: None,
+                        expected_turn_id: turn_id.to_string(),
+                    },
+                )
+                .await
+                .map(|_| ())
+        })
+    }
+
+    fn interrupt<'a>(
+        &'a self,
+        thread_id: &'a str,
+        turn_id: &'a str,
+    ) -> ParentTurnControlFuture<'a> {
+        Box::pin(async move {
+            let request_id = ConnectionRequestId {
+                connection_id: ConnectionId(0),
+                request_id: RequestId::String(format!("memythos-turn-interrupt:{turn_id}")),
+            };
+            self.turn_processor
+                .turn_interrupt(
+                    &request_id,
+                    TurnInterruptParams {
+                        thread_id: thread_id.to_string(),
+                        turn_id: turn_id.to_string(),
+                    },
+                )
+                .await
+                .map(|_| ())
+        })
+    }
+}
+
 #[derive(Debug)]
 #[cfg(test)]
 struct RecordOnlyParentTurnResponseAdapter;
@@ -3312,6 +3442,7 @@ pub(crate) struct MemythosRequestProcessor {
     parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
     thread_consolidation_adapter: Arc<dyn ThreadConsolidationAdapter>,
     parent_turn_response_adapter: Arc<dyn ParentTurnResponseAdapter>,
+    parent_turn_control_adapter: Arc<dyn ParentTurnControlAdapter>,
     parent_configuration_adapter: Arc<dyn ParentConfigurationAdapter>,
     arena_parent_provisioning_adapter: Arc<dyn ArenaParentProvisioningAdapter>,
     arena_composition_planning_adapter: Arc<dyn ArenaCompositionPlanningAdapter>,
@@ -3372,12 +3503,37 @@ impl MemythosRequestProcessor {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_for_transport_with_native_adapters(
         rpc_transport: AppServerRpcTransport,
         peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
         parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
         thread_consolidation_adapter: Arc<dyn ThreadConsolidationAdapter>,
         parent_turn_response_adapter: Arc<dyn ParentTurnResponseAdapter>,
+        parent_configuration_adapter: Arc<dyn ParentConfigurationAdapter>,
+        arena_parent_provisioning_adapter: Arc<dyn ArenaParentProvisioningAdapter>,
+        arena_composition_planning_adapter: Arc<dyn ArenaCompositionPlanningAdapter>,
+    ) -> Self {
+        Self::new_for_transport_with_native_adapters_and_turn_control(
+            rpc_transport,
+            peer_parent_delivery_adapter,
+            parent_goal_snapshot_adapter,
+            thread_consolidation_adapter,
+            parent_turn_response_adapter,
+            Arc::new(RecordOnlyParentTurnControlAdapter),
+            parent_configuration_adapter,
+            arena_parent_provisioning_adapter,
+            arena_composition_planning_adapter,
+        )
+    }
+
+    pub(crate) fn new_for_transport_with_native_adapters_and_turn_control(
+        rpc_transport: AppServerRpcTransport,
+        peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
+        parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
+        thread_consolidation_adapter: Arc<dyn ThreadConsolidationAdapter>,
+        parent_turn_response_adapter: Arc<dyn ParentTurnResponseAdapter>,
+        parent_turn_control_adapter: Arc<dyn ParentTurnControlAdapter>,
         parent_configuration_adapter: Arc<dyn ParentConfigurationAdapter>,
         arena_parent_provisioning_adapter: Arc<dyn ArenaParentProvisioningAdapter>,
         arena_composition_planning_adapter: Arc<dyn ArenaCompositionPlanningAdapter>,
@@ -3431,6 +3587,7 @@ impl MemythosRequestProcessor {
             parent_goal_snapshot_adapter,
             thread_consolidation_adapter,
             parent_turn_response_adapter,
+            parent_turn_control_adapter,
             parent_configuration_adapter,
             arena_parent_provisioning_adapter,
             arena_composition_planning_adapter,
@@ -4537,7 +4694,11 @@ impl MemythosRequestProcessor {
         let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
         let delivery_attempt = self
             .peer_parent_delivery_adapter
-            .deliver_peer_parent_message(&message, target_reasoning_effort, ConnectionId(0))
+            .deliver_peer_parent_message(
+                &message,
+                target_reasoning_effort.clone(),
+                ConnectionId(0),
+            )
             .await;
         if delivery_attempt.rejection_reason.is_some()
             && let Some(prepared_goal) = prepared_goal.as_ref()
@@ -4619,6 +4780,16 @@ impl MemythosRequestProcessor {
             telemetry_channel,
             telemetry_summary,
         );
+
+        let governed_turn = delivery
+            .receiver_turn_id
+            .clone()
+            .filter(|_| delivery.rejection_reason.is_none())
+            .map(|turn_id| (delivery.receiver_thread_id.clone(), turn_id));
+        drop(state);
+        if let Some((thread_id, turn_id)) = governed_turn {
+            self.spawn_parent_turn_governor(thread_id, turn_id, target_reasoning_effort);
+        }
 
         Ok(MemythosArenaMessageSendResponse { delivery }.into())
     }
@@ -5758,6 +5929,118 @@ impl MemythosRequestProcessor {
                 }
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    fn spawn_parent_turn_governor(
+        &self,
+        thread_id: String,
+        turn_id: String,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) {
+        let processor = self.clone();
+        tokio::spawn(async move {
+            processor
+                .govern_parent_turn(
+                    &thread_id,
+                    &turn_id,
+                    parent_turn_execution_window(reasoning_effort.as_ref()),
+                )
+                .await;
+        });
+    }
+
+    async fn govern_parent_turn(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        window: ParentTurnExecutionWindow,
+    ) {
+        tokio::time::sleep(window.wrap_up_after).await;
+        if self.parent_turn_has_closed(thread_id, turn_id).await {
+            return;
+        }
+
+        let wrap_up_ref = format!(
+            "app-server://threads/{thread_id}/turns/{turn_id}/steer/wrap-up"
+        );
+        let wrap_up_result = self
+            .parent_turn_control_adapter
+            .request_wrap_up(thread_id, turn_id)
+            .await;
+        self.record_parent_turn_governance_event(
+            thread_id,
+            turn_id,
+            wrap_up_ref,
+            wrap_up_result.err().map(|error| error.message),
+        )
+        .await;
+
+        tokio::time::sleep(window.interrupt_grace).await;
+        if self.parent_turn_has_closed(thread_id, turn_id).await {
+            return;
+        }
+
+        let interrupt_result = self
+            .parent_turn_control_adapter
+            .interrupt(thread_id, turn_id)
+            .await;
+        let interrupt_error = interrupt_result.err().map(|error| error.message);
+        let mut state = self.state.lock().await;
+        if let Some(delivery) = state.arena_message_deliveries.iter_mut().find(|delivery| {
+            delivery.receiver_thread_id == thread_id
+                && delivery.receiver_turn_id.as_deref() == Some(turn_id)
+        }) {
+            let interrupt_ref = format!(
+                "app-server://threads/{thread_id}/turns/{turn_id}/interrupt/execution-window"
+            );
+            if !delivery.event_refs.contains(&interrupt_ref) {
+                delivery.event_refs.push(interrupt_ref);
+            }
+            delivery.status = "receiver_turn_interrupted".to_string();
+            delivery.failure_reason = Some(match interrupt_error {
+                Some(error) => format!(
+                    "native wrap-up did not close the turn and turn/interrupt failed: {error}"
+                ),
+                None => "native wrap-up did not close the turn within its grace window; turn/interrupt requested and completed peer evidence remains resumable"
+                    .to_string(),
+            });
+        }
+    }
+
+    async fn parent_turn_has_closed(&self, thread_id: &str, turn_id: &str) -> bool {
+        let response = self
+            .parent_turn_response_adapter
+            .read_response(thread_id, turn_id)
+            .await;
+        matches!(
+            response.status,
+            Some(
+                TurnStatus::Completed
+                    | TurnStatus::Failed
+                    | TurnStatus::Interrupted
+            )
+        )
+    }
+
+    async fn record_parent_turn_governance_event(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        event_ref: String,
+        error: Option<String>,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some(delivery) = state.arena_message_deliveries.iter_mut().find(|delivery| {
+            delivery.receiver_thread_id == thread_id
+                && delivery.receiver_turn_id.as_deref() == Some(turn_id)
+        }) {
+            if !delivery.event_refs.contains(&event_ref) {
+                delivery.event_refs.push(event_ref);
+            }
+            if let Some(error) = error {
+                delivery.failure_reason = Some(format!("native turn/steer failed: {error}"));
+            }
         }
     }
 
@@ -13315,6 +13598,124 @@ mod tests {
                 }
             })
         }
+    }
+
+    #[derive(Debug)]
+    struct InProgressParentTurnResponseAdapter;
+
+    impl ParentTurnResponseAdapter for InProgressParentTurnResponseAdapter {
+        fn read_response<'a>(
+            &'a self,
+            _thread_id: &'a str,
+            _turn_id: &'a str,
+        ) -> ParentTurnResponseFuture<'a> {
+            Box::pin(async {
+                ParentTurnResponse {
+                    status: Some(TurnStatus::InProgress),
+                    request_item_ref: None,
+                    request_text: None,
+                    item_ref: None,
+                    text: None,
+                }
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingParentTurnControlAdapter {
+        wrap_ups: AtomicUsize,
+        interrupts: AtomicUsize,
+    }
+
+    impl ParentTurnControlAdapter for RecordingParentTurnControlAdapter {
+        fn request_wrap_up<'a>(
+            &'a self,
+            _thread_id: &'a str,
+            _turn_id: &'a str,
+        ) -> ParentTurnControlFuture<'a> {
+            self.wrap_ups.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn interrupt<'a>(
+            &'a self,
+            _thread_id: &'a str,
+            _turn_id: &'a str,
+        ) -> ParentTurnControlFuture<'a> {
+            self.interrupts.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[test]
+    fn parent_turn_execution_window_scales_with_native_reasoning_effort() {
+        let low = parent_turn_execution_window(Some(&ReasoningEffort::Low));
+        let high = parent_turn_execution_window(Some(&ReasoningEffort::High));
+        let xhigh = parent_turn_execution_window(Some(&ReasoningEffort::XHigh));
+
+        assert!(low.wrap_up_after < high.wrap_up_after);
+        assert!(high.wrap_up_after < xhigh.wrap_up_after);
+        assert_eq!(low.interrupt_grace, high.interrupt_grace);
+    }
+
+    #[tokio::test]
+    async fn parent_turn_governor_uses_native_wrap_up_then_interrupt_for_open_turn() {
+        let controls = Arc::new(RecordingParentTurnControlAdapter::default());
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters_and_turn_control(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(InProgressParentTurnResponseAdapter),
+            controls.clone(),
+            Arc::new(RecordOnlyParentConfigurationAdapter),
+            Arc::new(RecordOnlyArenaParentProvisioningAdapter),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+
+        processor
+            .govern_parent_turn(
+                "thread-open",
+                "turn-open",
+                ParentTurnExecutionWindow {
+                    wrap_up_after: Duration::ZERO,
+                    interrupt_grace: Duration::ZERO,
+                },
+            )
+            .await;
+
+        assert_eq!(controls.wrap_ups.load(Ordering::SeqCst), 1);
+        assert_eq!(controls.interrupts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn parent_turn_governor_does_not_steer_a_closed_turn() {
+        let controls = Arc::new(RecordingParentTurnControlAdapter::default());
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters_and_turn_control(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(FakeParentTurnResponseAdapter),
+            controls.clone(),
+            Arc::new(RecordOnlyParentConfigurationAdapter),
+            Arc::new(RecordOnlyArenaParentProvisioningAdapter),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+
+        processor
+            .govern_parent_turn(
+                "thread-closed",
+                "turn-closed",
+                ParentTurnExecutionWindow {
+                    wrap_up_after: Duration::ZERO,
+                    interrupt_grace: Duration::ZERO,
+                },
+            )
+            .await;
+
+        assert_eq!(controls.wrap_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(controls.interrupts.load(Ordering::SeqCst), 0);
     }
 
     #[derive(Debug, Default)]
