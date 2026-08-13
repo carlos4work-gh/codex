@@ -2371,7 +2371,7 @@ fn native_bettor_checkpoint_prompt(message_kind: &str, message: &str) -> String 
             "All expected independent proposals are now sealed in your native mailbox. Read every proposal, compare it with your own position, identify material agreements and objections, and return one substantive peer review with an explicitly revised position. Do not merely summarize the room. If this is a revised composition, report only what changed in your position, why it changed, and the remaining material objection; do not reproduce unchanged arena constraints."
         }
         "peer_bet" => {
-            "All expected peer reviews and objections are now sealed in your native mailbox. Read the complete checkpoint, update your position from the shared evidence, and return one final bet. Name the exact participant proposal you support, justify the commitment, preserve material dissent, and state reopening signals. If this is a revised composition, keep the bet to the changed commitment, decisive new evidence, and material dissent; reference unchanged guardrails without restating them."
+            "All expected peer reviews and objections are now sealed in your native mailbox. Read the complete checkpoint and use your native thread memory to return an incremental final commitment, not a repetition of your proposal or cross-read. State the final decision you support and the exact participant proposal it comes from; then make the delta explicit: what changed or was retained from your initial position, which peer evidence you incorporated, which material evidence you rejected and why, and how that evidence supports your argued confidence. Accept an explicit tradeoff and cost of error, preserve residual dissent that the Judge must carry forward, and state concrete breakpoints or signals that would reopen the commitment. Raise a parent rollup only when a genuinely blocking authority or business definition is missing. Natural-language detail is allowed when needed for executability, but unchanged guardrails must be referenced rather than restated."
         }
         _ => "Read the complete sealed mailbox checkpoint and complete your assigned arena phase.",
     };
@@ -10139,6 +10139,26 @@ fn validate_thread_contract_assemble_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_peer_bet_is_an_incremental_commitment_contract() {
+        let prompt = native_bettor_checkpoint_prompt(
+            "peer_bet",
+            "The sealed peer checkpoint follows.",
+        );
+
+        assert!(prompt.contains("incremental final commitment"));
+        assert!(prompt.contains("what changed or was retained"));
+        assert!(prompt.contains("incorporated"));
+        assert!(prompt.contains("rejected and why"));
+        assert!(prompt.contains("argued confidence"));
+        assert!(prompt.contains("tradeoff and cost of error"));
+        assert!(prompt.contains("residual dissent"));
+        assert!(prompt.contains("breakpoints or signals"));
+        assert!(prompt.contains("parent rollup"));
+        assert!(prompt.contains("rather than restated"));
+        assert!(!prompt.contains("return one final bet"));
+    }
     use codex_app_server_protocol::MemythosArenaKind;
     use codex_app_server_protocol::MemythosArenaMessage;
     use codex_app_server_protocol::MemythosLayerKind;
