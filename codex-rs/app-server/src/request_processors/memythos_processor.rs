@@ -450,6 +450,31 @@ fn native_judge_verdict_output_schema(
                     "enum": eligible_winner_ids
                 }
             },
+            "winning_decision": { "type": "string" },
+            "accepted_tradeoff": { "type": "string" },
+            "contribution_attribution": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "participant_id": {
+                            "type": "string",
+                            "enum": eligible_winner_ids
+                        },
+                        "claim_refs": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "disposition": {
+                            "type": "string",
+                            "enum": ["adopted", "conditioned", "rejected", "preserved_dissent"]
+                        },
+                        "rationale": { "type": "string" }
+                    },
+                    "required": ["participant_id", "claim_refs", "disposition", "rationale"],
+                    "additionalProperties": false
+                }
+            },
             "dissent": { "type": "string" },
             "reopening_signals": {
                 "type": "array",
@@ -472,6 +497,9 @@ fn native_judge_verdict_output_schema(
         "required": [
             "winner_participant_id",
             "ranked_alternatives",
+            "winning_decision",
+            "accepted_tradeoff",
+            "contribution_attribution",
             "dissent",
             "reopening_signals",
             "protected_decisions_status",
@@ -490,6 +518,9 @@ fn native_judge_verdict_output_schema(
 struct NativeJudgeVerdict {
     winner_participant_id: String,
     ranked_alternatives: Vec<String>,
+    winning_decision: String,
+    accepted_tradeoff: String,
+    contribution_attribution: Vec<NativeJudgeContributionAttribution>,
     dissent: String,
     reopening_signals: Vec<String>,
     protected_decisions_status: String,
@@ -498,21 +529,46 @@ struct NativeJudgeVerdict {
     rationale: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeJudgeContributionAttribution {
+    participant_id: String,
+    claim_refs: Vec<String>,
+    disposition: String,
+    rationale: String,
+}
+
 fn is_valid_native_judge_verdict(text: &str, eligible_winner_ids: &HashSet<&str>) -> bool {
     let Ok(verdict) = serde_json::from_str::<NativeJudgeVerdict>(text) else {
         return false;
     };
     let _schema_required_fields = (
+        &verdict.winning_decision,
+        &verdict.accepted_tradeoff,
         &verdict.dissent,
         &verdict.reopening_signals,
         &verdict.rationale,
         &verdict.reopened_decision_refs,
     );
+    let attributed_participants = verdict
+        .contribution_attribution
+        .iter()
+        .map(|attribution| attribution.participant_id.as_str())
+        .collect::<HashSet<_>>();
     eligible_winner_ids.contains(verdict.winner_participant_id.as_str())
         && verdict
             .ranked_alternatives
             .iter()
             .all(|participant_id| eligible_winner_ids.contains(participant_id.as_str()))
+        && &attributed_participants == eligible_winner_ids
+        && verdict.contribution_attribution.len() == eligible_winner_ids.len()
+        && verdict.contribution_attribution.iter().all(|attribution| {
+            let _semantic_fields = (&attribution.claim_refs, &attribution.rationale);
+            matches!(
+                attribution.disposition.as_str(),
+                "adopted" | "conditioned" | "rejected" | "preserved_dissent"
+            )
+        })
         && matches!(
             verdict.protected_decisions_status.as_str(),
             "preserved" | "reopened"
@@ -930,7 +986,7 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     config,
                     agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
                     root_developer_instructions: Some(
-                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances plus one room_concierge and one judge. The Room Concierge owns technical coordination, checkpoints, dependencies, exception routing, and communication; it is not a proposer or business authority. coordinatorParticipantId must be null for an ordinary arena. Select an additional coordinator/process steward only for an explicit regulatory, method-conflict, or exceptional-governance requirement and explain that exception in rationale. Native method authorities such as coordinate, delegate, and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the room_concierge; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent and select a native reasoningEffort for every participant. The active arena parent toolset requires reasoningEffort low, medium, high, or xhigh; none and minimal are invalid for this runtime. Within that compatible range, choose effort proportionate to uncertainty and decision impact; routine room coordination and concise phase responses normally need less effort than final judgment of material uncertainty. tokenBudget is a cumulative hard limit over the complete parent objective, including every arena phase and all input/output tokens. Produce a costEnvelope before runtime. Use mode open and null budgets when costContext has neither an explicit numeric cap nor accepted comparable evidence. Use calibrated only from cited accepted comparable evidence, and explicit_cap only from costContext.explicitTokenCap. For calibrated or explicit_cap, assign every participant a positive tokenBudget, make their sum equal totalTokenBudget, and separately report the concierge coordination budget and all other substantive budgets. Funding must preserve the selected method, completion criteria, cross-read, objections, bets, and judge. If the available explicit cap cannot fund method integrity, do not pretend it can: select change_method with an honest compatible method or request_expansion while preserving the competitive composition. A qualitative request for efficiency, a small team, brevity, speed, or lower cost is not an explicit numeric hard limit. Never invent a numeric cap from qualitative cost language. The exhaustion policy is an agentic plan consumed through OOTB goals: exhaustion means wrap-up/replan, justified expansion, or explicit method change, never blind kill. Return only the requested structured contract."
+                        "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. For every proposal-bearing bettor, make roleObjective a case-specific differential mandate that states the question this perspective protects, evidence it must seek, risk no other selected perspective represents equally, authority it does not possess, and conditions under which it must yield or request rollup. Do not encode a fixed business-role catalog. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances plus one room_concierge and one judge. The Room Concierge owns technical coordination, checkpoints, dependencies, exception routing, and communication; it is not a proposer or business authority. coordinatorParticipantId must be null for an ordinary arena. Select an additional coordinator/process steward only for an explicit regulatory, method-conflict, or exceptional-governance requirement and explain that exception in rationale. Native method authorities such as coordinate, delegate, and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the room_concierge; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent and select a native reasoningEffort for every participant. The active arena parent toolset requires reasoningEffort low, medium, high, or xhigh; none and minimal are invalid for this runtime. Within that compatible range, choose effort proportionate to uncertainty and decision impact; routine room coordination and concise phase responses normally need less effort than final judgment of material uncertainty. tokenBudget is a cumulative hard limit over the complete parent objective, including every arena phase and all input/output tokens. Produce a costEnvelope before runtime. Use mode open and null budgets when costContext has neither an explicit numeric cap nor accepted comparable evidence. Use calibrated only from cited accepted comparable evidence, and explicit_cap only from costContext.explicitTokenCap. For calibrated or explicit_cap, assign every participant a positive tokenBudget, make their sum equal totalTokenBudget, and separately report the concierge coordination budget and all other substantive budgets. Funding must preserve the selected method, completion criteria, cross-read, objections, bets, and judge. If the available explicit cap cannot fund method integrity, do not pretend it can: select change_method with an honest compatible method or request_expansion while preserving the competitive composition. A qualitative request for efficiency, a small team, brevity, speed, or lower cost is not an explicit numeric hard limit. Never invent a numeric cap from qualitative cost language. The exhaustion policy is an agentic plan consumed through OOTB goals: exhaustion means wrap-up/replan, justified expansion, or explicit method change, never blind kill. Return only the requested structured contract."
                             .to_string(),
                     ),
                     initial_history: InitialHistory::New,
@@ -2360,7 +2416,7 @@ fn native_concierge_checkpoint_prompt(message_kind: &str, message: &str) -> Stri
 
 fn native_judge_checkpoint_prompt(message: &str, eligible_winner_ids: &[String]) -> String {
     format!(
-        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Return only the JSON object required by the native output schema. Select exactly one eligible winner, rank the alternatives, preserve dissent, and state reopening signals. The winner identifies the contribution that best resolves this bounded arena objective; winning a round does not by itself make that participant's hypothesis the global lead diagnosis, override protected decisions, or grant authority beyond the active objective. Keep that distinction explicit whenever the evidence still requires a mixed, provisional, or unsettled posture. `protected_decisions_status` measures only whether protected guardrails, authority boundaries, or explicit invariants remain valid; changing an affected winner, hypothesis weight, or bounded decision does not reopen protected decisions. Report every bounded decision changed by this resume in `reopened_decision_refs`, using native refs when available and stable semantic refs otherwise; use an empty array when none changed. `resume_scope_status` separately describes the work scope: use `not_applicable` for an initial round, `retained` when a resume changes no hypothesis or decision scope, `partially_reopened` when new evidence reopens only affected hypotheses, weights, or bounded scope while protected decisions remain valid, and `fully_reopened` only when the whole decision scope must be reconsidered. A partial resume therefore normally reports `protected_decisions_status=preserved`, one or more `reopened_decision_refs`, and `resume_scope_status=partially_reopened`. On a resumed composition, explain only changed evidence, changed bounded decisions, and remaining dissent; reference unchanged contract constraints without reproducing them. Identify the evidence and affected authority in the rationale. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
+        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Return only the JSON object required by the native output schema. Select exactly one eligible winner, rank the alternatives, state the winning decision and accepted tradeoff, preserve dissent, and state reopening signals. Attribute every eligible bettor exactly once: identify claim refs where available, classify the contribution as adopted, conditioned, rejected, or preserved_dissent, and explain why. Credit useful evidence even when its parent did not win; do not reward persistence after refutation and do not turn this theoretical verdict into a persistent reputation score. The winner identifies the contribution that best resolves this bounded arena objective; winning a round does not by itself make that participant's hypothesis the global lead diagnosis, override protected decisions, or grant authority beyond the active objective. Keep that distinction explicit whenever the evidence still requires a mixed, provisional, or unsettled posture. `protected_decisions_status` measures only whether protected guardrails, authority boundaries, or explicit invariants remain valid; changing an affected winner, hypothesis weight, or bounded decision does not reopen protected decisions. Report every bounded decision changed by this resume in `reopened_decision_refs`, using native refs when available and stable semantic refs otherwise; use an empty array when none changed. `resume_scope_status` separately describes the work scope: use `not_applicable` for an initial round, `retained` when a resume changes no hypothesis or decision scope, `partially_reopened` when new evidence reopens only affected hypotheses, weights, or bounded scope while protected decisions remain valid, and `fully_reopened` only when the whole decision scope must be reconsidered. A partial resume therefore normally reports `protected_decisions_status=preserved`, one or more `reopened_decision_refs`, and `resume_scope_status=partially_reopened`. On a resumed composition, explain only changed evidence, changed bounded decisions, and remaining dissent; reference unchanged contract constraints without reproducing them. Identify the evidence and affected authority in the rationale. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
         eligible_winner_ids.join(", ")
     )
 }
@@ -2368,7 +2424,7 @@ fn native_judge_checkpoint_prompt(message: &str, eligible_winner_ids: &[String])
 fn native_bettor_checkpoint_prompt(message_kind: &str, message: &str) -> String {
     let next_action = match message_kind {
         "peer_review_and_objection" => {
-            "All expected independent proposals are now sealed in your native mailbox. Read every proposal, compare it with your own position, identify material agreements and objections, and return one substantive peer review with an explicitly revised position. Do not merely summarize the room. If this is a revised composition, report only what changed in your position, why it changed, and the remaining material objection; do not reproduce unchanged arena constraints."
+            "All expected independent proposals are now sealed in your native mailbox. Read every proposal and return one substantive peer review from your own differential responsibility. Separate what you learned and incorporated, what changed in your position and why, the evidence or risk that remains uniquely protected by your perspective, the residual objection that was not absorbed, and the condition that would falsify your current position. Convergence supported by evidence is valid; repetition without a differential contribution is not. Do not merely summarize the room. If this is a revised composition, report only the delta and remaining material objection; do not reproduce unchanged arena constraints."
         }
         "peer_bet" => {
             "All expected peer reviews and objections are now sealed in your native mailbox. Read the complete checkpoint and use your native thread memory to return an incremental final commitment, not a repetition of your proposal or cross-read. State the final decision you support and the exact participant proposal it comes from; then make the delta explicit: what changed or was retained from your initial position, which peer evidence you incorporated, which material evidence you rejected and why, and how that evidence supports your argued confidence. Accept an explicit tradeoff and cost of error, preserve residual dissent that the Judge must carry forward, and state concrete breakpoints or signals that would reopen the commitment. Raise a parent rollup only when a genuinely blocking authority or business definition is missing. Natural-language detail is allowed when needed for executability, but unchanged guardrails must be referenced rather than restated."
@@ -10142,10 +10198,8 @@ mod tests {
 
     #[test]
     fn native_peer_bet_is_an_incremental_commitment_contract() {
-        let prompt = native_bettor_checkpoint_prompt(
-            "peer_bet",
-            "The sealed peer checkpoint follows.",
-        );
+        let prompt =
+            native_bettor_checkpoint_prompt("peer_bet", "The sealed peer checkpoint follows.");
 
         assert!(prompt.contains("incremental final commitment"));
         assert!(prompt.contains("what changed or was retained"));
@@ -10158,6 +10212,41 @@ mod tests {
         assert!(prompt.contains("parent rollup"));
         assert!(prompt.contains("rather than restated"));
         assert!(!prompt.contains("return one final bet"));
+    }
+
+    #[test]
+    fn native_cross_read_preserves_each_bettors_differential_responsibility() {
+        let prompt = native_bettor_checkpoint_prompt(
+            "peer_review_and_objection",
+            "The sealed proposal checkpoint follows.",
+        );
+
+        assert!(prompt.contains("own differential responsibility"));
+        assert!(prompt.contains("what you learned and incorporated"));
+        assert!(prompt.contains("what changed in your position and why"));
+        assert!(prompt.contains("remains uniquely protected by your perspective"));
+        assert!(prompt.contains("residual objection"));
+        assert!(prompt.contains("falsify your current position"));
+        assert!(prompt.contains("Convergence supported by evidence is valid"));
+        assert!(prompt.contains("repetition without a differential contribution is not"));
+    }
+
+    #[test]
+    fn native_judge_attributes_each_parent_without_persistent_reputation() {
+        let prompt = native_judge_checkpoint_prompt(
+            "The sealed bet checkpoint follows.",
+            &["bettor-growth".to_string(), "bettor-risk".to_string()],
+        );
+
+        assert!(prompt.contains("Attribute every eligible bettor exactly once"));
+        assert!(prompt.contains("adopted, conditioned, rejected, or preserved_dissent"));
+        assert!(prompt.contains("Credit useful evidence even when its parent did not win"));
+        assert!(prompt.contains("do not reward persistence after refutation"));
+        assert!(
+            prompt.contains(
+                "do not turn this theoretical verdict into a persistent reputation score"
+            )
+        );
     }
     use codex_app_server_protocol::MemythosArenaKind;
     use codex_app_server_protocol::MemythosArenaMessage;
@@ -10228,6 +10317,11 @@ mod tests {
             serde_json::json!(["p1-growth", "p2-risk"])
         );
         assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            schema["properties"]["contribution_attribution"]["items"]["properties"]["participant_id"]
+                ["enum"],
+            serde_json::json!(["p1-growth", "p2-risk"])
+        );
         assert!(
             schema["required"]
                 .as_array()
@@ -11258,6 +11352,12 @@ mod tests {
                         serde_json::json!({
                             "winner_participant_id": "bettor-growth",
                             "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+                            "winning_decision": "Adopt bounded reversible growth.",
+                            "accepted_tradeoff": "Trade speed for lower reversal cost.",
+                            "contribution_attribution": [
+                                {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/wedge"], "disposition": "adopted", "rationale": "The wedge resolves the bounded objective."},
+                                {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/reversibility"], "disposition": "conditioned", "rationale": "Reversibility constrains acceleration."}
+                            ],
                             "dissent": "Retain the bounded risk posture.",
                             "reopening_signals": ["Unit economics materially deteriorate."],
                             "protected_decisions_status": "preserved",
@@ -13297,6 +13397,12 @@ mod tests {
                 text: Some(serde_json::json!({
                     "winner_participant_id": "bettor-growth",
                     "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+                    "winning_decision": "Adopt bounded reversible growth.",
+                    "accepted_tradeoff": "Trade speed for lower reversal cost.",
+                    "contribution_attribution": [
+                        {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/wedge"], "disposition": "adopted", "rationale": "The wedge resolves the bounded objective."},
+                        {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/reversibility"], "disposition": "conditioned", "rationale": "Reversibility constrains acceleration."}
+                    ],
                     "dissent": "Retain the bounded risk posture.",
                     "reopening_signals": ["Unit economics materially deteriorate."],
                     "protected_decisions_status": "preserved",
@@ -13417,6 +13523,12 @@ mod tests {
                     serde_json::json!({
                         "winner_participant_id": "bettor-growth",
                         "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+                        "winning_decision": "Retain the bounded winner after reassessment.",
+                        "accepted_tradeoff": "Reopen only affected hypothesis weight.",
+                        "contribution_attribution": [
+                            {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/wedge"], "disposition": "adopted", "rationale": "The affected evidence preserves this contribution."},
+                            {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/reversibility"], "disposition": "preserved_dissent", "rationale": "The risk boundary remains a reopening condition."}
+                        ],
                         "dissent": "Retain the bounded risk posture.",
                         "reopening_signals": ["A verified instrumentation break."],
                         "protected_decisions_status": "preserved",
@@ -13450,6 +13562,12 @@ mod tests {
             &serde_json::json!({
                 "winner_participant_id": "judge",
                 "ranked_alternatives": ["bettor-growth"],
+                "winning_decision": "Invalid winner.",
+                "accepted_tradeoff": "None.",
+                "contribution_attribution": [
+                    {"participant_id": "bettor-growth", "claim_refs": [], "disposition": "adopted", "rationale": "Valid participant."},
+                    {"participant_id": "bettor-risk", "claim_refs": [], "disposition": "rejected", "rationale": "Valid participant."}
+                ],
                 "dissent": "",
                 "reopening_signals": [],
                 "protected_decisions_status": "preserved",
@@ -13463,12 +13581,52 @@ mod tests {
     }
 
     #[test]
+    fn native_judge_verdict_rejects_missing_or_duplicate_parent_attribution() {
+        let eligible = HashSet::from(["bettor-growth", "bettor-risk"]);
+        let verdict = |attribution: serde_json::Value| {
+            serde_json::json!({
+                "winner_participant_id": "bettor-growth",
+                "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+                "winning_decision": "Adopt the bounded growth wedge.",
+                "accepted_tradeoff": "Retain reversibility.",
+                "contribution_attribution": attribution,
+                "dissent": "Risk remains a reopening condition.",
+                "reopening_signals": ["Unit economics deteriorate."],
+                "protected_decisions_status": "preserved",
+                "reopened_decision_refs": [],
+                "resume_scope_status": "not_applicable",
+                "rationale": "The evidence supports the bounded winner."
+            })
+            .to_string()
+        };
+        assert!(!is_valid_native_judge_verdict(
+            &verdict(serde_json::json!([
+                {"participant_id": "bettor-growth", "claim_refs": [], "disposition": "adopted", "rationale": "Winner."}
+            ])),
+            &eligible,
+        ));
+        assert!(!is_valid_native_judge_verdict(
+            &verdict(serde_json::json!([
+                {"participant_id": "bettor-growth", "claim_refs": [], "disposition": "adopted", "rationale": "Winner."},
+                {"participant_id": "bettor-growth", "claim_refs": [], "disposition": "conditioned", "rationale": "Duplicate."}
+            ])),
+            &eligible,
+        ));
+    }
+
+    #[test]
     fn native_judge_verdict_keeps_partial_resume_separate_from_closed_decisions() {
         let eligible = HashSet::from(["bettor-seasonal", "bettor-measurement"]);
         assert!(is_valid_native_judge_verdict(
             &serde_json::json!({
                 "winner_participant_id": "bettor-measurement",
                 "ranked_alternatives": ["bettor-measurement", "bettor-seasonal"],
+                "winning_decision": "Treat measurement contamination as the leading bounded explanation.",
+                "accepted_tradeoff": "Delay a structural commitment until observability is reconciled.",
+                "contribution_attribution": [
+                    {"participant_id": "bettor-measurement", "claim_refs": ["claim://measurement/break"], "disposition": "adopted", "rationale": "The instrumentation break best explains uncertainty."},
+                    {"participant_id": "bettor-seasonal", "claim_refs": ["claim://seasonal/timing"], "disposition": "preserved_dissent", "rationale": "Timing remains a bounded alternative."}
+                ],
                 "dissent": "Seasonality remains a bounded alternative.",
                 "reopening_signals": ["A verified instrumentation break."],
                 "protected_decisions_status": "preserved",
