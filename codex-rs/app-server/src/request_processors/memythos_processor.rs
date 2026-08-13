@@ -8176,7 +8176,7 @@ fn phase_from_message_kind(message_kind: &str) -> Option<String> {
             Some("final_judge".to_string())
         }
         "resume_reassessment" => Some("resume_reassessment".to_string()),
-        "notify_coordinator" => Some("learning".to_string()),
+        "notify_coordinator" | "judge_learning" => Some("learning".to_string()),
         _ => None,
     }
 }
@@ -8439,7 +8439,9 @@ fn native_turn_loopback_candidates(
         return Vec::new();
     };
 
-    if source.parent_role == "judge" && matches!(phase, "judge" | "resume_reassessment") {
+    if source.parent_role == "judge"
+        && matches!(phase, "judge" | "resume_reassessment" | "final_judge")
+    {
         let mut messages =
             native_turn_loopback_candidate(state, thread_id, turn_id, native_event_ref)
                 .into_iter()
@@ -8463,6 +8465,78 @@ fn native_turn_loopback_candidates(
         else {
             return messages;
         };
+        if verdict.next_action == "close" {
+            let Some(concierge) = room
+                .participants
+                .iter()
+                .find(|participant| participant.parent_role == "room_concierge")
+            else {
+                return messages;
+            };
+            let Some(composition) = state.arena_compositions.get(&incoming.arena_id) else {
+                return messages;
+            };
+            messages.extend(verdict.contribution_attribution.iter().filter_map(|attribution| {
+                let lease = composition
+                    .leases
+                    .iter()
+                    .find(|lease| lease.participant_id == attribution.participant_id)?;
+                let target = room
+                    .participants
+                    .iter()
+                    .find(|participant| participant.thread_id == lease.thread_id)?;
+                let duplicate = state.arena_message_deliveries.iter().any(|delivery| {
+                    delivery.arena_id == incoming.arena_id
+                        && delivery.round_id == incoming.round_id
+                        && delivery.receiver_thread_id == target.thread_id
+                        && delivery.phase.as_deref() == Some("learning")
+                });
+                if duplicate {
+                    return None;
+                }
+                let learning = format!(
+                    "The arena judge closed this round.\nWinning decision: {}\nAccepted tradeoff: {}\nYour contribution was {}.\nClaim refs: {}\nWhy: {}\nPreserved dissent for future reality checks: {}\nCarry this attribution into the next round as evidence, not as a score or an instruction to defend a rejected claim.",
+                    verdict.winning_decision,
+                    verdict.accepted_tradeoff,
+                    attribution.disposition,
+                    if attribution.claim_refs.is_empty() {
+                        "none".to_string()
+                    } else {
+                        attribution.claim_refs.join(", ")
+                    },
+                    attribution.rationale,
+                    if verdict.preserved_dissent.is_empty() {
+                        "none".to_string()
+                    } else {
+                        verdict.preserved_dissent.join("; ")
+                    }
+                );
+                Some(MemythosArenaMessage {
+                    message_id: format!(
+                        "judge-learning-{turn_id}-{}",
+                        attribution.participant_id
+                    ),
+                    case_id: room.case_id.clone(),
+                    arena_id: incoming.arena_id.clone(),
+                    round_id: incoming.round_id.clone(),
+                    from_parent_thread_id: concierge.thread_id.clone(),
+                    from_parent_role: concierge.parent_role.clone(),
+                    to_parent_thread_id: target.thread_id.clone(),
+                    to_parent_role: target.parent_role.clone(),
+                    message_kind: "judge_learning".to_string(),
+                    human_summary: learning,
+                    execution_prompt: None,
+                    context_packet_ref: native_event_ref.to_string(),
+                    artifact_refs: vec![native_event_ref.to_string()],
+                    requires_response: false,
+                    delivery_policy: Some(MemythosArenaDeliveryPolicy::QueueOnly),
+                    aggregate_contract: None,
+                    response_contract: None,
+                    output_schema: None,
+                })
+            }));
+            return messages;
+        }
         if verdict.next_action != "targeted_refinement" {
             return messages;
         }
@@ -8895,7 +8969,7 @@ fn validate_room_message_kind(
         && phase_from_message_kind(message_kind).is_none()
     {
         return Err(invalid_params(format!(
-            "competitive arena room acts require an explicit semantic phase messageKind; {message_kind} is ambiguous. Use peer_proposal, peer_review_and_objection, peer_bet, targeted_refinement, refinement_delta, resume_reassessment, verdict_request, judge_verdict, final_verdict_request, final_judge_verdict, or notify_coordinator"
+            "competitive arena room acts require an explicit semantic phase messageKind; {message_kind} is ambiguous. Use peer_proposal, peer_review_and_objection, peer_bet, targeted_refinement, refinement_delta, resume_reassessment, verdict_request, judge_verdict, final_verdict_request, final_judge_verdict, judge_learning, or notify_coordinator"
         )));
     }
     Ok(())
@@ -8931,6 +9005,7 @@ fn validate_room_message_route(
                 || (source_role == "bettor" && target_role == "judge")
         }
         "judge_verdict" => source_role == "judge" && target_role == "room_concierge",
+        "judge_learning" => source_role == "room_concierge" && target_role == "bettor",
         "notify_coordinator" => {
             (source_role == "room_concierge"
                 && matches!(target_role, "process_steward" | "coordinator"))
@@ -8946,7 +9021,7 @@ fn validate_room_message_route(
         Ok(())
     } else {
         Err(invalid_params(format!(
-            "competitive arena message route is invalid: {source_role} --{message_kind}--> {target_role}. Peer and targeted-refinement phases flow only between room_concierge and bettor; verdict requests flow room_concierge to judge; judge verdicts flow judge to room_concierge; notify_coordinator flows between room_concierge and coordinator"
+            "competitive arena message route is invalid: {source_role} --{message_kind}--> {target_role}. Peer, targeted-refinement, and judge-learning phases flow only between room_concierge and bettor; verdict requests flow room_concierge to judge; judge verdicts flow judge to room_concierge; notify_coordinator flows between room_concierge and coordinator"
         )))
     }
 }
@@ -12244,6 +12319,149 @@ mod tests {
         );
         assert!(loopback.response_contract.is_none());
         assert!(loopback.execution_prompt.is_none());
+    }
+
+    #[tokio::test]
+    async fn closing_judge_verdict_queues_individual_learning_on_each_bettor_parent() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let response = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(response) = response else {
+            panic!("expected arena composition provision response");
+        };
+        let thread_for = |participant_id: &str| {
+            response
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == participant_id)
+                .expect("participant lease should exist")
+                .thread_id
+                .clone()
+        };
+        let concierge_thread_id = thread_for("concierge");
+        let growth_thread_id = thread_for("bettor-growth");
+        let risk_thread_id = thread_for("bettor-risk");
+        let judge_thread_id = thread_for("judge");
+        let judge_turn_id = "judge-close-turn";
+        let verdict = serde_json::json!({
+            "winner_participant_id": "bettor-growth",
+            "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+            "winning_decision": "Adopt the bounded growth wedge.",
+            "accepted_tradeoff": "Keep the risk objection as an explicit reality check.",
+            "next_action": "close",
+            "contribution_attribution": [
+                {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/wedge"], "disposition": "adopted", "rationale": "It best resolves the bounded objective."},
+                {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/acceptance"], "disposition": "preserved_dissent", "rationale": "Its acceptance condition remains useful."}
+            ],
+            "dissent": "Acceptance remains a reality-check condition.",
+            "preserved_dissent": ["Reopen if acceptance evidence fails."],
+            "targeted_refinements": [],
+            "reopening_signals": ["Acceptance evidence fails."],
+            "protected_decisions_status": "preserved",
+            "reopened_decision_refs": [],
+            "resume_scope_status": "not_applicable",
+            "rationale": "The sealed bets are sufficient to close."
+        })
+        .to_string();
+        let mut state = processor.state.lock().await;
+        state
+            .arena_message_deliveries
+            .push(MemythosArenaMessageDelivery {
+                delivery_id: "judge-close-wake".to_string(),
+                message_id: "sealed-bets-close".to_string(),
+                human_summary: "All bets sealed.".to_string(),
+                status: "receiver_turn_completed".to_string(),
+                sender_thread_id: risk_thread_id.clone(),
+                receiver_thread_id: judge_thread_id.clone(),
+                arena_id: response.room.arena_id.clone(),
+                round_id: "round-1".to_string(),
+                phase: Some("judge".to_string()),
+                delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                aggregate_id: Some("judge-bets-round-1".to_string()),
+                aggregate_state: Some(MemythosArenaAggregateState::Consumed),
+                checkpoint_state: Some(MemythosArenaCheckpointState::NextPhaseDispatched),
+                checkpoint_event_refs: Vec::new(),
+                receiver_turn_id: Some(judge_turn_id.to_string()),
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: Vec::new(),
+                rejection_reason: None,
+                failure_reason: None,
+            });
+        state.native_parent_turn_responses.insert(
+            native_token_usage_key(&judge_thread_id, judge_turn_id),
+            ParentTurnResponse {
+                status: Some(TurnStatus::Completed),
+                request_item_ref: None,
+                request_text: None,
+                item_ref: Some("app-server://judge/close-verdict".to_string()),
+                text: Some(verdict),
+            },
+        );
+
+        let messages = native_turn_loopback_candidates(
+            &state,
+            &judge_thread_id,
+            judge_turn_id,
+            "app-server://judge/close-completed",
+        );
+        assert_eq!(messages.len(), 3);
+        assert!(messages.iter().any(|message| {
+            message.message_kind == "judge_verdict"
+                && message.to_parent_thread_id == concierge_thread_id
+        }));
+        let learning = messages
+            .iter()
+            .filter(|message| message.message_kind == "judge_learning")
+            .collect::<Vec<_>>();
+        assert_eq!(learning.len(), 2);
+        assert_eq!(
+            learning
+                .iter()
+                .map(|message| message.to_parent_thread_id.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from([growth_thread_id.as_str(), risk_thread_id.as_str()])
+        );
+        assert!(learning.iter().all(|message| {
+            message.from_parent_thread_id == concierge_thread_id
+                && !message.requires_response
+                && message.execution_prompt.is_none()
+                && message.delivery_policy == Some(MemythosArenaDeliveryPolicy::QueueOnly)
+                && validate_room_message_route(
+                    Some(&MemythosArenaDecisionMethod::BettingRound),
+                    &message.message_kind,
+                    &message.from_parent_role,
+                    &message.to_parent_role,
+                )
+                .is_ok()
+        }));
+        let growth_learning = learning
+            .iter()
+            .find(|message| message.to_parent_thread_id == growth_thread_id)
+            .expect("growth learning should exist");
+        assert!(
+            growth_learning
+                .human_summary
+                .contains("claim://growth/wedge")
+        );
+        assert!(
+            !growth_learning
+                .human_summary
+                .contains("claim://risk/acceptance")
+        );
     }
 
     #[tokio::test]
