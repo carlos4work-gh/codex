@@ -223,6 +223,13 @@ struct ArenaClosureCandidate {
     arena_id: String,
     layer_id: String,
     parent_thread_ids: Vec<String>,
+    outcome: ArenaTerminalOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArenaTerminalOutcome {
+    Close,
+    ParentRollup,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -452,6 +459,10 @@ fn native_judge_verdict_output_schema(
             },
             "winning_decision": { "type": "string" },
             "accepted_tradeoff": { "type": "string" },
+            "next_action": {
+                "type": "string",
+                "enum": ["close", "targeted_refinement", "parent_rollup"]
+            },
             "contribution_attribution": {
                 "type": "array",
                 "items": {
@@ -476,6 +487,27 @@ fn native_judge_verdict_output_schema(
                 }
             },
             "dissent": { "type": "string" },
+            "preserved_dissent": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "targeted_refinements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "participant_id": {
+                            "type": "string",
+                            "enum": eligible_winner_ids
+                        },
+                        "tension": { "type": "string" },
+                        "request": { "type": "string" },
+                        "sufficiency_criterion": { "type": "string" }
+                    },
+                    "required": ["participant_id", "tension", "request", "sufficiency_criterion"],
+                    "additionalProperties": false
+                }
+            },
             "reopening_signals": {
                 "type": "array",
                 "items": { "type": "string" }
@@ -499,13 +531,57 @@ fn native_judge_verdict_output_schema(
             "ranked_alternatives",
             "winning_decision",
             "accepted_tradeoff",
+            "next_action",
             "contribution_attribution",
             "dissent",
+            "preserved_dissent",
+            "targeted_refinements",
             "reopening_signals",
             "protected_decisions_status",
             "reopened_decision_refs",
             "resume_scope_status",
             "rationale"
+        ],
+        "additionalProperties": false
+    });
+    validate_responses_output_schema(&schema)?;
+    Ok(schema)
+}
+
+fn native_refinement_delta_output_schema(
+    participant_id: &str,
+) -> Result<serde_json::Value, JSONRPCErrorError> {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "participant_id": { "type": "string", "enum": [participant_id] },
+            "incorporated_attribution_refs": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "refinement_delta": { "type": "string" },
+            "evidence_refs": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "remaining_tension": { "type": "string" },
+            "sufficiency_criterion": { "type": "string" },
+            "sufficiency_met": { "type": "boolean" },
+            "sufficiency_rationale": { "type": "string" },
+            "parent_rollup_required": { "type": "boolean" },
+            "parent_rollup_question": { "type": "string" }
+        },
+        "required": [
+            "participant_id",
+            "incorporated_attribution_refs",
+            "refinement_delta",
+            "evidence_refs",
+            "remaining_tension",
+            "sufficiency_criterion",
+            "sufficiency_met",
+            "sufficiency_rationale",
+            "parent_rollup_required",
+            "parent_rollup_question"
         ],
         "additionalProperties": false
     });
@@ -520,8 +596,11 @@ struct NativeJudgeVerdict {
     ranked_alternatives: Vec<String>,
     winning_decision: String,
     accepted_tradeoff: String,
+    next_action: String,
     contribution_attribution: Vec<NativeJudgeContributionAttribution>,
     dissent: String,
+    preserved_dissent: Vec<String>,
+    targeted_refinements: Vec<NativeJudgeTargetedRefinement>,
     reopening_signals: Vec<String>,
     protected_decisions_status: String,
     reopened_decision_refs: Vec<String>,
@@ -538,6 +617,15 @@ struct NativeJudgeContributionAttribution {
     rationale: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeJudgeTargetedRefinement {
+    participant_id: String,
+    tension: String,
+    request: String,
+    sufficiency_criterion: String,
+}
+
 fn is_valid_native_judge_verdict(text: &str, eligible_winner_ids: &HashSet<&str>) -> bool {
     let Ok(verdict) = serde_json::from_str::<NativeJudgeVerdict>(text) else {
         return false;
@@ -546,6 +634,7 @@ fn is_valid_native_judge_verdict(text: &str, eligible_winner_ids: &HashSet<&str>
         &verdict.winning_decision,
         &verdict.accepted_tradeoff,
         &verdict.dissent,
+        &verdict.preserved_dissent,
         &verdict.reopening_signals,
         &verdict.rationale,
         &verdict.reopened_decision_refs,
@@ -554,6 +643,11 @@ fn is_valid_native_judge_verdict(text: &str, eligible_winner_ids: &HashSet<&str>
         .contribution_attribution
         .iter()
         .map(|attribution| attribution.participant_id.as_str())
+        .collect::<HashSet<_>>();
+    let refinement_participants = verdict
+        .targeted_refinements
+        .iter()
+        .map(|refinement| refinement.participant_id.as_str())
         .collect::<HashSet<_>>();
     eligible_winner_ids.contains(verdict.winner_participant_id.as_str())
         && verdict
@@ -569,6 +663,18 @@ fn is_valid_native_judge_verdict(text: &str, eligible_winner_ids: &HashSet<&str>
                 "adopted" | "conditioned" | "rejected" | "preserved_dissent"
             )
         })
+        && verdict.targeted_refinements.iter().all(|refinement| {
+            eligible_winner_ids.contains(refinement.participant_id.as_str())
+                && !refinement.tension.trim().is_empty()
+                && !refinement.request.trim().is_empty()
+                && !refinement.sufficiency_criterion.trim().is_empty()
+        })
+        && refinement_participants.len() == verdict.targeted_refinements.len()
+        && match verdict.next_action.as_str() {
+            "targeted_refinement" => !verdict.targeted_refinements.is_empty(),
+            "close" | "parent_rollup" => verdict.targeted_refinements.is_empty(),
+            _ => false,
+        }
         && matches!(
             verdict.protected_decisions_status.as_str(),
             "preserved" | "reopened"
@@ -577,6 +683,11 @@ fn is_valid_native_judge_verdict(text: &str, eligible_winner_ids: &HashSet<&str>
             verdict.resume_scope_status.as_str(),
             "not_applicable" | "retained" | "partially_reopened" | "fully_reopened"
         )
+}
+
+fn native_judge_next_action(text: &str, eligible_winner_ids: &HashSet<&str>) -> Option<String> {
+    let verdict = serde_json::from_str::<NativeJudgeVerdict>(text).ok()?;
+    is_valid_native_judge_verdict(text, eligible_winner_ids).then_some(verdict.next_action)
 }
 
 fn normalize_arena_composition_output_schema(schema: &mut serde_json::Value) {
@@ -2359,6 +2470,70 @@ fn canonical_native_concierge_phase_contract(
     })
 }
 
+fn canonical_native_concierge_refinement_contract(
+    state: &MemythosRuntimeState,
+    room: &MemythosRoom,
+    round_id: &str,
+    concierge: &MemythosRoomParticipant,
+) -> Result<MemythosArenaAggregateContract, JSONRPCErrorError> {
+    let judge_verdict = state
+        .arena_message_deliveries
+        .iter()
+        .rev()
+        .find(|delivery| {
+            delivery.arena_id == room.arena_id
+                && delivery.round_id == round_id
+                && delivery.phase.as_deref() == Some("judge")
+                && delivery.sender_thread_id
+                    == room
+                        .participants
+                        .iter()
+                        .find(|participant| participant.parent_role == "judge")
+                        .map(|participant| participant.thread_id.as_str())
+                        .unwrap_or_default()
+        })
+        .map(|delivery| delivery.human_summary.as_str())
+        .and_then(|text| serde_json::from_str::<NativeJudgeVerdict>(text).ok())
+        .ok_or_else(|| {
+            invalid_params("targeted refinement requires a valid native judge verdict")
+        })?;
+    let composition = state
+        .arena_compositions
+        .get(&room.arena_id)
+        .ok_or_else(|| invalid_params("targeted refinement requires a native composition"))?;
+    let targeted_ids = judge_verdict
+        .targeted_refinements
+        .iter()
+        .map(|refinement| refinement.participant_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut expected_source_thread_ids = composition
+        .leases
+        .iter()
+        .filter(|lease| targeted_ids.contains(lease.participant_id.as_str()))
+        .map(|lease| lease.thread_id.clone())
+        .collect::<Vec<_>>();
+    expected_source_thread_ids.sort();
+    expected_source_thread_ids.dedup();
+    if expected_source_thread_ids.len() != targeted_ids.len() || targeted_ids.is_empty() {
+        return Err(invalid_params(
+            "targeted refinement verdict does not resolve to the expected live bettor parents",
+        ));
+    }
+    Ok(MemythosArenaAggregateContract {
+        aggregate_id: format!("{}::{round_id}::concierge_refinements", room.room_id),
+        recipient_thread_id: concierge.thread_id.clone(),
+        quorum: expected_source_thread_ids.len() as u32,
+        expected_source_thread_ids,
+        phase_id: "targeted_refinement".to_string(),
+        deadline_ref: None,
+        completion_criteria_ref: format!(
+            "app-server://rooms/{}/rounds/{round_id}/checkpoints/all-targeted-refinements",
+            room.room_id
+        ),
+        late_arrival_policy: MemythosArenaLateArrivalPolicy::Reject,
+    })
+}
+
 fn canonical_native_bettor_phase_contract(
     room: &MemythosRoom,
     round_id: &str,
@@ -2409,6 +2584,9 @@ fn native_concierge_checkpoint_prompt(message_kind: &str, message: &str) -> Stri
         "peer_review_and_objection" => {
             "All expected cross-reads and objections are now sealed in your native mailbox. Read the complete mailbox checkpoint, then dispatch exactly one peer_bet assignment to every bettor and end this turn. Each bettor must send its revised commitment directly to the Judge. Do not wait synchronously for their responses."
         }
+        "refinement_delta" => {
+            "All Judge-targeted refinement deltas are now sealed in your native mailbox. Synthesize one compact refinement packet that preserves participant attribution, evidence refs, sufficiency status, remaining tensions, and any parent-rollup request. Do not reinterpret the Judge's mandate, reopen proposal/cross-read/bet, or contact another parent. Your completed response is delivered automatically to the same Judge for one final verdict."
+        }
         _ => "Read the complete sealed mailbox checkpoint and continue the native arena method.",
     };
     format!("{message}\n\nNative phase checkpoint: {next_action}")
@@ -2416,7 +2594,7 @@ fn native_concierge_checkpoint_prompt(message_kind: &str, message: &str) -> Stri
 
 fn native_judge_checkpoint_prompt(message: &str, eligible_winner_ids: &[String]) -> String {
     format!(
-        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Return only the JSON object required by the native output schema. Select exactly one eligible winner, rank the alternatives, state the winning decision and accepted tradeoff, preserve dissent, and state reopening signals. Attribute every eligible bettor exactly once: identify claim refs where available, classify the contribution as adopted, conditioned, rejected, or preserved_dissent, and explain why. Credit useful evidence even when its parent did not win; do not reward persistence after refutation and do not turn this theoretical verdict into a persistent reputation score. The winner identifies the contribution that best resolves this bounded arena objective; winning a round does not by itself make that participant's hypothesis the global lead diagnosis, override protected decisions, or grant authority beyond the active objective. Keep that distinction explicit whenever the evidence still requires a mixed, provisional, or unsettled posture. `protected_decisions_status` measures only whether protected guardrails, authority boundaries, or explicit invariants remain valid; changing an affected winner, hypothesis weight, or bounded decision does not reopen protected decisions. Report every bounded decision changed by this resume in `reopened_decision_refs`, using native refs when available and stable semantic refs otherwise; use an empty array when none changed. `resume_scope_status` separately describes the work scope: use `not_applicable` for an initial round, `retained` when a resume changes no hypothesis or decision scope, `partially_reopened` when new evidence reopens only affected hypotheses, weights, or bounded scope while protected decisions remain valid, and `fully_reopened` only when the whole decision scope must be reconsidered. A partial resume therefore normally reports `protected_decisions_status=preserved`, one or more `reopened_decision_refs`, and `resume_scope_status=partially_reopened`. On a resumed composition, explain only changed evidence, changed bounded decisions, and remaining dissent; reference unchanged contract constraints without reproducing them. Identify the evidence and affected authority in the rationale. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
+        "{message}\n\nNative verdict boundary: all expected bets are now sealed in your native mailbox. The eligible winner participant ids are [{}]. Return only the JSON object required by the native output schema. Select exactly one eligible winner, rank the alternatives, state the winning decision and accepted tradeoff, preserve dissent, and state reopening signals. Attribute every eligible bettor exactly once: identify claim refs where available, classify the contribution as adopted, conditioned, rejected, or preserved_dissent, and explain why. Credit useful evidence even when its parent did not win; do not reward persistence after refutation and do not turn this theoretical verdict into a persistent reputation score. Set `next_action=close` when the decision is sufficient, `parent_rollup` when missing authority or business definition prevents closure, or `targeted_refinement` only when a named bettor can resolve one localized tension without repeating proposal, cross-read, and bet. For targeted refinement, emit one unique mandate per selected participant with the exact tension, request, and observable sufficiency criterion; otherwise return an empty targeted_refinements array. The winner identifies the contribution that best resolves this bounded arena objective; winning a round does not by itself make that participant's hypothesis the global lead diagnosis, override protected decisions, or grant authority beyond the active objective. Keep that distinction explicit whenever the evidence still requires a mixed, provisional, or unsettled posture. `protected_decisions_status` measures only whether protected guardrails, authority boundaries, or explicit invariants remain valid; changing an affected winner, hypothesis weight, or bounded decision does not reopen protected decisions. Report every bounded decision changed by this resume in `reopened_decision_refs`, using native refs when available and stable semantic refs otherwise; use an empty array when none changed. `resume_scope_status` separately describes the work scope: use `not_applicable` for an initial round, `retained` when a resume changes no hypothesis or decision scope, `partially_reopened` when new evidence reopens only affected hypotheses, weights, or bounded scope while protected decisions remain valid, and `fully_reopened` only when the whole decision scope must be reconsidered. A partial resume therefore normally reports `protected_decisions_status=preserved`, one or more `reopened_decision_refs`, and `resume_scope_status=partially_reopened`. On a resumed composition, explain only changed evidence, changed bounded decisions, and remaining dissent; reference unchanged contract constraints without reproducing them. Identify the evidence and affected authority in the rationale. Your completed parent response is returned automatically to the Room Concierge as messageKind `judge_verdict`; do not send a second verdict and do not wait for a separate verdict request.",
         eligible_winner_ids.join(", ")
     )
 }
@@ -2429,6 +2607,9 @@ fn native_bettor_checkpoint_prompt(message_kind: &str, message: &str) -> String 
         "peer_bet" => {
             "All expected peer reviews and objections are now sealed in your native mailbox. Read the complete checkpoint and use your native thread memory to return an incremental final commitment, not a repetition of your proposal or cross-read. State the final decision you support and the exact participant proposal it comes from; then make the delta explicit: what changed or was retained from your initial position, which peer evidence you incorporated, which material evidence you rejected and why, and how that evidence supports your argued confidence. Accept an explicit tradeoff and cost of error, preserve residual dissent that the Judge must carry forward, and state concrete breakpoints or signals that would reopen the commitment. Raise a parent rollup only when a genuinely blocking authority or business definition is missing. Natural-language detail is allowed when needed for executability, but unchanged guardrails must be referenced rather than restated."
         }
+        "targeted_refinement" => {
+            "Use your native thread memory and answer only the Judge's targeted mandate. Return a refinement delta: what changed, which evidence supports it, whether the stated sufficiency criterion is now met, and any remaining material tension. Do not restart proposal, cross-read, or bet. Request parent rollup only if the mandate exposes missing authority or a business definition that your role cannot supply."
+        }
         _ => "Read the complete sealed mailbox checkpoint and complete your assigned arena phase.",
     };
     format!("{message}\n\nNative peer checkpoint: {next_action}")
@@ -2438,6 +2619,54 @@ fn apply_native_checkpoint_execution_contract(
     state: &MemythosRuntimeState,
     message: &mut MemythosArenaMessage,
 ) -> Result<(), JSONRPCErrorError> {
+    if message.requires_response && message.message_kind == "targeted_refinement" {
+        let participant_id = state
+            .arena_compositions
+            .get(&message.arena_id)
+            .and_then(|composition| {
+                composition
+                    .leases
+                    .iter()
+                    .find(|lease| lease.thread_id == message.to_parent_thread_id)
+            })
+            .map(|lease| lease.participant_id.as_str())
+            .ok_or_else(|| invalid_params("targeted refinement requires a leased bettor parent"))?;
+        message.execution_prompt = Some(native_bettor_checkpoint_prompt(
+            &message.message_kind,
+            &message.human_summary,
+        ));
+        message.response_contract = Some("refinement_delta".to_string());
+        message.output_schema = Some(native_refinement_delta_output_schema(participant_id)?);
+        append_native_arena_parent_task_contract(state, message);
+        return Ok(());
+    }
+    if message.requires_response && message.message_kind == "final_verdict_request" {
+        let eligible_winner_ids = state
+            .arena_compositions
+            .get(&message.arena_id)
+            .map(|composition| {
+                composition
+                    .contract
+                    .participants
+                    .iter()
+                    .filter(|participant| participant.agent_role == "bettor")
+                    .map(|participant| participant.participant_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        message.execution_prompt = Some(format!(
+            "{}\n\nFinal refinement boundary: issue the definitive verdict from the original sealed bets and the targeted refinement packet. `next_action` must be `close` or `parent_rollup`; targeted_refinements must be empty. Do not start another refinement round.",
+            native_judge_checkpoint_prompt(&message.human_summary, &eligible_winner_ids)
+        ));
+        message.response_contract = Some("final_judge_verdict".to_string());
+        let mut schema = native_judge_verdict_output_schema(&eligible_winner_ids)?;
+        if let Some(next_action) = schema.pointer_mut("/properties/next_action/enum") {
+            *next_action = serde_json::json!(["close", "parent_rollup"]);
+        }
+        message.output_schema = Some(schema);
+        append_native_arena_parent_task_contract(state, message);
+        return Ok(());
+    }
     if !message.requires_response
         || !matches!(
             message.delivery_policy,
@@ -6623,6 +6852,10 @@ impl MemythosRequestProcessor {
         let clean_close = arena_lifecycle_state == Some(MemythosArenaLifecycleState::ClosedCleanly)
             && active_turns == 0
             && failed_turns == 0;
+        let awaiting_parent = arena_lifecycle_state
+            == Some(MemythosArenaLifecycleState::AwaitingParent)
+            && active_turns == 0
+            && failed_turns == 0;
         let participants = room
             .participants
             .iter()
@@ -6792,6 +7025,8 @@ impl MemythosRequestProcessor {
             lifecycle: MemythosRoomActivityLifecycle {
                 room_state: if clean_close {
                     "round_closed".to_string()
+                } else if awaiting_parent {
+                    "awaiting_parent".to_string()
                 } else {
                     "running".to_string()
                 },
@@ -7332,7 +7567,7 @@ impl MemythosRequestProcessor {
                 arena_closure_candidate(&state, &arena_id, thread_id)
             };
             if let Some(candidate) = closure_candidate {
-                self.close_arena_parent_goals(candidate).await;
+                self.terminalize_arena_parent_goals(candidate).await;
             }
         }
 
@@ -7382,7 +7617,7 @@ impl MemythosRequestProcessor {
         true
     }
 
-    async fn close_arena_parent_goals(&self, candidate: ArenaClosureCandidate) {
+    async fn terminalize_arena_parent_goals(&self, candidate: ArenaClosureCandidate) {
         let mut original_goals = Vec::with_capacity(candidate.parent_thread_ids.len());
         for parent_thread_id in &candidate.parent_thread_ids {
             let goal = match self
@@ -7395,7 +7630,7 @@ impl MemythosRequestProcessor {
                     warn!(
                         arena_id = candidate.arena_id,
                         parent_thread_id,
-                        "cannot close native arena because a parent goal is missing"
+                        "cannot terminalize native arena because a parent goal is missing"
                     );
                     return;
                 }
@@ -7404,7 +7639,7 @@ impl MemythosRequestProcessor {
                         arena_id = candidate.arena_id,
                         parent_thread_id,
                         error = %error.message,
-                        "cannot close native arena because a parent goal could not be read"
+                        "cannot terminalize native arena because a parent goal could not be read"
                     );
                     return;
                 }
@@ -7429,7 +7664,7 @@ impl MemythosRequestProcessor {
                         arena_id = candidate.arena_id,
                         parent_thread_id = goal.thread_id,
                         error = %error.message,
-                        "cannot close native arena because a parent goal transition failed"
+                        "cannot terminalize native arena because a parent goal transition failed"
                     );
                     for transitioned_goal in transitioned.iter().rev() {
                         if let Err(rollback_error) = self
@@ -7446,7 +7681,7 @@ impl MemythosRequestProcessor {
                                 arena_id = candidate.arena_id,
                                 parent_thread_id = transitioned_goal.thread_id,
                                 error = %rollback_error.message,
-                                "failed to roll back parent goal after native arena close failure"
+                                "failed to roll back parent goal after native arena terminalization failure"
                             );
                         }
                     }
@@ -7457,11 +7692,31 @@ impl MemythosRequestProcessor {
         }
 
         let mut state = self.state.lock().await;
+        let (arena_state, composition_state, state_ref, summary) = match candidate.outcome {
+            ArenaTerminalOutcome::Close => (
+                MemythosArenaLifecycleState::ClosedCleanly,
+                MemythosArenaCompositionLifecycleState::Closed,
+                "closed-cleanly",
+                format!(
+                    "Arena {} closed cleanly after every native parent goal reached complete.",
+                    candidate.arena_id
+                ),
+            ),
+            ArenaTerminalOutcome::ParentRollup => (
+                MemythosArenaLifecycleState::AwaitingParent,
+                MemythosArenaCompositionLifecycleState::BlockedAuthority,
+                "awaiting-parent",
+                format!(
+                    "Arena {} completed its local round and awaits an authority contract from its parent layer.",
+                    candidate.arena_id
+                ),
+            ),
+        };
         if let Some(arena) = state.arenas.get_mut(&candidate.arena_id) {
-            arena.lifecycle_state = MemythosArenaLifecycleState::ClosedCleanly;
+            arena.lifecycle_state = arena_state;
         }
         if let Some(composition) = state.arena_compositions.get_mut(&candidate.arena_id) {
-            composition.lifecycle_state = MemythosArenaCompositionLifecycleState::Closed;
+            composition.lifecycle_state = composition_state;
         }
         self.push_telemetry_ref(
             &mut state,
@@ -7471,15 +7726,12 @@ impl MemythosRequestProcessor {
             Some(candidate.arena_id.clone()),
             None,
             Some(format!(
-                "app-server://memythos/arenas/{}/closed-cleanly",
-                candidate.arena_id
+                "app-server://memythos/arenas/{}/{state_ref}",
+                candidate.arena_id,
             )),
             None,
             MemythosEventChannel::StateTransition,
-            format!(
-                "Arena {} closed cleanly after every native parent goal reached complete.",
-                candidate.arena_id
-            ),
+            summary,
         );
     }
 
@@ -7919,6 +8171,10 @@ fn phase_from_message_kind(message_kind: &str) -> Option<String> {
         | "peer_review_and_objection" => Some("peer_review_and_objection".to_string()),
         "dispatch_bets" | "peer_bet" => Some("bet".to_string()),
         "request_judge" | "verdict_request" | "judge_verdict" => Some("judge".to_string()),
+        "targeted_refinement" | "refinement_delta" => Some("targeted_refinement".to_string()),
+        "request_final_judge" | "final_verdict_request" | "final_judge_verdict" => {
+            Some("final_judge".to_string())
+        }
         "resume_reassessment" => Some("resume_reassessment".to_string()),
         "notify_coordinator" => Some("learning".to_string()),
         _ => None,
@@ -8034,6 +8290,39 @@ fn native_turn_loopback_candidate(
                     true,
                 )
             }
+            ("bettor", "targeted_refinement") => {
+                let target = room
+                    .participants
+                    .iter()
+                    .find(|participant| participant.parent_role == "room_concierge")?;
+                let contract = canonical_native_concierge_refinement_contract(
+                    state,
+                    room,
+                    &incoming.round_id,
+                    target,
+                )
+                .ok()?;
+                (
+                    target,
+                    "refinement_delta",
+                    Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                    Some(contract),
+                    true,
+                )
+            }
+            ("room_concierge", "targeted_refinement") => {
+                let target = room
+                    .participants
+                    .iter()
+                    .find(|participant| participant.parent_role == "judge")?;
+                (
+                    target,
+                    "final_verdict_request",
+                    Some(MemythosArenaDeliveryPolicy::Immediate),
+                    None,
+                    true,
+                )
+            }
             ("judge", "judge") | ("judge", "resume_reassessment") => {
                 let target = room
                     .participants
@@ -8042,6 +8331,19 @@ fn native_turn_loopback_candidate(
                 (
                     target,
                     "judge_verdict",
+                    Some(MemythosArenaDeliveryPolicy::QueueOnly),
+                    None,
+                    false,
+                )
+            }
+            ("judge", "final_judge") => {
+                let target = room
+                    .participants
+                    .iter()
+                    .find(|participant| participant.parent_role == "room_concierge")?;
+                (
+                    target,
+                    "final_judge_verdict",
                     Some(MemythosArenaDeliveryPolicy::QueueOnly),
                     None,
                     false,
@@ -8136,6 +8438,95 @@ fn native_turn_loopback_candidates(
     else {
         return Vec::new();
     };
+
+    if source.parent_role == "judge" && matches!(phase, "judge" | "resume_reassessment") {
+        let mut messages =
+            native_turn_loopback_candidate(state, thread_id, turn_id, native_event_ref)
+                .into_iter()
+                .collect::<Vec<_>>();
+        let eligible_ids = state
+            .arena_compositions
+            .get(&incoming.arena_id)
+            .map(|composition| {
+                composition
+                    .contract
+                    .participants
+                    .iter()
+                    .filter(|participant| participant.agent_role == "bettor")
+                    .map(|participant| participant.participant_id.as_str())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let Some(verdict) = serde_json::from_str::<NativeJudgeVerdict>(response_text)
+            .ok()
+            .filter(|_| is_valid_native_judge_verdict(response_text, &eligible_ids))
+        else {
+            return messages;
+        };
+        if verdict.next_action != "targeted_refinement" {
+            return messages;
+        }
+        let Some(concierge) = room
+            .participants
+            .iter()
+            .find(|participant| participant.parent_role == "room_concierge")
+        else {
+            return messages;
+        };
+        let Some(composition) = state.arena_compositions.get(&incoming.arena_id) else {
+            return messages;
+        };
+        messages.extend(verdict.targeted_refinements.iter().filter_map(|mandate| {
+            let lease = composition
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == mandate.participant_id)?;
+            let target = room
+                .participants
+                .iter()
+                .find(|participant| participant.thread_id == lease.thread_id)?;
+            let duplicate = state.arena_message_deliveries.iter().any(|delivery| {
+                delivery.arena_id == incoming.arena_id
+                    && delivery.round_id == incoming.round_id
+                    && delivery.receiver_thread_id == target.thread_id
+                    && delivery.phase.as_deref() == Some("targeted_refinement")
+            });
+            if duplicate {
+                return None;
+            }
+            let assignment = format!(
+                "Judge-targeted refinement for participant {}.\nTension: {}\nRequest: {}\nObservable sufficiency criterion: {}",
+                mandate.participant_id,
+                mandate.tension,
+                mandate.request,
+                mandate.sufficiency_criterion
+            );
+            Some(MemythosArenaMessage {
+                message_id: format!(
+                    "targeted-refinement-{turn_id}-{}",
+                    mandate.participant_id
+                ),
+                case_id: room.case_id.clone(),
+                arena_id: incoming.arena_id.clone(),
+                round_id: incoming.round_id.clone(),
+                from_parent_thread_id: concierge.thread_id.clone(),
+                from_parent_role: concierge.parent_role.clone(),
+                to_parent_thread_id: target.thread_id.clone(),
+                to_parent_role: target.parent_role.clone(),
+                message_kind: "targeted_refinement".to_string(),
+                human_summary: assignment.clone(),
+                execution_prompt: Some(assignment),
+                context_packet_ref: native_event_ref.to_string(),
+                artifact_refs: Vec::new(),
+                requires_response: true,
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
+                response_contract: Some("refinement_delta".to_string()),
+                output_schema: None,
+            })
+        }));
+        return messages;
+    }
 
     let (message_kind, source_phase) = match (source.parent_role.as_str(), phase) {
         ("bettor", "proposal") => ("peer_review_and_objection", "proposal"),
@@ -8504,7 +8895,7 @@ fn validate_room_message_kind(
         && phase_from_message_kind(message_kind).is_none()
     {
         return Err(invalid_params(format!(
-            "competitive arena room acts require an explicit semantic phase messageKind; {message_kind} is ambiguous. Use peer_proposal, peer_review_and_objection, peer_bet, resume_reassessment, verdict_request, judge_verdict, or notify_coordinator"
+            "competitive arena room acts require an explicit semantic phase messageKind; {message_kind} is ambiguous. Use peer_proposal, peer_review_and_objection, peer_bet, targeted_refinement, refinement_delta, resume_reassessment, verdict_request, judge_verdict, final_verdict_request, final_judge_verdict, or notify_coordinator"
         )));
     }
     Ok(())
@@ -8531,6 +8922,10 @@ fn validate_room_message_route(
                 || (message_kind == "peer_bet" && source_role == "bettor" && target_role == "judge")
         }
         "verdict_request" => source_role == "room_concierge" && target_role == "judge",
+        "targeted_refinement" => source_role == "room_concierge" && target_role == "bettor",
+        "refinement_delta" => source_role == "bettor" && target_role == "room_concierge",
+        "final_verdict_request" => source_role == "room_concierge" && target_role == "judge",
+        "final_judge_verdict" => source_role == "judge" && target_role == "room_concierge",
         "resume_reassessment" => {
             (source_role == "room_concierge" && target_role == "bettor")
                 || (source_role == "bettor" && target_role == "judge")
@@ -8551,7 +8946,7 @@ fn validate_room_message_route(
         Ok(())
     } else {
         Err(invalid_params(format!(
-            "competitive arena message route is invalid: {source_role} --{message_kind}--> {target_role}. Peer phases flow only between room_concierge and bettor; resume_reassessment flows room_concierge to affected bettors and then to judge; verdict_request flows room_concierge to judge; judge_verdict flows judge to room_concierge; notify_coordinator flows between room_concierge and coordinator"
+            "competitive arena message route is invalid: {source_role} --{message_kind}--> {target_role}. Peer and targeted-refinement phases flow only between room_concierge and bettor; verdict requests flow room_concierge to judge; judge verdicts flow judge to room_concierge; notify_coordinator flows between room_concierge and coordinator"
         )))
     }
 }
@@ -8768,6 +9163,7 @@ fn arena_closure_candidate(
         return None;
     }
 
+    let mut terminal_outcome = ArenaTerminalOutcome::Close;
     if is_competitive_method(composition.contract.coordination.decision_method) {
         let policy = composition.contract.coordination.round_policy.as_ref()?;
         let minimum_positions = policy.minimum_competing_positions as usize;
@@ -8839,25 +9235,28 @@ fn arena_closure_candidate(
                 return None;
             }
         }
-        let native_judge_verdict_completed = deliveries.iter().any(|delivery| {
-            delivery.receiver_thread_id == judge_thread_id
-                // Reassessments are evidence inputs. Their sealed aggregate wakes the Judge
-                // through the canonical judge phase, so terminal closure always observes judge.
-                && delivery.phase.as_deref() == Some("judge")
-                && delivery.status == "receiver_turn_completed"
-                && delivery.receiver_turn_id.as_deref().is_some_and(|turn_id| {
-                    state
-                        .native_parent_turn_responses
-                        .get(&native_token_usage_key(judge_thread_id, turn_id))
-                        .and_then(|response| response.text.as_deref())
-                        .is_some_and(|text| {
-                            is_valid_native_judge_verdict(text, &eligible_winner_ids)
-                        })
-                })
-        });
-        if !native_judge_verdict_completed {
-            return None;
-        }
+        terminal_outcome = deliveries.iter().find_map(|delivery| {
+            if delivery.receiver_thread_id != judge_thread_id
+                || !matches!(
+                    delivery.phase.as_deref(),
+                    Some("judge") | Some("final_judge")
+                )
+                || delivery.status != "receiver_turn_completed"
+            {
+                return None;
+            }
+            let turn_id = delivery.receiver_turn_id.as_deref()?;
+            let text = state
+                .native_parent_turn_responses
+                .get(&native_token_usage_key(judge_thread_id, turn_id))?
+                .text
+                .as_deref()?;
+            match native_judge_next_action(text, &eligible_winner_ids).as_deref() {
+                Some("close") => Some(ArenaTerminalOutcome::Close),
+                Some("parent_rollup") => Some(ArenaTerminalOutcome::ParentRollup),
+                _ => None,
+            }
+        })?;
     }
 
     Some(ArenaClosureCandidate {
@@ -8868,6 +9267,7 @@ fn arena_closure_candidate(
             .iter()
             .map(|lease| lease.thread_id.clone())
             .collect(),
+        outcome: terminal_outcome,
     })
 }
 
@@ -10248,6 +10648,91 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn native_judge_targeted_refinement_contract_is_bounded_and_attributable() {
+        let eligible = ["bettor-growth", "bettor-risk"]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let verdict = serde_json::json!({
+            "winner_participant_id": "bettor-growth",
+            "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+            "winning_decision": "Advance with bounded growth.",
+            "accepted_tradeoff": "Accept slower rollout for reversibility.",
+            "next_action": "targeted_refinement",
+            "contribution_attribution": [
+                {"participant_id": "bettor-growth", "claim_refs": ["claim://growth"], "disposition": "adopted", "rationale": "Growth resolves the bounded objective."},
+                {"participant_id": "bettor-risk", "claim_refs": ["claim://risk"], "disposition": "preserved_dissent", "rationale": "Risk owns the unresolved reversal threshold."}
+            ],
+            "dissent": "Retain the reversal threshold.",
+            "preserved_dissent": ["Retain the reversal threshold."],
+            "targeted_refinements": [{
+                "participant_id": "bettor-risk",
+                "tension": "The reversal threshold remains implicit.",
+                "request": "Make the threshold observable.",
+                "sufficiency_criterion": "A measurable threshold is stated or authority is escalated."
+            }],
+            "reopening_signals": ["The threshold is crossed."],
+            "protected_decisions_status": "preserved",
+            "reopened_decision_refs": [],
+            "resume_scope_status": "not_applicable",
+            "rationale": "Only one localized tension remains."
+        })
+        .to_string();
+
+        assert!(is_valid_native_judge_verdict(&verdict, &eligible));
+        assert_eq!(
+            native_judge_next_action(&verdict, &eligible).as_deref(),
+            Some("targeted_refinement")
+        );
+
+        let prompt = native_bettor_checkpoint_prompt(
+            "targeted_refinement",
+            "Resolve the reversal threshold.",
+        );
+        assert!(prompt.contains("answer only the Judge's targeted mandate"));
+        assert!(prompt.contains("Do not restart proposal, cross-read, or bet"));
+    }
+
+    #[test]
+    fn native_judge_rejects_unbounded_or_mismatched_refinement_contracts() {
+        let eligible = ["bettor-growth", "bettor-risk"]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let base = serde_json::json!({
+            "winner_participant_id": "bettor-growth",
+            "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+            "winning_decision": "Advance with bounded growth.",
+            "accepted_tradeoff": "Accept slower rollout for reversibility.",
+            "next_action": "close",
+            "contribution_attribution": [
+                {"participant_id": "bettor-growth", "claim_refs": [], "disposition": "adopted", "rationale": "Useful."},
+                {"participant_id": "bettor-risk", "claim_refs": [], "disposition": "rejected", "rationale": "Insufficient."}
+            ],
+            "dissent": "none",
+            "preserved_dissent": [],
+            "targeted_refinements": [{
+                "participant_id": "bettor-risk",
+                "tension": "Still open.",
+                "request": "Try again.",
+                "sufficiency_criterion": "Resolve it."
+            }],
+            "reopening_signals": [],
+            "protected_decisions_status": "preserved",
+            "reopened_decision_refs": [],
+            "resume_scope_status": "not_applicable",
+            "rationale": "Invalid close with refinement."
+        });
+
+        assert!(!is_valid_native_judge_verdict(&base.to_string(), &eligible));
+        let mut unknown = base;
+        unknown["next_action"] = serde_json::json!("targeted_refinement");
+        unknown["targeted_refinements"][0]["participant_id"] = serde_json::json!("bettor-unknown");
+        assert!(!is_valid_native_judge_verdict(
+            &unknown.to_string(),
+            &eligible
+        ));
+    }
     use codex_app_server_protocol::MemythosArenaKind;
     use codex_app_server_protocol::MemythosArenaMessage;
     use codex_app_server_protocol::MemythosLayerKind;
@@ -11190,6 +11675,27 @@ mod tests {
             validate_room_message_route(method, "judge_verdict", "bettor", "room_concierge",)
                 .is_err()
         );
+        assert!(
+            validate_room_message_route(method, "targeted_refinement", "room_concierge", "bettor",)
+                .is_ok()
+        );
+        assert!(
+            validate_room_message_route(method, "refinement_delta", "bettor", "room_concierge",)
+                .is_ok()
+        );
+        assert!(
+            validate_room_message_route(
+                method,
+                "final_verdict_request",
+                "room_concierge",
+                "judge",
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_room_message_route(method, "final_judge_verdict", "judge", "room_concierge",)
+                .is_ok()
+        );
         assert!(validate_room_message_route(None, "consultation", "peer", "observer").is_ok());
     }
 
@@ -11354,11 +11860,14 @@ mod tests {
                             "ranked_alternatives": ["bettor-growth", "bettor-risk"],
                             "winning_decision": "Adopt bounded reversible growth.",
                             "accepted_tradeoff": "Trade speed for lower reversal cost.",
+                            "next_action": "close",
                             "contribution_attribution": [
                                 {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/wedge"], "disposition": "adopted", "rationale": "The wedge resolves the bounded objective."},
                                 {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/reversibility"], "disposition": "conditioned", "rationale": "Reversibility constrains acceleration."}
                             ],
                             "dissent": "Retain the bounded risk posture.",
+                            "preserved_dissent": ["Retain the bounded risk posture."],
+                            "targeted_refinements": [],
                             "reopening_signals": ["Unit economics materially deteriorate."],
                             "protected_decisions_status": "preserved",
                             "reopened_decision_refs": [],
@@ -11735,6 +12244,226 @@ mod tests {
         );
         assert!(loopback.response_contract.is_none());
         assert!(loopback.execution_prompt.is_none());
+    }
+
+    #[tokio::test]
+    async fn targeted_judge_verdict_reuses_selected_parents_and_returns_to_the_same_judge() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let response = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(response) = response else {
+            panic!("expected arena composition provision response");
+        };
+        let thread_for = |participant_id: &str| {
+            response
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == participant_id)
+                .expect("participant lease should exist")
+                .thread_id
+                .clone()
+        };
+        let concierge_thread_id = thread_for("concierge");
+        let growth_thread_id = thread_for("bettor-growth");
+        let risk_thread_id = thread_for("bettor-risk");
+        let judge_thread_id = thread_for("judge");
+        let judge_turn_id = "judge-targeted-turn";
+        let verdict = serde_json::json!({
+            "winner_participant_id": "bettor-growth",
+            "ranked_alternatives": ["bettor-growth", "bettor-risk"],
+            "winning_decision": "Retain the bounded growth wedge subject to two owner attestations.",
+            "accepted_tradeoff": "One bounded clarification turn delays closure.",
+            "next_action": "targeted_refinement",
+            "contribution_attribution": [
+                {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/owner"], "disposition": "conditioned", "rationale": "The owner must attest the threshold."},
+                {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/acceptance"], "disposition": "preserved_dissent", "rationale": "Acceptance evidence must remain explicit."}
+            ],
+            "dissent": "The owner attestations are not yet in the sealed evidence.",
+            "preserved_dissent": ["Do not infer owner attestations."],
+            "targeted_refinements": [
+                {"participant_id": "bettor-growth", "tension": "Threshold ownership", "request": "Attest the measurable threshold owned by your perspective.", "sufficiency_criterion": "One explicit threshold and owner."},
+                {"participant_id": "bettor-risk", "tension": "Acceptance ownership", "request": "Attest the acceptance proof owned by your perspective.", "sufficiency_criterion": "One observable acceptance proof and owner."}
+            ],
+            "reopening_signals": ["Either owner rejects its attestation."],
+            "protected_decisions_status": "preserved",
+            "reopened_decision_refs": [],
+            "resume_scope_status": "not_applicable",
+            "rationale": "Only the named owners can close the localized tension."
+        })
+        .to_string();
+        let mut state = processor.state.lock().await;
+        state
+            .arena_message_deliveries
+            .push(MemythosArenaMessageDelivery {
+                delivery_id: "judge-targeted-wake".to_string(),
+                message_id: "sealed-bets-targeted".to_string(),
+                human_summary: "All bets sealed.".to_string(),
+                status: "receiver_turn_completed".to_string(),
+                sender_thread_id: risk_thread_id.clone(),
+                receiver_thread_id: judge_thread_id.clone(),
+                arena_id: response.room.arena_id.clone(),
+                round_id: "round-1".to_string(),
+                phase: Some("judge".to_string()),
+                delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                aggregate_id: Some("judge-bets-round-1".to_string()),
+                aggregate_state: Some(MemythosArenaAggregateState::Consumed),
+                checkpoint_state: Some(MemythosArenaCheckpointState::NextPhaseDispatched),
+                checkpoint_event_refs: Vec::new(),
+                receiver_turn_id: Some(judge_turn_id.to_string()),
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: Vec::new(),
+                rejection_reason: None,
+                failure_reason: None,
+            });
+        state.native_parent_turn_responses.insert(
+            native_token_usage_key(&judge_thread_id, judge_turn_id),
+            ParentTurnResponse {
+                status: Some(TurnStatus::Completed),
+                request_item_ref: None,
+                request_text: None,
+                item_ref: Some("app-server://judge/targeted-verdict".to_string()),
+                text: Some(verdict.clone()),
+            },
+        );
+
+        let messages = native_turn_loopback_candidates(
+            &state,
+            &judge_thread_id,
+            judge_turn_id,
+            "app-server://judge/targeted-completed",
+        );
+        assert_eq!(messages.len(), 3);
+        assert!(messages.iter().any(|message| {
+            message.message_kind == "judge_verdict"
+                && message.to_parent_thread_id == concierge_thread_id
+                && !message.requires_response
+        }));
+        let targeted = messages
+            .iter()
+            .filter(|message| message.message_kind == "targeted_refinement")
+            .collect::<Vec<_>>();
+        assert_eq!(targeted.len(), 2);
+        assert_eq!(
+            targeted
+                .iter()
+                .map(|message| message.to_parent_thread_id.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from([growth_thread_id.as_str(), risk_thread_id.as_str()])
+        );
+        assert!(targeted.iter().all(|message| {
+            message.from_parent_thread_id == concierge_thread_id
+                && message.requires_response
+                && message.delivery_policy == Some(MemythosArenaDeliveryPolicy::Immediate)
+        }));
+
+        state
+            .arena_message_deliveries
+            .push(MemythosArenaMessageDelivery {
+                delivery_id: "judge-verdict-loopback".to_string(),
+                message_id: format!("turn-loopback-{judge_turn_id}"),
+                human_summary: verdict,
+                status: "queued_in_native_mailbox".to_string(),
+                sender_thread_id: judge_thread_id.clone(),
+                receiver_thread_id: concierge_thread_id.clone(),
+                arena_id: response.room.arena_id.clone(),
+                round_id: "round-1".to_string(),
+                phase: Some("judge".to_string()),
+                delivery_mechanism: "native_mailbox".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::QueueOnly),
+                aggregate_id: None,
+                aggregate_state: None,
+                checkpoint_state: None,
+                checkpoint_event_refs: Vec::new(),
+                receiver_turn_id: None,
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: Vec::new(),
+                rejection_reason: None,
+                failure_reason: None,
+            });
+        let contract = canonical_native_concierge_refinement_contract(
+            &state,
+            &response.room,
+            "round-1",
+            response
+                .room
+                .participants
+                .iter()
+                .find(|participant| participant.thread_id == concierge_thread_id)
+                .expect("concierge participant"),
+        )
+        .expect("targeted deltas should share one native aggregate");
+        assert_eq!(contract.quorum, 2);
+        assert_eq!(
+            contract
+                .expected_source_thread_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>(),
+            HashSet::from([growth_thread_id.as_str(), risk_thread_id.as_str()])
+        );
+
+        state
+            .arena_message_deliveries
+            .push(MemythosArenaMessageDelivery {
+                delivery_id: "refinement-packet-wake".to_string(),
+                message_id: "all-refinement-deltas".to_string(),
+                human_summary: "Two attributed refinement deltas.".to_string(),
+                status: "receiver_turn_completed".to_string(),
+                sender_thread_id: thread_for("bettor-risk"),
+                receiver_thread_id: concierge_thread_id.clone(),
+                arena_id: response.room.arena_id.clone(),
+                round_id: "round-1".to_string(),
+                phase: Some("targeted_refinement".to_string()),
+                delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::AggregateThenTrigger),
+                aggregate_id: Some(contract.aggregate_id),
+                aggregate_state: Some(MemythosArenaAggregateState::Consumed),
+                checkpoint_state: Some(MemythosArenaCheckpointState::ConciergeSynthesis),
+                checkpoint_event_refs: Vec::new(),
+                receiver_turn_id: Some("concierge-refinement-turn".to_string()),
+                receiver_response_event_ref: None,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: Vec::new(),
+                rejection_reason: None,
+                failure_reason: None,
+            });
+        state.native_parent_turn_responses.insert(
+            native_token_usage_key(&concierge_thread_id, "concierge-refinement-turn"),
+            ParentTurnResponse {
+                status: Some(TurnStatus::Completed),
+                request_item_ref: None,
+                request_text: None,
+                item_ref: Some("app-server://concierge/refinement-packet".to_string()),
+                text: Some("Both attributed owner attestations are sealed.".to_string()),
+            },
+        );
+        let final_request = native_turn_loopback_candidates(
+            &state,
+            &concierge_thread_id,
+            "concierge-refinement-turn",
+            "app-server://concierge/refinement-completed",
+        );
+        assert_eq!(final_request.len(), 1);
+        assert_eq!(final_request[0].message_kind, "final_verdict_request");
+        assert_eq!(final_request[0].to_parent_thread_id, judge_thread_id);
+        assert!(final_request[0].requires_response);
     }
 
     #[tokio::test]
@@ -13262,7 +13991,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn arena_closes_after_native_judge_returns_a_structured_verdict() {
+    async fn arena_terminalizes_after_native_judge_returns_a_structured_verdict() {
         let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
             AppServerRpcTransport::InProcess,
             Arc::new(RecordOnlyPeerParentDeliveryAdapter),
@@ -13399,11 +14128,14 @@ mod tests {
                     "ranked_alternatives": ["bettor-growth", "bettor-risk"],
                     "winning_decision": "Adopt bounded reversible growth.",
                     "accepted_tradeoff": "Trade speed for lower reversal cost.",
+                    "next_action": "close",
                     "contribution_attribution": [
                         {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/wedge"], "disposition": "adopted", "rationale": "The wedge resolves the bounded objective."},
                         {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/reversibility"], "disposition": "conditioned", "rationale": "Reversibility constrains acceleration."}
                     ],
                     "dissent": "Retain the bounded risk posture.",
+                    "preserved_dissent": ["Retain the bounded risk posture."],
+                    "targeted_refinements": [],
                     "reopening_signals": ["Unit economics materially deteriorate."],
                     "protected_decisions_status": "preserved",
                     "reopened_decision_refs": [],
@@ -13415,9 +14147,51 @@ mod tests {
 
         let candidate = arena_closure_candidate(&state, &response.room.arena_id, &judge_thread_id)
             .expect("the final judge completion should close a fully completed round");
+        assert_eq!(candidate.outcome, ArenaTerminalOutcome::Close);
         assert_eq!(candidate.arena_id, response.room.arena_id);
         assert!(candidate.parent_thread_ids.contains(&concierge_thread_id));
         assert!(candidate.parent_thread_ids.contains(&judge_thread_id));
+
+        let response_key = native_token_usage_key(&judge_thread_id, "turn-7");
+        let judge_response = state
+            .native_parent_turn_responses
+            .get_mut(&response_key)
+            .and_then(|response| response.text.as_mut())
+            .expect("judge response should exist");
+        let mut verdict: serde_json::Value =
+            serde_json::from_str(judge_response).expect("judge verdict should parse");
+        verdict["next_action"] = serde_json::json!("parent_rollup");
+        verdict["rationale"] = serde_json::json!(
+            "The bounded arena completed, but only the parent layer can assign the missing authority."
+        );
+        *judge_response = verdict.to_string();
+
+        let rollup_candidate =
+            arena_closure_candidate(&state, &response.room.arena_id, &judge_thread_id)
+                .expect("parent rollup should terminalize the local arena round");
+        assert_eq!(rollup_candidate.outcome, ArenaTerminalOutcome::ParentRollup);
+        drop(state);
+
+        processor
+            .terminalize_arena_parent_goals(rollup_candidate)
+            .await;
+        let state = processor.state.lock().await;
+        assert_eq!(
+            state
+                .arenas
+                .get(&response.room.arena_id)
+                .expect("arena should remain registered")
+                .lifecycle_state,
+            MemythosArenaLifecycleState::AwaitingParent
+        );
+        assert_eq!(
+            state
+                .arena_compositions
+                .get(&response.room.arena_id)
+                .expect("composition should remain registered")
+                .lifecycle_state,
+            MemythosArenaCompositionLifecycleState::BlockedAuthority
+        );
     }
 
     #[tokio::test]
@@ -13525,11 +14299,14 @@ mod tests {
                         "ranked_alternatives": ["bettor-growth", "bettor-risk"],
                         "winning_decision": "Retain the bounded winner after reassessment.",
                         "accepted_tradeoff": "Reopen only affected hypothesis weight.",
+                        "next_action": "close",
                         "contribution_attribution": [
                             {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/wedge"], "disposition": "adopted", "rationale": "The affected evidence preserves this contribution."},
                             {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/reversibility"], "disposition": "preserved_dissent", "rationale": "The risk boundary remains a reopening condition."}
                         ],
                         "dissent": "Retain the bounded risk posture.",
+                        "preserved_dissent": ["Retain the bounded risk posture."],
+                        "targeted_refinements": [],
                         "reopening_signals": ["A verified instrumentation break."],
                         "protected_decisions_status": "preserved",
                         "reopened_decision_refs": ["decision://forecast/winner"],
@@ -13564,11 +14341,14 @@ mod tests {
                 "ranked_alternatives": ["bettor-growth"],
                 "winning_decision": "Invalid winner.",
                 "accepted_tradeoff": "None.",
+                "next_action": "close",
                 "contribution_attribution": [
                     {"participant_id": "bettor-growth", "claim_refs": [], "disposition": "adopted", "rationale": "Valid participant."},
                     {"participant_id": "bettor-risk", "claim_refs": [], "disposition": "rejected", "rationale": "Valid participant."}
                 ],
                 "dissent": "",
+                "preserved_dissent": [],
+                "targeted_refinements": [],
                 "reopening_signals": [],
                 "protected_decisions_status": "preserved",
                 "reopened_decision_refs": [],
@@ -13589,8 +14369,11 @@ mod tests {
                 "ranked_alternatives": ["bettor-growth", "bettor-risk"],
                 "winning_decision": "Adopt the bounded growth wedge.",
                 "accepted_tradeoff": "Retain reversibility.",
+                "next_action": "close",
                 "contribution_attribution": attribution,
                 "dissent": "Risk remains a reopening condition.",
+                "preserved_dissent": ["Risk remains a reopening condition."],
+                "targeted_refinements": [],
                 "reopening_signals": ["Unit economics deteriorate."],
                 "protected_decisions_status": "preserved",
                 "reopened_decision_refs": [],
@@ -13623,11 +14406,14 @@ mod tests {
                 "ranked_alternatives": ["bettor-measurement", "bettor-seasonal"],
                 "winning_decision": "Treat measurement contamination as the leading bounded explanation.",
                 "accepted_tradeoff": "Delay a structural commitment until observability is reconciled.",
+                "next_action": "close",
                 "contribution_attribution": [
                     {"participant_id": "bettor-measurement", "claim_refs": ["claim://measurement/break"], "disposition": "adopted", "rationale": "The instrumentation break best explains uncertainty."},
                     {"participant_id": "bettor-seasonal", "claim_refs": ["claim://seasonal/timing"], "disposition": "preserved_dissent", "rationale": "Timing remains a bounded alternative."}
                 ],
                 "dissent": "Seasonality remains a bounded alternative.",
+                "preserved_dissent": ["Seasonality remains a bounded alternative."],
+                "targeted_refinements": [],
                 "reopening_signals": ["A verified instrumentation break."],
                 "protected_decisions_status": "preserved",
                 "reopened_decision_refs": ["decision://forecast/winner-and-weights"],
