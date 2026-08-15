@@ -20,12 +20,10 @@ jobs:
         working-directory: codex-rs
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
-        with:
-          toolchain: 1.95.0
 
       - name: Judge ranking regression
         run: cargo test -p codex-app-server native_judge_verdict_requires_each_rejected_alternative_exactly_once
