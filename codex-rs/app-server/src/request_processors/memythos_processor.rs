@@ -592,19 +592,24 @@ fn native_refinement_delta_output_schema(
 fn native_mechanism_cross_read_output_schema(
     participant_id: &str,
     eligible_bettor_ids: &[String],
+    proposal_refs: &[String],
+    peer_proposal_refs: &[String],
 ) -> Result<serde_json::Value, JSONRPCErrorError> {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
             "participant_id": { "type": "string", "enum": [participant_id] },
-            "proposal_ref": { "type": "string" },
+            "proposal_ref": { "type": "string", "enum": proposal_refs },
             "supported_proposal_participant_id": { "type": "string", "enum": eligible_bettor_ids },
             "mechanism_state": { "type": "string", "enum": ["distinct", "converged", "rollup_required"] },
             "supported_mechanism": { "type": "string" },
             "mechanism_delta": { "type": "string" },
             "decision_effect": { "type": "string" },
             "shared_ground": { "type": "array", "items": { "type": "string" } },
-            "incorporated_peer_refs": { "type": "array", "items": { "type": "string" } },
+            "incorporated_peer_refs": {
+                "type": "array",
+                "items": { "type": "string", "enum": peer_proposal_refs }
+            },
             "residual_dissent": { "type": "string" },
             "yield_condition": { "type": "string" },
             "parent_rollup_question": { "type": "string" }
@@ -624,13 +629,15 @@ fn native_mechanism_cross_read_output_schema(
 fn native_mechanism_bet_output_schema(
     participant_id: &str,
     eligible_bettor_ids: &[String],
+    proposal_refs: &[String],
+    cross_read_refs: &[String],
 ) -> Result<serde_json::Value, JSONRPCErrorError> {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
             "participant_id": { "type": "string", "enum": [participant_id] },
-            "proposal_ref": { "type": "string" },
-            "cross_read_ref": { "type": "string" },
+            "proposal_ref": { "type": "string", "enum": proposal_refs },
+            "cross_read_ref": { "type": "string", "enum": cross_read_refs },
             "supported_proposal_participant_id": { "type": "string", "enum": eligible_bettor_ids },
             "mechanism_state": { "type": "string", "enum": ["distinct", "conditioned", "converged", "rollup_required"] },
             "supported_mechanism": { "type": "string" },
@@ -656,6 +663,38 @@ fn native_mechanism_bet_output_schema(
     });
     validate_responses_output_schema(&schema)?;
     Ok(schema)
+}
+
+fn native_phase_turn_refs(
+    state: &MemythosRuntimeState,
+    arena_id: &str,
+    round_id: &str,
+    phase: &str,
+    eligible_thread_ids: &HashSet<&str>,
+) -> Vec<String> {
+    let mut refs = state
+        .arena_message_deliveries
+        .iter()
+        .filter(|delivery| {
+            delivery.arena_id == arena_id
+                && delivery.round_id == round_id
+                && delivery.phase.as_deref() == Some(phase)
+                && eligible_thread_ids.contains(delivery.receiver_thread_id.as_str())
+                && delivery.rejection_reason.is_none()
+                && delivery.failure_reason.is_none()
+        })
+        .filter_map(|delivery| {
+            delivery.receiver_turn_id.as_ref().map(|turn_id| {
+                format!(
+                    "app-server://threads/{}/turns/{turn_id}",
+                    delivery.receiver_thread_id
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    refs.sort();
+    refs.dedup();
+    refs
 }
 
 #[derive(Debug, Deserialize)]
@@ -2671,10 +2710,10 @@ fn native_judge_checkpoint_prompt(message: &str, eligible_winner_ids: &[String])
 fn native_bettor_checkpoint_prompt(message_kind: &str, message: &str) -> String {
     let next_action = match message_kind {
         "peer_review_and_objection" => {
-            "All expected independent proposals are now sealed in your native mailbox. Read every proposal and return only the JSON object required by the native output schema. From your own differential responsibility, declare supported_mechanism, the material mechanism_delta from the nearest peer, its decision_effect, shared_ground incorporated from rivals, residual_dissent, and the yield_condition under which you would merge or cede. Cite your proposal_ref and incorporated_peer_refs. Convergence supported by evidence is valid: set mechanism_state=converged and attribute the supported proposal instead of inventing opposition. Use rollup_required only when authority or a business definition blocks the mechanism comparison. Repetition without a differential contribution is not a valid delta. If this is a revised composition, report only changed mechanism and remaining material objection; do not reproduce unchanged arena constraints."
+            "All expected independent proposals are now sealed in your native mailbox. Read every proposal and return only the JSON object required by the native output schema. From your own differential responsibility, declare supported_mechanism, the material mechanism_delta from the nearest peer, its decision_effect, shared_ground incorporated from rivals, residual_dissent, and the yield_condition under which you would merge or cede. Copy proposal_ref and incorporated_peer_refs exactly from the allowed app-server:// thread-turn refs in the output schema; never invent a semantic alias. Convergence supported by evidence is valid: set mechanism_state=converged and attribute the supported proposal instead of inventing opposition. Use rollup_required only when authority or a business definition blocks the mechanism comparison. Repetition without a differential contribution is not a valid delta. If this is a revised composition, report only changed mechanism and remaining material objection; do not reproduce unchanged arena constraints."
         }
         "peer_bet" => {
-            "All expected peer reviews and objections are now sealed in your native mailbox. Read the complete checkpoint and use your native thread memory to return only the JSON object required by the native output schema. Make an incremental final commitment, not a repetition of your proposal or cross-read, and link both with proposal_ref and cross_read_ref. Resolve mechanism_state as distinct, conditioned, converged, or rollup_required. State the supported proposal and mechanism, exact mechanism_delta and decision_effect, shared_ground, residual_dissent, and yield_condition. Accept an explicit tradeoff and cost of error, and state concrete reopening_signals. Convergence is valid and withdraws redundant competition without erasing attribution; conditioned means your decisive condition changes how another mechanism can be adopted. Raise rollup_required only when genuinely blocking authority or a business definition is missing. Reference unchanged guardrails rather than restating them."
+            "All expected peer reviews and objections are now sealed in your native mailbox. Read the complete checkpoint and use your native thread memory to return only the JSON object required by the native output schema. Make an incremental final commitment, not a repetition of your proposal or cross-read, and link both with proposal_ref and cross_read_ref. Copy both refs exactly from the allowed app-server:// thread-turn refs in the output schema; never invent a semantic alias. Resolve mechanism_state as distinct, conditioned, converged, or rollup_required. State the supported proposal and mechanism, exact mechanism_delta and decision_effect, shared_ground, residual_dissent, and yield_condition. Accept an explicit tradeoff and cost of error, and state concrete reopening_signals. Convergence is valid and withdraws redundant competition without erasing attribution; conditioned means your decisive condition changes how another mechanism can be adopted. Raise rollup_required only when genuinely blocking authority or a business definition is missing. Reference unchanged guardrails rather than restating them."
         }
         "targeted_refinement" => {
             "Use your native thread memory and answer only the Judge's targeted mandate. Return a refinement delta: what changed, which evidence supports it, whether the stated sufficiency criterion is now met, and any remaining material tension. Do not restart proposal, cross-read, or bet. Request parent rollup only if the mandate exposes missing authority or a business definition that your role cannot supply."
@@ -2712,6 +2751,47 @@ fn apply_native_checkpoint_execution_contract(
             .filter(|participant| participant.agent_role == "bettor")
             .map(|participant| participant.participant_id.clone())
             .collect::<Vec<_>>();
+        let bettor_thread_ids = composition
+            .leases
+            .iter()
+            .filter(|lease| eligible_bettor_ids.contains(&lease.participant_id))
+            .map(|lease| lease.thread_id.as_str())
+            .collect::<HashSet<_>>();
+        let own_thread_ids = HashSet::from([message.to_parent_thread_id.as_str()]);
+        let peer_thread_ids = bettor_thread_ids
+            .iter()
+            .copied()
+            .filter(|thread_id| *thread_id != message.to_parent_thread_id)
+            .collect::<HashSet<_>>();
+        let proposal_refs = native_phase_turn_refs(
+            state,
+            &message.arena_id,
+            &message.round_id,
+            "proposal",
+            &bettor_thread_ids,
+        );
+        let own_proposal_refs = native_phase_turn_refs(
+            state,
+            &message.arena_id,
+            &message.round_id,
+            "proposal",
+            &own_thread_ids,
+        );
+        let peer_proposal_refs = native_phase_turn_refs(
+            state,
+            &message.arena_id,
+            &message.round_id,
+            "proposal",
+            &peer_thread_ids,
+        );
+        if proposal_refs.len() != bettor_thread_ids.len()
+            || own_proposal_refs.len() != 1
+            || peer_proposal_refs.len() != peer_thread_ids.len()
+        {
+            return Err(invalid_params(
+                "mechanism contract requires one native proposal turn ref per bettor",
+            ));
+        }
         message.execution_prompt = Some(native_bettor_checkpoint_prompt(
             &message.message_kind,
             &message.human_summary,
@@ -2725,10 +2805,32 @@ fn apply_native_checkpoint_execution_contract(
             .to_string(),
         );
         message.output_schema = Some(match message.message_kind.as_str() {
-            "peer_review_and_objection" => {
-                native_mechanism_cross_read_output_schema(participant_id, &eligible_bettor_ids)?
+            "peer_review_and_objection" => native_mechanism_cross_read_output_schema(
+                participant_id,
+                &eligible_bettor_ids,
+                &own_proposal_refs,
+                &peer_proposal_refs,
+            )?,
+            "peer_bet" => {
+                let own_cross_read_refs = native_phase_turn_refs(
+                    state,
+                    &message.arena_id,
+                    &message.round_id,
+                    "peer_review_and_objection",
+                    &own_thread_ids,
+                );
+                if own_cross_read_refs.len() != 1 {
+                    return Err(invalid_params(
+                        "mechanism bet contract requires one native cross-read turn ref",
+                    ));
+                }
+                native_mechanism_bet_output_schema(
+                    participant_id,
+                    &eligible_bettor_ids,
+                    &proposal_refs,
+                    &own_cross_read_refs,
+                )?
             }
-            "peer_bet" => native_mechanism_bet_output_schema(participant_id, &eligible_bettor_ids)?,
             _ => unreachable!(),
         });
         append_native_arena_parent_task_contract(state, message);
@@ -10822,8 +10924,15 @@ mod tests {
     #[test]
     fn native_cross_read_requires_pre_bet_mechanism_separation() {
         let eligible = vec!["bettor-growth".to_string(), "bettor-risk".to_string()];
-        let schema = native_mechanism_cross_read_output_schema("bettor-risk", &eligible)
-            .expect("cross-read schema");
+        let proposal_refs = vec!["app-server://threads/risk/turns/proposal".to_string()];
+        let peer_refs = vec!["app-server://threads/growth/turns/proposal".to_string()];
+        let schema = native_mechanism_cross_read_output_schema(
+            "bettor-risk",
+            &eligible,
+            &proposal_refs,
+            &peer_refs,
+        )
+        .expect("cross-read schema");
         let required = schema["required"].as_array().expect("required fields");
         for field in [
             "proposal_ref",
@@ -10841,13 +10950,31 @@ mod tests {
             schema["properties"]["mechanism_state"]["enum"],
             serde_json::json!(["distinct", "converged", "rollup_required"])
         );
+        assert_eq!(
+            schema["properties"]["proposal_ref"]["enum"],
+            serde_json::json!(proposal_refs)
+        );
+        assert_eq!(
+            schema["properties"]["incorporated_peer_refs"]["items"]["enum"],
+            serde_json::json!(peer_refs)
+        );
     }
 
     #[test]
     fn native_bet_resolves_mechanism_state_and_native_trace_refs() {
         let eligible = vec!["bettor-growth".to_string(), "bettor-risk".to_string()];
-        let schema =
-            native_mechanism_bet_output_schema("bettor-growth", &eligible).expect("bet schema");
+        let proposal_refs = vec![
+            "app-server://threads/growth/turns/proposal".to_string(),
+            "app-server://threads/risk/turns/proposal".to_string(),
+        ];
+        let cross_read_refs = vec!["app-server://threads/growth/turns/cross-read".to_string()];
+        let schema = native_mechanism_bet_output_schema(
+            "bettor-growth",
+            &eligible,
+            &proposal_refs,
+            &cross_read_refs,
+        )
+        .expect("bet schema");
         assert_eq!(
             schema["properties"]["mechanism_state"]["enum"],
             serde_json::json!(["distinct", "conditioned", "converged", "rollup_required"])
@@ -10861,6 +10988,14 @@ mod tests {
         ] {
             assert!(required.iter().any(|value| value.as_str() == Some(field)));
         }
+        assert_eq!(
+            schema["properties"]["proposal_ref"]["enum"],
+            serde_json::json!(proposal_refs)
+        );
+        assert_eq!(
+            schema["properties"]["cross_read_ref"]["enum"],
+            serde_json::json!(cross_read_refs)
+        );
     }
 
     #[tokio::test]
@@ -10893,7 +11028,44 @@ mod tests {
         };
         let concierge_thread_id = thread_for("concierge");
         let risk_thread_id = thread_for("bettor-risk");
-        let state = processor.state.lock().await;
+        let growth_thread_id = thread_for("bettor-growth");
+        let delivery = |id: &str, phase: &str, receiver: &str| MemythosArenaMessageDelivery {
+            delivery_id: id.to_string(),
+            message_id: id.to_string(),
+            human_summary: phase.to_string(),
+            status: "receiver_turn_completed".to_string(),
+            sender_thread_id: concierge_thread_id.clone(),
+            receiver_thread_id: receiver.to_string(),
+            arena_id: response.room.arena_id.clone(),
+            round_id: "round-1".to_string(),
+            phase: Some(phase.to_string()),
+            delivery_mechanism: "test".to_string(),
+            delivery_policy: None,
+            aggregate_id: None,
+            aggregate_state: None,
+            checkpoint_state: None,
+            checkpoint_event_refs: Vec::new(),
+            receiver_turn_id: Some(format!("turn-{phase}-{receiver}")),
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: Vec::new(),
+            rejection_reason: None,
+            failure_reason: None,
+        };
+        let mut state = processor.state.lock().await;
+        for phase in ["proposal", "peer_review_and_objection"] {
+            state.arena_message_deliveries.push(delivery(
+                &format!("{phase}-risk"),
+                phase,
+                &risk_thread_id,
+            ));
+            state.arena_message_deliveries.push(delivery(
+                &format!("{phase}-growth"),
+                phase,
+                &growth_thread_id,
+            ));
+        }
 
         for (message_kind, expected_contract, required_ref) in [
             (
@@ -10936,6 +11108,20 @@ mod tests {
                     .and_then(|schema| schema.pointer(&format!("/properties/{required_ref}/type")))
                     .and_then(serde_json::Value::as_str),
                 Some("string")
+            );
+            let allowed_refs = message
+                .output_schema
+                .as_ref()
+                .and_then(|schema| schema.pointer(&format!("/properties/{required_ref}/enum")));
+            assert!(
+                allowed_refs.is_some_and(|refs| refs.as_array().is_some_and(|refs| {
+                    !refs.is_empty()
+                        && refs.iter().all(|value| {
+                            value
+                                .as_str()
+                                .is_some_and(|value| value.starts_with("app-server://threads/"))
+                        })
+                }))
             );
         }
     }
