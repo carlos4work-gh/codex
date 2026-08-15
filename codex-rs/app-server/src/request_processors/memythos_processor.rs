@@ -589,6 +589,75 @@ fn native_refinement_delta_output_schema(
     Ok(schema)
 }
 
+fn native_mechanism_cross_read_output_schema(
+    participant_id: &str,
+    eligible_bettor_ids: &[String],
+) -> Result<serde_json::Value, JSONRPCErrorError> {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "participant_id": { "type": "string", "enum": [participant_id] },
+            "proposal_ref": { "type": "string" },
+            "supported_proposal_participant_id": { "type": "string", "enum": eligible_bettor_ids },
+            "mechanism_state": { "type": "string", "enum": ["distinct", "converged", "rollup_required"] },
+            "supported_mechanism": { "type": "string" },
+            "mechanism_delta": { "type": "string" },
+            "decision_effect": { "type": "string" },
+            "shared_ground": { "type": "array", "items": { "type": "string" } },
+            "incorporated_peer_refs": { "type": "array", "items": { "type": "string" } },
+            "residual_dissent": { "type": "string" },
+            "yield_condition": { "type": "string" },
+            "parent_rollup_question": { "type": "string" }
+        },
+        "required": [
+            "participant_id", "proposal_ref", "supported_proposal_participant_id",
+            "mechanism_state", "supported_mechanism", "mechanism_delta",
+            "decision_effect", "shared_ground", "incorporated_peer_refs",
+            "residual_dissent", "yield_condition", "parent_rollup_question"
+        ],
+        "additionalProperties": false
+    });
+    validate_responses_output_schema(&schema)?;
+    Ok(schema)
+}
+
+fn native_mechanism_bet_output_schema(
+    participant_id: &str,
+    eligible_bettor_ids: &[String],
+) -> Result<serde_json::Value, JSONRPCErrorError> {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "participant_id": { "type": "string", "enum": [participant_id] },
+            "proposal_ref": { "type": "string" },
+            "cross_read_ref": { "type": "string" },
+            "supported_proposal_participant_id": { "type": "string", "enum": eligible_bettor_ids },
+            "mechanism_state": { "type": "string", "enum": ["distinct", "conditioned", "converged", "rollup_required"] },
+            "supported_mechanism": { "type": "string" },
+            "mechanism_delta": { "type": "string" },
+            "decision_effect": { "type": "string" },
+            "shared_ground": { "type": "array", "items": { "type": "string" } },
+            "residual_dissent": { "type": "string" },
+            "yield_condition": { "type": "string" },
+            "accepted_tradeoff": { "type": "string" },
+            "cost_of_error": { "type": "string" },
+            "reopening_signals": { "type": "array", "items": { "type": "string" } },
+            "parent_rollup_question": { "type": "string" }
+        },
+        "required": [
+            "participant_id", "proposal_ref", "cross_read_ref",
+            "supported_proposal_participant_id", "mechanism_state",
+            "supported_mechanism", "mechanism_delta", "decision_effect",
+            "shared_ground", "residual_dissent", "yield_condition",
+            "accepted_tradeoff", "cost_of_error", "reopening_signals",
+            "parent_rollup_question"
+        ],
+        "additionalProperties": false
+    });
+    validate_responses_output_schema(&schema)?;
+    Ok(schema)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeJudgeVerdict {
@@ -2602,10 +2671,10 @@ fn native_judge_checkpoint_prompt(message: &str, eligible_winner_ids: &[String])
 fn native_bettor_checkpoint_prompt(message_kind: &str, message: &str) -> String {
     let next_action = match message_kind {
         "peer_review_and_objection" => {
-            "All expected independent proposals are now sealed in your native mailbox. Read every proposal and return one substantive peer review from your own differential responsibility. Separate what you learned and incorporated, what changed in your position and why, the evidence or risk that remains uniquely protected by your perspective, the residual objection that was not absorbed, and the condition that would falsify your current position. Convergence supported by evidence is valid; repetition without a differential contribution is not. Do not merely summarize the room. If this is a revised composition, report only the delta and remaining material objection; do not reproduce unchanged arena constraints."
+            "All expected independent proposals are now sealed in your native mailbox. Read every proposal and return only the JSON object required by the native output schema. From your own differential responsibility, declare supported_mechanism, the material mechanism_delta from the nearest peer, its decision_effect, shared_ground incorporated from rivals, residual_dissent, and the yield_condition under which you would merge or cede. Cite your proposal_ref and incorporated_peer_refs. Convergence supported by evidence is valid: set mechanism_state=converged and attribute the supported proposal instead of inventing opposition. Use rollup_required only when authority or a business definition blocks the mechanism comparison. Repetition without a differential contribution is not a valid delta. If this is a revised composition, report only changed mechanism and remaining material objection; do not reproduce unchanged arena constraints."
         }
         "peer_bet" => {
-            "All expected peer reviews and objections are now sealed in your native mailbox. Read the complete checkpoint and use your native thread memory to return an incremental final commitment, not a repetition of your proposal or cross-read. State the final decision you support and the exact participant proposal it comes from; then make the delta explicit: what changed or was retained from your initial position, which peer evidence you incorporated, which material evidence you rejected and why, and how that evidence supports your argued confidence. Accept an explicit tradeoff and cost of error, preserve residual dissent that the Judge must carry forward, and state concrete breakpoints or signals that would reopen the commitment. Raise a parent rollup only when a genuinely blocking authority or business definition is missing. Natural-language detail is allowed when needed for executability, but unchanged guardrails must be referenced rather than restated."
+            "All expected peer reviews and objections are now sealed in your native mailbox. Read the complete checkpoint and use your native thread memory to return only the JSON object required by the native output schema. Make an incremental final commitment, not a repetition of your proposal or cross-read, and link both with proposal_ref and cross_read_ref. Resolve mechanism_state as distinct, conditioned, converged, or rollup_required. State the supported proposal and mechanism, exact mechanism_delta and decision_effect, shared_ground, residual_dissent, and yield_condition. Accept an explicit tradeoff and cost of error, and state concrete reopening_signals. Convergence is valid and withdraws redundant competition without erasing attribution; conditioned means your decisive condition changes how another mechanism can be adopted. Raise rollup_required only when genuinely blocking authority or a business definition is missing. Reference unchanged guardrails rather than restating them."
         }
         "targeted_refinement" => {
             "Use your native thread memory and answer only the Judge's targeted mandate. Return a refinement delta: what changed, which evidence supports it, whether the stated sufficiency criterion is now met, and any remaining material tension. Do not restart proposal, cross-read, or bet. Request parent rollup only if the mandate exposes missing authority or a business definition that your role cannot supply."
@@ -2619,6 +2688,52 @@ fn apply_native_checkpoint_execution_contract(
     state: &MemythosRuntimeState,
     message: &mut MemythosArenaMessage,
 ) -> Result<(), JSONRPCErrorError> {
+    if message.requires_response
+        && message.to_parent_role == "bettor"
+        && matches!(
+            message.message_kind.as_str(),
+            "peer_review_and_objection" | "peer_bet"
+        )
+    {
+        let composition = state
+            .arena_compositions
+            .get(&message.arena_id)
+            .ok_or_else(|| invalid_params("mechanism contract requires an arena composition"))?;
+        let participant_id = composition
+            .leases
+            .iter()
+            .find(|lease| lease.thread_id == message.to_parent_thread_id)
+            .map(|lease| lease.participant_id.as_str())
+            .ok_or_else(|| invalid_params("mechanism contract requires a leased bettor parent"))?;
+        let eligible_bettor_ids = composition
+            .contract
+            .participants
+            .iter()
+            .filter(|participant| participant.agent_role == "bettor")
+            .map(|participant| participant.participant_id.clone())
+            .collect::<Vec<_>>();
+        message.execution_prompt = Some(native_bettor_checkpoint_prompt(
+            &message.message_kind,
+            &message.human_summary,
+        ));
+        message.response_contract = Some(
+            match message.message_kind.as_str() {
+                "peer_review_and_objection" => "mechanism_cross_read",
+                "peer_bet" => "mechanism_bet",
+                _ => unreachable!(),
+            }
+            .to_string(),
+        );
+        message.output_schema = Some(match message.message_kind.as_str() {
+            "peer_review_and_objection" => {
+                native_mechanism_cross_read_output_schema(participant_id, &eligible_bettor_ids)?
+            }
+            "peer_bet" => native_mechanism_bet_output_schema(participant_id, &eligible_bettor_ids)?,
+            _ => unreachable!(),
+        });
+        append_native_arena_parent_task_contract(state, message);
+        return Ok(());
+    }
     if message.requires_response && message.message_kind == "targeted_refinement" {
         let participant_id = state
             .arena_compositions
@@ -10677,15 +10792,12 @@ mod tests {
             native_bettor_checkpoint_prompt("peer_bet", "The sealed peer checkpoint follows.");
 
         assert!(prompt.contains("incremental final commitment"));
-        assert!(prompt.contains("what changed or was retained"));
-        assert!(prompt.contains("incorporated"));
-        assert!(prompt.contains("rejected and why"));
-        assert!(prompt.contains("argued confidence"));
+        assert!(prompt.contains("proposal_ref and cross_read_ref"));
+        assert!(prompt.contains("distinct, conditioned, converged, or rollup_required"));
+        assert!(prompt.contains("mechanism_delta and decision_effect"));
         assert!(prompt.contains("tradeoff and cost of error"));
-        assert!(prompt.contains("residual dissent"));
-        assert!(prompt.contains("breakpoints or signals"));
-        assert!(prompt.contains("parent rollup"));
-        assert!(prompt.contains("rather than restated"));
+        assert!(prompt.contains("reopening_signals"));
+        assert!(prompt.contains("withdraws redundant competition without erasing attribution"));
         assert!(!prompt.contains("return one final bet"));
     }
 
@@ -10697,13 +10809,135 @@ mod tests {
         );
 
         assert!(prompt.contains("own differential responsibility"));
-        assert!(prompt.contains("what you learned and incorporated"));
-        assert!(prompt.contains("what changed in your position and why"));
-        assert!(prompt.contains("remains uniquely protected by your perspective"));
-        assert!(prompt.contains("residual objection"));
-        assert!(prompt.contains("falsify your current position"));
+        assert!(prompt.contains("supported_mechanism"));
+        assert!(prompt.contains("mechanism_delta"));
+        assert!(prompt.contains("decision_effect"));
+        assert!(prompt.contains("shared_ground"));
+        assert!(prompt.contains("residual_dissent"));
+        assert!(prompt.contains("yield_condition"));
         assert!(prompt.contains("Convergence supported by evidence is valid"));
-        assert!(prompt.contains("repetition without a differential contribution is not"));
+        assert!(prompt.contains("instead of inventing opposition"));
+    }
+
+    #[test]
+    fn native_cross_read_requires_pre_bet_mechanism_separation() {
+        let eligible = vec!["bettor-growth".to_string(), "bettor-risk".to_string()];
+        let schema = native_mechanism_cross_read_output_schema("bettor-risk", &eligible)
+            .expect("cross-read schema");
+        let required = schema["required"].as_array().expect("required fields");
+        for field in [
+            "proposal_ref",
+            "supported_mechanism",
+            "mechanism_delta",
+            "decision_effect",
+            "shared_ground",
+            "residual_dissent",
+            "yield_condition",
+        ] {
+            assert!(required.iter().any(|value| value.as_str() == Some(field)));
+        }
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            schema["properties"]["mechanism_state"]["enum"],
+            serde_json::json!(["distinct", "converged", "rollup_required"])
+        );
+    }
+
+    #[test]
+    fn native_bet_resolves_mechanism_state_and_native_trace_refs() {
+        let eligible = vec!["bettor-growth".to_string(), "bettor-risk".to_string()];
+        let schema =
+            native_mechanism_bet_output_schema("bettor-growth", &eligible).expect("bet schema");
+        assert_eq!(
+            schema["properties"]["mechanism_state"]["enum"],
+            serde_json::json!(["distinct", "conditioned", "converged", "rollup_required"])
+        );
+        let required = schema["required"].as_array().expect("required fields");
+        for field in [
+            "proposal_ref",
+            "cross_read_ref",
+            "accepted_tradeoff",
+            "cost_of_error",
+        ] {
+            assert!(required.iter().any(|value| value.as_str() == Some(field)));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_bettor_turns_receive_mechanism_output_contracts() {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::InProcess,
+            Arc::new(RecordOnlyPeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+        );
+        let response = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+            .await
+            .expect("composition should provision");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(response) = response else {
+            panic!("expected arena composition provision response");
+        };
+        let thread_for = |participant_id: &str| {
+            response
+                .leases
+                .iter()
+                .find(|lease| lease.participant_id == participant_id)
+                .expect("participant lease should exist")
+                .thread_id
+                .clone()
+        };
+        let concierge_thread_id = thread_for("concierge");
+        let risk_thread_id = thread_for("bettor-risk");
+        let state = processor.state.lock().await;
+
+        for (message_kind, expected_contract, required_ref) in [
+            (
+                "peer_review_and_objection",
+                "mechanism_cross_read",
+                "proposal_ref",
+            ),
+            ("peer_bet", "mechanism_bet", "cross_read_ref"),
+        ] {
+            let mut message = MemythosArenaMessage {
+                message_id: format!("mechanism-{message_kind}"),
+                case_id: "case-1".to_string(),
+                arena_id: response.room.arena_id.clone(),
+                round_id: "round-1".to_string(),
+                from_parent_thread_id: concierge_thread_id.clone(),
+                from_parent_role: "room_concierge".to_string(),
+                to_parent_thread_id: risk_thread_id.clone(),
+                to_parent_role: "bettor".to_string(),
+                message_kind: message_kind.to_string(),
+                human_summary: "sealed checkpoint".to_string(),
+                execution_prompt: None,
+                context_packet_ref: "context://round-1".to_string(),
+                artifact_refs: Vec::new(),
+                requires_response: true,
+                delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                aggregate_contract: None,
+                response_contract: None,
+                output_schema: None,
+            };
+            apply_native_checkpoint_execution_contract(&state, &mut message)
+                .expect("mechanism contract should apply");
+            assert_eq!(
+                message.response_contract.as_deref(),
+                Some(expected_contract)
+            );
+            assert_eq!(
+                message
+                    .output_schema
+                    .as_ref()
+                    .and_then(|schema| schema.pointer(&format!("/properties/{required_ref}/type")))
+                    .and_then(serde_json::Value::as_str),
+                Some("string")
+            );
+        }
     }
 
     #[test]
