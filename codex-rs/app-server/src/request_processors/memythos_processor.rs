@@ -452,9 +452,6 @@ fn native_judge_verdict_output_schema(
             },
             "ranked_alternatives": {
                 "type": "array",
-                "minItems": eligible_winner_ids.len().saturating_sub(1),
-                "maxItems": eligible_winner_ids.len().saturating_sub(1),
-                "uniqueItems": true,
                 "items": {
                     "type": "string",
                     "enum": eligible_winner_ids
@@ -11314,6 +11311,9 @@ mod tests {
                 ["enum"],
             serde_json::json!(["p1-growth", "p2-risk"])
         );
+        assert!(schema["properties"]["ranked_alternatives"].get("uniqueItems").is_none());
+        assert!(schema["properties"]["ranked_alternatives"].get("minItems").is_none());
+        assert!(schema["properties"]["ranked_alternatives"].get("maxItems").is_none());
         assert!(
             schema["required"]
                 .as_array()
