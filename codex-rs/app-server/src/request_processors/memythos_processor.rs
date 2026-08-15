@@ -9046,7 +9046,8 @@ fn native_arena_intake_assignments(
         .map(|target| {
             let assignment = if message_kind == "resume_reassessment" {
                 format!(
-                    "Reassess only your affected position against the new evidence and protected decisions. Preserve settled scope, identify what changed, revise your commitment if warranted, and return the bounded reassessment for native Judge aggregation.\n\nArena intake: {}{}",
+                    "Reassess only your affected position against the new evidence and protected decisions. The planner has already accepted these cited change refs as material novelty for this partial resume: [{}]. Treat the corresponding reality evidence in the arena intake as supplied evidence; do not claim it is absent or unverified. Preserve settled scope, identify what changed, revise your commitment if warranted, and return the bounded reassessment for native Judge aggregation.\n\nArena intake: {}{}",
+                    plan.cited_change_refs.join(", "),
                     incoming.human_summary,
                     concierge_framing
                         .map(|framing| format!("\n\nConcierge framing: {framing}"))
@@ -14399,6 +14400,15 @@ mod tests {
             reassessments[0].receiver_thread_id,
             resumed_delivery.thread_id
         );
+        assert!(reassessments[0]
+            .human_summary
+            .contains("planner has already accepted these cited change refs as material novelty"));
+        assert!(reassessments[0]
+            .human_summary
+            .contains("evidence://fixture-change"));
+        assert!(reassessments[0]
+            .human_summary
+            .contains("do not claim it is absent or unverified"));
     }
 
     #[tokio::test]
