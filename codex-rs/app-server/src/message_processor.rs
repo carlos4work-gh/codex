@@ -32,13 +32,21 @@ use crate::request_processors::GitRequestProcessor;
 use crate::request_processors::InitializeRequestProcessor;
 use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
+use crate::request_processors::MemythosRequestProcessor;
+use crate::request_processors::NativeArenaCompositionPlanningAdapter;
+use crate::request_processors::NativeArenaParentProvisioningAdapter;
+use crate::request_processors::NativeMailboxPeerParentDeliveryAdapter;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
 use crate::request_processors::SearchRequestProcessor;
+use crate::request_processors::ThreadGoalParentSnapshotAdapter;
 use crate::request_processors::ThreadGoalRequestProcessor;
+use crate::request_processors::ThreadManagerParentConfigurationAdapter;
 use crate::request_processors::ThreadRequestProcessor;
+use crate::request_processors::ThreadTurnsParentResponseAdapter;
 use crate::request_processors::TurnRequestProcessor;
+use crate::request_processors::TurnStartThreadConsolidationAdapter;
 use crate::request_processors::WindowsSandboxRequestProcessor;
 use crate::request_serialization::QueuedInitializedRequest;
 use crate::request_serialization::RequestSerializationQueueKey;
@@ -201,6 +209,7 @@ pub(crate) struct MessageProcessor {
     initialize_processor: InitializeRequestProcessor,
     marketplace_processor: MarketplaceRequestProcessor,
     mcp_processor: McpRequestProcessor,
+    memythos_processor: MemythosRequestProcessor,
     plugin_processor: PluginRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
@@ -393,6 +402,7 @@ impl MessageProcessor {
         let skills_watcher = SkillsWatcher::new(thread_manager.skills_service(), outgoing.clone());
 
         let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
+        let memythos_processor_holder = Arc::new(std::sync::Mutex::new(None));
         let thread_watch_manager =
             crate::thread_status::ThreadWatchManager::new_with_outgoing(outgoing.clone());
         let thread_list_state_permit = Arc::new(Semaphore::new(/*permits*/ 1));
@@ -495,6 +505,7 @@ impl MessageProcessor {
             state_db.clone(),
             log_db,
             Arc::clone(&skills_watcher),
+            Arc::clone(&memythos_processor_holder),
         );
         let turn_processor = TurnRequestProcessor::new(
             auth_manager.clone(),
@@ -509,7 +520,43 @@ impl MessageProcessor {
             thread_watch_manager,
             thread_list_state_permit,
             Arc::clone(&skills_watcher),
+            Arc::clone(&memythos_processor_holder),
         );
+        let memythos_processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            rpc_transport,
+            Arc::new(NativeMailboxPeerParentDeliveryAdapter::new(
+                turn_processor.clone(),
+                Arc::clone(&thread_manager),
+            )),
+            Arc::new(ThreadGoalParentSnapshotAdapter::new(
+                thread_goal_processor.clone(),
+            )),
+            Arc::new(TurnStartThreadConsolidationAdapter::new(
+                thread_processor.clone(),
+                turn_processor.clone(),
+            )),
+            Arc::new(ThreadTurnsParentResponseAdapter::new(
+                thread_processor.clone(),
+            )),
+            Arc::new(ThreadManagerParentConfigurationAdapter::new(Arc::clone(
+                &thread_manager,
+            ))),
+            Arc::new(NativeArenaParentProvisioningAdapter::new(
+                Arc::clone(&thread_manager),
+                Arc::clone(&config),
+                thread_goal_processor.clone(),
+                thread_processor.clone(),
+            )),
+            Arc::new(NativeArenaCompositionPlanningAdapter::new(
+                Arc::clone(&thread_manager),
+                Arc::clone(&config),
+                thread_processor.clone(),
+                turn_processor.clone(),
+            )),
+        );
+        *memythos_processor_holder
+            .lock()
+            .expect("memythos processor holder poisoned") = Some(memythos_processor.clone());
         if matches!(plugin_startup_tasks, crate::PluginStartupTasks::Start) {
             // Keep plugin startup warmups aligned at app-server startup.
             let on_effective_plugins_changed =
@@ -570,6 +617,7 @@ impl MessageProcessor {
             initialize_processor,
             marketplace_processor,
             mcp_processor,
+            memythos_processor,
             plugin_processor,
             remote_control_processor,
             search_processor,
@@ -1166,6 +1214,187 @@ impl MessageProcessor {
                     .thread_goal_clear(request_id.clone(), params)
                     .await
             }
+            ClientRequest::MemythosRuntimeHealth { params, .. } => self
+                .memythos_processor
+                .runtime_health(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRuntimeClose { params, .. } => self
+                .memythos_processor
+                .runtime_close(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosLayerCreate { params, .. } => {
+                self.memythos_processor.layer_create(params).await.map(Some)
+            }
+            ClientRequest::MemythosLayerList { params, .. } => {
+                self.memythos_processor.layer_list(params).await.map(Some)
+            }
+            ClientRequest::MemythosArenaCreate { params, .. } => {
+                self.memythos_processor.arena_create(params).await.map(Some)
+            }
+            ClientRequest::MemythosArenaCompositionProvision { params, .. } => self
+                .memythos_processor
+                .arena_composition_provision(params, request_id.connection_id)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaRequest { params, .. } => self
+                .memythos_processor
+                .arena_request(params, request_id.connection_id)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaList { params, .. } => {
+                self.memythos_processor.arena_list(params).await.map(Some)
+            }
+            ClientRequest::MemythosThreadAttach { params, .. } => self
+                .memythos_processor
+                .thread_attach(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosThreadList { params, .. } => {
+                self.memythos_processor.thread_list(params).await.map(Some)
+            }
+            ClientRequest::MemythosArenaParentRegister { params, .. } => self
+                .memythos_processor
+                .arena_parent_register(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaParticipantRegister { params, .. } => self
+                .memythos_processor
+                .arena_participant_register(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaPhaseStart { params, .. } => self
+                .memythos_processor
+                .arena_phase_start(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosParentContinuityList { params, .. } => self
+                .memythos_processor
+                .parent_continuity_list(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaMessageSend { params, .. } => self
+                .memythos_processor
+                .arena_message_send(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaMessageSendV2 { params, .. } => self
+                .memythos_processor
+                .arena_message_send_v2(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaMessageList { params, .. } => self
+                .memythos_processor
+                .arena_message_list(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaMessageObservationList { params, .. } => self
+                .memythos_processor
+                .arena_message_observation_list(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaMessageObserve { params, .. } => self
+                .memythos_processor
+                .arena_message_observe(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaStateGet { params, .. } => self
+                .memythos_processor
+                .arena_state_get(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaPhaseClose { params, .. } => self
+                .memythos_processor
+                .arena_phase_close(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaRun { params, .. } => {
+                self.memythos_processor.arena_run(params).await.map(Some)
+            }
+            ClientRequest::MemythosRoomRegister { params, .. } => self
+                .memythos_processor
+                .room_register(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomCreate { params, .. } => self
+                .memythos_processor
+                .room_register(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomList { params, .. } => {
+                self.memythos_processor.room_list(params).await.map(Some)
+            }
+            ClientRequest::MemythosRoomActivityList { params, .. } => self
+                .memythos_processor
+                .room_activity_list(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomParentConfigurationList { params, .. } => self
+                .memythos_processor
+                .room_parent_configuration_list(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomDialogueList { params, .. } => self
+                .memythos_processor
+                .room_dialogue_list(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomTimelineGet { params, .. } => self
+                .memythos_processor
+                .room_timeline_get(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomSendInput { params, .. } => self
+                .memythos_processor
+                .room_send_input_on_connection(params, request_id.connection_id)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomSend { params, .. } => self
+                .memythos_processor
+                .room_send_on_connection(params, request_id.connection_id)
+                .await
+                .map(Some),
+            ClientRequest::MemythosArenaMessageRead { params, .. } => self
+                .memythos_processor
+                .arena_message_read(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosThreadConsolidate { params, .. } => self
+                .memythos_processor
+                .thread_consolidate(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosThreadContractAssemble { params, .. } => self
+                .memythos_processor
+                .thread_contract_assemble(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomContractEmit { params, .. } => self
+                .memythos_processor
+                .thread_contract_assemble(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosThreadContractRead { params, .. } => self
+                .memythos_processor
+                .thread_contract_read(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosRoomContractGet { params, .. } => self
+                .memythos_processor
+                .thread_contract_read(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosThreadContractList { params, .. } => self
+                .memythos_processor
+                .thread_contract_list(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosTelemetryList { params, .. } => self
+                .memythos_processor
+                .telemetry_list(params)
+                .await
+                .map(Some),
             ClientRequest::ThreadMetadataUpdate { params, .. } => {
                 self.thread_processor.thread_metadata_update(params).await
             }
@@ -1308,6 +1537,9 @@ impl MessageProcessor {
             }
             ClientRequest::PermissionProfileList { params, .. } => {
                 self.catalog_processor.permission_profile_list(params).await
+            }
+            ClientRequest::AgentRoleList { params, .. } => {
+                self.catalog_processor.agent_role_list(params).await
             }
             ClientRequest::CollaborationModeList { params, .. } => {
                 self.catalog_processor.collaboration_mode_list(params).await

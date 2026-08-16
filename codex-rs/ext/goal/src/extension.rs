@@ -264,6 +264,11 @@ where
                 );
                 return;
             }
+            if let Err(err) = runtime.complete_armed_goal_for_turn(turn_id).await {
+                tracing::warn!(
+                    "failed to complete one-shot goal at turn stop for {turn_id}: {err}"
+                );
+            }
             runtime.accounting_state().finish_turn(turn_id);
         })
     }

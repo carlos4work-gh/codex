@@ -746,6 +746,8 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         .thread_manager
         .start_thread_with_options(StartThreadOptions {
             config: test.config.clone(),
+            agent_role: None,
+            root_developer_instructions: None,
             initial_history: InitialHistory::New,
             session_source: Some(SessionSource::SubAgent(SubAgentSource::Review)),
             thread_source: None,
@@ -1355,6 +1357,7 @@ async fn spawn_agent_role_overrides_requested_model_and_reasoning_settings() -> 
                         description: Some("Custom role".to_string()),
                         config_file: Some(role_path.to_path_buf()),
                         nickname_candidates: None,
+                    planner_capabilities: None,
                     },
                 );
             })
@@ -1417,6 +1420,7 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
                 description: Some("Custom role".to_string()),
                 config_file: Some(role_path.to_path_buf()),
                 nickname_candidates: None,
+            planner_capabilities: None,
             },
         );
     });

@@ -86,11 +86,50 @@ impl GoalSetOutcome {
 #[derive(Debug, Default)]
 pub struct GoalService {
     runtimes: Mutex<HashMap<String, Weak<GoalRuntimeHandle>>>,
+    pending_completion_after_turn: Mutex<HashMap<String, String>>,
 }
 
 impl GoalService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn arm_completion_after_next_turn(&self, thread_id: ThreadId, goal_id: String) {
+        let key = thread_id.to_string();
+        self.pending_completions()
+            .insert(key.clone(), goal_id.clone());
+        if let Some(runtime) = self.runtime_for_thread(thread_id) {
+            let armed_goal_id = self.pending_completions().remove(&key).unwrap_or(goal_id);
+            runtime.arm_completion_after_next_turn(armed_goal_id);
+        }
+    }
+
+    pub fn cancel_completion_after_next_turn(&self, thread_id: ThreadId) {
+        self.pending_completions().remove(&thread_id.to_string());
+        if let Some(runtime) = self.runtime_for_thread(thread_id) {
+            runtime.cancel_completion_after_next_turn();
+        }
+    }
+
+    pub async fn arm_current_goal_completion_after_next_turn(
+        &self,
+        state_db: &codex_state::StateRuntime,
+        thread_id: ThreadId,
+    ) -> Result<(), GoalServiceError> {
+        let goal = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
+            })?
+            .ok_or_else(|| {
+                GoalServiceError::Internal(format!(
+                    "cannot arm one-shot completion without a persisted goal for {thread_id}"
+                ))
+            })?;
+        self.arm_completion_after_next_turn(thread_id, goal.goal_id);
+        Ok(())
     }
 
     pub async fn get_thread_goal(
@@ -136,6 +175,10 @@ impl GoalService {
         }
 
         let runtime = self.runtime_for_thread(thread_id);
+        // A normal goal mutation supersedes any previously armed one-shot turn.
+        // The app-server arm path performs this mutation first and arms the
+        // resulting persisted goal immediately afterwards.
+        self.cancel_completion_after_next_turn(thread_id);
         // Hold this through the prepare/write window so idle continuation cannot
         // launch from goal state that this external mutation is about to change.
         let _goal_state_permit = match runtime.as_ref() {
@@ -252,6 +295,7 @@ impl GoalService {
         state_db: &codex_state::StateRuntime,
         thread_id: ThreadId,
     ) -> Result<bool, GoalServiceError> {
+        self.cancel_completion_after_next_turn(thread_id);
         let runtime = self.runtime_for_thread(thread_id);
         // Hold this through the prepare/write window so idle continuation cannot
         // launch from goal state that this external mutation is about to change.
@@ -291,8 +335,12 @@ impl GoalService {
     }
 
     pub(crate) fn register_runtime(&self, runtime: &Arc<GoalRuntimeHandle>) {
+        let key = runtime.thread_id().to_string();
         self.runtimes()
-            .insert(runtime.thread_id().to_string(), Arc::downgrade(runtime));
+            .insert(key.clone(), Arc::downgrade(runtime));
+        if let Some(goal_id) = self.pending_completions().remove(&key) {
+            runtime.arm_completion_after_next_turn(goal_id);
+        }
     }
 
     pub(crate) fn unregister_runtime(&self, runtime: &Arc<GoalRuntimeHandle>) {
@@ -319,5 +367,11 @@ impl GoalService {
 
     fn runtimes(&self) -> std::sync::MutexGuard<'_, HashMap<String, Weak<GoalRuntimeHandle>>> {
         self.runtimes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn pending_completions(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.pending_completion_after_turn
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }

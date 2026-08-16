@@ -2,6 +2,7 @@ use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
 use crate::outgoing_message::ClientRequestResult;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
+use crate::request_processors::MemythosRequestProcessor;
 use crate::request_processors::populate_thread_turns_from_history;
 use crate::request_processors::thread_from_stored_thread;
 use crate::request_processors::thread_settings_from_core_snapshot;
@@ -145,6 +146,7 @@ pub(crate) async fn apply_bespoke_event_handling(
     thread_watch_manager: ThreadWatchManager,
     thread_list_state_permit: Arc<tokio::sync::Semaphore>,
     fallback_model_provider: String,
+    memythos_processor: Arc<std::sync::Mutex<Option<MemythosRequestProcessor>>>,
 ) {
     let Event {
         id: event_turn_id,
@@ -195,6 +197,10 @@ pub(crate) async fn apply_bespoke_event_handling(
                 turn_complete_event,
                 &outgoing,
                 &thread_state,
+                memythos_processor
+                    .lock()
+                    .ok()
+                    .and_then(|processor| processor.clone()),
             )
             .await;
         }
@@ -827,6 +833,26 @@ pub(crate) async fn apply_bespoke_event_handling(
             outgoing
                 .send_server_notification(ServerNotification::ItemStarted(notification))
                 .await;
+            if namespace.as_deref() == Some("memythos_room")
+                && let Some(processor) = memythos_processor
+                    .lock()
+                    .ok()
+                    .and_then(|processor| processor.clone())
+            {
+                let current_thread_id = conversation_id.to_string();
+                tokio::spawn(async move {
+                    crate::dynamic_tools::on_memythos_room_call(
+                        call_id,
+                        current_thread_id,
+                        tool,
+                        arguments,
+                        processor,
+                        conversation,
+                    )
+                    .await;
+                });
+                return;
+            }
             let params = DynamicToolCallParams {
                 thread_id: conversation_id.to_string(),
                 turn_id: turn_id.clone(),
@@ -917,8 +943,17 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::TokenCount(token_count_event) => {
-            handle_token_count_event(conversation_id, event_turn_id, token_count_event, &outgoing)
-                .await;
+            handle_token_count_event(
+                conversation_id,
+                event_turn_id,
+                token_count_event,
+                &outgoing,
+                memythos_processor
+                    .lock()
+                    .ok()
+                    .and_then(|processor| processor.clone()),
+            )
+            .await;
         }
         EventMsg::Error(ev) => {
             thread_watch_manager
@@ -1007,8 +1042,38 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .send_server_notification(ServerNotification::ItemCompleted(completed))
                 .await;
         }
+        EventMsg::ItemCompleted(completed) => {
+            if let codex_protocol::items::TurnItem::AgentMessage(message) = &completed.item
+                && let Some(processor) = memythos_processor
+                    .lock()
+                    .ok()
+                    .and_then(|processor| processor.clone())
+            {
+                let text = message
+                    .content
+                    .iter()
+                    .map(|content| match content {
+                        codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                processor
+                    .record_native_parent_agent_message(
+                        &conversation_id.to_string(),
+                        &completed.turn_id,
+                        &message.id,
+                        text,
+                    )
+                    .await;
+            }
+            let notification = item_event_to_server_notification(
+                EventMsg::ItemCompleted(completed),
+                &conversation_id.to_string(),
+                &event_turn_id,
+            );
+            outgoing.send_server_notification(notification).await;
+        }
         msg @ (EventMsg::ItemStarted(_)
-        | EventMsg::ItemCompleted(_)
         | EventMsg::PatchApplyUpdated(_)
         | EventMsg::TerminalInteraction(_)) => {
             let notification = item_event_to_server_notification(
@@ -1509,6 +1574,7 @@ async fn handle_turn_complete(
     turn_complete_event: TurnCompleteEvent,
     outgoing: &ThreadScopedOutgoingMessageSender,
     thread_state: &Arc<Mutex<ThreadState>>,
+    memythos_processor: Option<MemythosRequestProcessor>,
 ) {
     let turn_summary = find_and_remove_turn_summary(conversation_id, thread_state).await;
 
@@ -1516,6 +1582,13 @@ async fn handle_turn_complete(
         Some(error) => (TurnStatus::Failed, Some(error)),
         None => (TurnStatus::Completed, None),
     };
+    let status_label = turn_status_label(&status);
+    let native_error_message = error.as_ref().map(|error| error.message.clone());
+    let completed_at = turn_complete_event.completed_at;
+    let duration_ms = turn_complete_event.duration_ms;
+    let last_agent_message = turn_complete_event.last_agent_message.clone();
+    let native_thread_id = conversation_id.to_string();
+    let native_turn_id = event_turn_id.clone();
 
     emit_turn_completed_with_status(
         conversation_id,
@@ -1524,12 +1597,35 @@ async fn handle_turn_complete(
             status,
             error,
             started_at: turn_summary.started_at,
-            completed_at: turn_complete_event.completed_at,
-            duration_ms: turn_complete_event.duration_ms,
+            completed_at,
+            duration_ms,
         },
         outgoing,
     )
     .await;
+
+    if let Some(memythos_processor) = memythos_processor {
+        memythos_processor
+            .record_native_turn_completed(
+                &native_thread_id,
+                &native_turn_id,
+                status_label,
+                completed_at,
+                duration_ms,
+                native_error_message,
+                last_agent_message,
+            )
+            .await;
+    }
+}
+
+fn turn_status_label(status: &TurnStatus) -> &'static str {
+    match status {
+        TurnStatus::Completed => "completed",
+        TurnStatus::Interrupted => "interrupted",
+        TurnStatus::Failed => "failed",
+        TurnStatus::InProgress => "in_progress",
+    }
 }
 
 async fn handle_turn_interrupted(
@@ -1613,17 +1709,25 @@ async fn handle_token_count_event(
     turn_id: String,
     token_count_event: TokenCountEvent,
     outgoing: &ThreadScopedOutgoingMessageSender,
+    memythos_processor: Option<MemythosRequestProcessor>,
 ) {
     let TokenCountEvent { info, rate_limits } = token_count_event;
     if let Some(token_usage) = info.map(ThreadTokenUsage::from) {
+        let native_thread_id = conversation_id.to_string();
+        let native_turn_id = turn_id.clone();
         let notification = ThreadTokenUsageUpdatedNotification {
-            thread_id: conversation_id.to_string(),
+            thread_id: native_thread_id.clone(),
             turn_id,
-            token_usage,
+            token_usage: token_usage.clone(),
         };
         outgoing
             .send_server_notification(ServerNotification::ThreadTokenUsageUpdated(notification))
             .await;
+        if let Some(memythos_processor) = memythos_processor {
+            memythos_processor
+                .record_native_token_usage(&native_thread_id, &native_turn_id, &token_usage)
+                .await;
+        }
     }
     if let Some(rate_limits) = rate_limits {
         outgoing
@@ -2404,6 +2508,7 @@ mod tests {
                 self.thread_watch_manager.clone(),
                 Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
                 "test-provider".to_string(),
+                Arc::new(std::sync::Mutex::new(None)),
             )
             .await;
         }
@@ -3363,6 +3468,7 @@ mod tests {
             thread_watch_manager,
             Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             "test-provider".to_string(),
+            Arc::new(std::sync::Mutex::new(None)),
         )
         .await;
 
@@ -3433,6 +3539,7 @@ mod tests {
             thread_watch_manager.clone(),
             Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             "test-provider".to_string(),
+            Arc::new(std::sync::Mutex::new(None)),
         )
         .await;
 
@@ -3505,6 +3612,7 @@ mod tests {
             turn_complete_event(&event_turn_id),
             &outgoing,
             &thread_state,
+            None,
         )
         .await;
 
@@ -3608,6 +3716,7 @@ mod tests {
             turn_complete_event(&event_turn_id),
             &outgoing,
             &thread_state,
+            None,
         )
         .await;
 
@@ -3740,6 +3849,7 @@ mod tests {
                 rate_limits: Some(rate_limits),
             },
             &outgoing,
+            None,
         )
         .await;
 
@@ -3797,6 +3907,7 @@ mod tests {
                 rate_limits: None,
             },
             &outgoing,
+            None,
         )
         .await;
 
@@ -3843,6 +3954,7 @@ mod tests {
             turn_complete_event(&a_turn1),
             &outgoing,
             &thread_state,
+            None,
         )
         .await;
 
@@ -3864,6 +3976,7 @@ mod tests {
             turn_complete_event(&b_turn1),
             &outgoing,
             &thread_state,
+            None,
         )
         .await;
 
@@ -3875,6 +3988,7 @@ mod tests {
             turn_complete_event(&a_turn2),
             &outgoing,
             &thread_state,
+            None,
         )
         .await;
 

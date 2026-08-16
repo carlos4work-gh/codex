@@ -78,6 +78,9 @@
         }
       ]
     },
+    "AgentRoleListParams": {
+      "type": "object"
+    },
     "ApprovalsReviewer": {
       "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
       "enum": [
@@ -1647,6 +1650,671 @@
         "tool"
       ],
       "type": "object"
+    },
+    "MemythosArenaAggregateContract": {
+      "properties": {
+        "aggregateId": {
+          "type": "string"
+        },
+        "completionCriteriaRef": {
+          "type": "string"
+        },
+        "deadlineRef": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedSourceThreadIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "lateArrivalPolicy": {
+          "$ref": "#/definitions/MemythosArenaLateArrivalPolicy"
+        },
+        "phaseId": {
+          "type": "string"
+        },
+        "quorum": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "recipientThreadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "aggregateId",
+        "completionCriteriaRef",
+        "expectedSourceThreadIds",
+        "lateArrivalPolicy",
+        "phaseId",
+        "quorum",
+        "recipientThreadId"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaComparableCostEvidence": {
+      "properties": {
+        "acceptedResult": {
+          "type": "boolean"
+        },
+        "comparabilityRationale": {
+          "type": "string"
+        },
+        "evidenceRef": {
+          "type": "string"
+        },
+        "tokensUsed": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "acceptedResult",
+        "comparabilityRationale",
+        "evidenceRef",
+        "tokensUsed"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaCompositionContract": {
+      "properties": {
+        "arenaId": {
+          "type": "string"
+        },
+        "completionCriteria": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "contractVersion": {
+          "type": "string"
+        },
+        "coordination": {
+          "$ref": "#/definitions/MemythosArenaCompositionCoordination"
+        },
+        "costEnvelope": {
+          "$ref": "#/definitions/MemythosArenaCostEnvelope"
+        },
+        "effortRationale": {
+          "type": "string"
+        },
+        "participants": {
+          "items": {
+            "$ref": "#/definitions/MemythosArenaCompositionParticipant"
+          },
+          "type": "array"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "sharedObjective": {
+          "type": "string"
+        },
+        "unresolvedRoleGap": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "arenaId",
+        "completionCriteria",
+        "contractVersion",
+        "coordination",
+        "costEnvelope",
+        "effortRationale",
+        "participants",
+        "rationale",
+        "sharedObjective"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaCompositionCoordination": {
+      "properties": {
+        "conciergeParticipantId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coordinatorParticipantId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decisionMethod": {
+          "$ref": "#/definitions/MemythosArenaDecisionMethod"
+        },
+        "judgeParticipantId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roundPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MemythosArenaRoundPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "decisionMethod"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaCompositionParticipant": {
+      "properties": {
+        "agentRole": {
+          "type": "string"
+        },
+        "authorityScope": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "effortIntent": {
+          "type": "string"
+        },
+        "exitCondition": {
+          "type": "string"
+        },
+        "expectedContribution": {
+          "type": "string"
+        },
+        "participantId": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            }
+          ],
+          "description": "Native app-server effort applied to every turn for this parent in the arena. The composition planner selects it from the OOTB ReasoningEffort values."
+        },
+        "roleObjective": {
+          "type": "string"
+        },
+        "stance": {
+          "type": "string"
+        },
+        "tokenBudget": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agentRole",
+        "effortIntent",
+        "exitCondition",
+        "expectedContribution",
+        "participantId",
+        "reasoningEffort",
+        "roleObjective",
+        "stance"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaCompositionRevision": {
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/definitions/MemythosArenaCompositionRevisionAction"
+          },
+          "type": "array"
+        },
+        "nextVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "previousContractRef": {
+          "type": "string"
+        },
+        "previousVersion": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "revisionId": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "actions",
+        "nextVersion",
+        "previousContractRef",
+        "previousVersion",
+        "rationale",
+        "revisionId",
+        "trigger"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaCompositionRevisionAction": {
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/MemythosArenaCompositionRevisionActionKind"
+        },
+        "participantId": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "participantId",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaCompositionRevisionActionKind": {
+      "enum": [
+        "add",
+        "keep",
+        "retire"
+      ],
+      "type": "string"
+    },
+    "MemythosArenaCostContext": {
+      "properties": {
+        "comparableEvidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MemythosArenaComparableCostEvidence"
+          },
+          "type": "array"
+        },
+        "explicitTokenCap": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MemythosArenaCostEnvelope": {
+      "properties": {
+        "baselineRefs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "coordinationTokenBudget": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exhaustionPolicy": {
+          "$ref": "#/definitions/MemythosArenaCostExhaustionPolicy"
+        },
+        "methodIntegrityFunded": {
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/definitions/MemythosArenaCostEnvelopeMode"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "substantiveTokenBudget": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "totalTokenBudget": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "exhaustionPolicy",
+        "methodIntegrityFunded",
+        "mode",
+        "rationale"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaCostEnvelopeMode": {
+      "enum": [
+        "open",
+        "calibrated",
+        "explicit_cap"
+      ],
+      "type": "string"
+    },
+    "MemythosArenaCostExhaustionPolicy": {
+      "enum": [
+        "wrap_up_then_replan",
+        "request_expansion",
+        "change_method"
+      ],
+      "type": "string"
+    },
+    "MemythosArenaDecisionMethod": {
+      "enum": [
+        "single_expert",
+        "expert_review",
+        "ranked_selection",
+        "competitive_debate",
+        "betting_round"
+      ],
+      "type": "string"
+    },
+    "MemythosArenaDeliveryPolicy": {
+      "enum": [
+        "immediate",
+        "queue_only",
+        "aggregate_then_trigger"
+      ],
+      "type": "string"
+    },
+    "MemythosArenaKind": {
+      "enum": [
+        "discovery",
+        "debate",
+        "parentRollup",
+        "humanDiscovery",
+        "settlement",
+        "implementation"
+      ],
+      "type": "string"
+    },
+    "MemythosArenaLateArrivalPolicy": {
+      "enum": [
+        "reject",
+        "queue_without_retrigger"
+      ],
+      "type": "string"
+    },
+    "MemythosArenaMessage": {
+      "properties": {
+        "aggregateContract": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MemythosArenaAggregateContract"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "arenaId": {
+          "type": "string"
+        },
+        "artifactRefs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "caseId": {
+          "type": "string"
+        },
+        "contextPacketRef": {
+          "type": "string"
+        },
+        "deliveryPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MemythosArenaDeliveryPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "executionPrompt": {
+          "default": null,
+          "description": "Prompt delivered to the target parent turn. When absent, human_summary is used. Keeping it separate prevents protocol-only constraints from polluting room dialogue.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fromParentRole": {
+          "type": "string"
+        },
+        "fromParentThreadId": {
+          "type": "string"
+        },
+        "humanSummary": {
+          "type": "string"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "messageKind": {
+          "type": "string"
+        },
+        "outputSchema": {
+          "default": null,
+          "description": "Native Responses API schema applied to the target parent turn. This travels with mailbox delivery so aggregate checkpoints keep the same output boundary as an OOTB turn/start request."
+        },
+        "requiresResponse": {
+          "type": "boolean"
+        },
+        "responseContract": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roundId": {
+          "type": "string"
+        },
+        "toParentRole": {
+          "type": "string"
+        },
+        "toParentThreadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arenaId",
+        "caseId",
+        "contextPacketRef",
+        "fromParentRole",
+        "fromParentThreadId",
+        "humanSummary",
+        "messageId",
+        "messageKind",
+        "requiresResponse",
+        "roundId",
+        "toParentRole",
+        "toParentThreadId"
+      ],
+      "type": "object"
+    },
+    "MemythosArenaResumeContext": {
+      "properties": {
+        "candidateChangeRefs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "openImplementationScope": {
+          "default": [],
+          "description": "Downstream implementation questions that remain open without reopening business decisions.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "previousDecisionRefs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "previousEvidenceRefs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "protectedDecisions": {
+          "default": [],
+          "description": "Decisions that remain authoritative unless cited evidence materially invalidates them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "revisableSettlement": {
+          "default": [],
+          "description": "Prior hypotheses, weights, or interpretations that new evidence may revise.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "MemythosArenaRoundPolicy": {
+      "properties": {
+        "crossReadRequired": {
+          "type": "boolean"
+        },
+        "explicitBetRequired": {
+          "type": "boolean"
+        },
+        "minimumCompetingPositions": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "objectionRequired": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "crossReadRequired",
+        "explicitBetRequired",
+        "minimumCompetingPositions",
+        "objectionRequired"
+      ],
+      "type": "object"
+    },
+    "MemythosLayerKind": {
+      "enum": [
+        "strategic",
+        "bpmEndToEnd",
+        "tacticalOperational",
+        "implementationReality",
+        "humanSettlement"
+      ],
+      "type": "string"
+    },
+    "MemythosRoomParticipant": {
+      "properties": {
+        "authorityScope": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "goalRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parentKey": {
+          "type": "string"
+        },
+        "parentRole": {
+          "type": "string"
+        },
+        "stanceProfile": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "parentKey",
+        "parentRole",
+        "stanceProfile",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "MemythosThreadConsolidationAuthorityMode": {
+      "enum": [
+        "peerCoordination",
+        "parentRollup",
+        "judgeBriefing",
+        "scrumMasterBriefing",
+        "humanInterlocutor",
+        "childLayerResume"
+      ],
+      "type": "string"
+    },
+    "MemythosThreadConsolidationPurpose": {
+      "enum": [
+        "arenaRoundConsolidation",
+        "parentRollup",
+        "judgeBriefing",
+        "scrumMasterBriefing",
+        "humanInterlocutor",
+        "childLayerResume"
+      ],
+      "type": "string"
     },
     "MergeStrategy": {
       "enum": [
@@ -4240,6 +4908,13 @@
     },
     "ThreadStartParams": {
       "properties": {
+        "agentRole": {
+          "description": "Named agent role applied to this root thread using the same role configuration mechanism used by spawned agents. This does not create a parent-child relationship.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "approvalPolicy": {
           "anyOf": [
             {
@@ -6128,6 +6803,30 @@
         "params"
       ],
       "title": "PermissionProfile/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "agentRole/list"
+          ],
+          "title": "AgentRole/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AgentRoleListParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "AgentRole/listRequest",
       "type": "object"
     },
     {

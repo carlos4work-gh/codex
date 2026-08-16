@@ -61,6 +61,51 @@ fn test_absolute_path() -> AbsolutePathBuf {
 }
 
 #[test]
+fn memythos_agent_role_catalog_response_uses_stable_camel_case_contract() {
+    let response = AgentRoleListResponse {
+        roles: vec![AgentRoleListEntry {
+            id: "bettor".to_string(),
+            description: Some("Develop an independent position.".to_string()),
+            origin: AgentRoleOrigin::UserConfigured,
+            has_locked_runtime_settings: true,
+            planner_capabilities: Some(AgentRolePlannerCapabilities {
+                work_modes: vec!["competitive_debate".to_string()],
+                allowed_stances: vec!["growth".to_string(), "risk".to_string()],
+                required_companions: vec!["judge".to_string()],
+                supports_multiple_stances: true,
+                proposal_bearing: true,
+                ..Default::default()
+            }),
+        }],
+    };
+
+    assert_eq!(
+        serde_json::to_value(response).expect("serialize agent role catalog"),
+        json!({
+            "roles": [{
+                "id": "bettor",
+                "description": "Develop an independent position.",
+                "origin": "userConfigured",
+                "hasLockedRuntimeSettings": true,
+                "plannerCapabilities": {
+                    "workModes": ["competitive_debate"],
+                    "problemClasses": [],
+                    "authorityScopes": [],
+                    "participantKinds": [],
+                    "requiredCompanions": ["judge"],
+                    "incompatibleRoles": [],
+                    "allowedStances": ["growth", "risk"],
+                    "relativeCost": null,
+                    "relativeToolUse": null,
+                    "supportsMultipleStances": true,
+                    "proposalBearing": true
+                }
+            }]
+        })
+    );
+}
+
+#[test]
 fn thread_sources_round_trip_as_scalar_labels() {
     for (source, label) in [
         (ThreadSource::User, "user"),
@@ -4013,4 +4058,89 @@ fn realtime_append_text_defaults_role_to_user() {
             role: ConversationTextRole::User,
         }
     );
+}
+
+#[test]
+fn memythos_room_native_alias_methods_deserialize() {
+    let create = serde_json::from_value::<crate::ClientRequest>(json!({
+        "method": "memythos/room/create",
+        "id": 1,
+        "params": {
+            "roomId": "room-001",
+            "caseId": "case-001",
+            "layerId": "layer-001",
+            "arenaId": "arena-001",
+            "topology": "room_concierge",
+            "participants": []
+        }
+    }))
+    .expect("room/create should deserialize");
+    assert_eq!(create.method(), "memythos/room/create");
+
+    let timeline = serde_json::from_value::<crate::ClientRequest>(json!({
+        "method": "memythos/room/timeline/get",
+        "id": 2,
+        "params": {
+            "roomId": "room-001",
+            "limit": 20,
+            "includeDebugRefs": false
+        }
+    }))
+    .expect("room/timeline/get should deserialize");
+    assert_eq!(timeline.method(), "memythos/room/timeline/get");
+
+    let send = serde_json::from_value::<crate::ClientRequest>(json!({
+        "method": "memythos/room/send",
+        "id": 3,
+        "params": {
+            "roomId": "room-001",
+            "roomMessageRef": "app-server://rooms/room-001/messages/message-001",
+            "deliveryRef": "app-server://rooms/room-001/deliveries/delivery-001",
+            "fromParentThreadId": "thread-a",
+            "viaConciergeThreadId": "thread-concierge",
+            "toParentThreadId": "thread-b",
+            "sourceParentKey": "parent-a",
+            "targetParentKey": "parent-b",
+            "messageKind": "ask_position",
+            "messageAuthority": "peer_debate",
+            "humanInstruction": false,
+            "humanSummary": "Ask the peer to challenge the proposal.",
+            "responseContract": "natural_parent_closure",
+            "clientUserMessageId": "message-001",
+            "prompt": "No soy humano; soy peer de arena. Responde desde tu postura.",
+            "metadata": {},
+            "outputSchema": null
+        }
+    }))
+    .expect("room/send should deserialize");
+    assert_eq!(send.method(), "memythos/room/send");
+
+    let message_read = serde_json::from_value::<crate::ClientRequest>(json!({
+        "method": "memythos/arena/message/read",
+        "id": 31,
+        "params": {
+            "arenaId": "arena-001",
+            "messageId": "message-001"
+        }
+    }))
+    .expect("arena message read should deserialize");
+    assert_eq!(message_read.method(), "memythos/arena/message/read");
+
+    let contract_emit = serde_json::from_value::<crate::ClientRequest>(json!({
+        "method": "memythos/room/contract/emit",
+        "id": 4,
+        "params": {
+            "coordinatorThreadId": "thread-concierge",
+            "sourceThreadIds": ["thread-a"],
+            "sinceCursors": {},
+            "itemsView": "summary",
+            "contractKind": "room_round_contract",
+            "instructions": "Assemble closed room contract.",
+            "perSourceLimit": 2,
+            "clientUserMessageId": "contract-001",
+            "outputSchema": {"type": "object"}
+        }
+    }))
+    .expect("room/contract/emit should deserialize");
+    assert_eq!(contract_emit.method(), "memythos/room/contract/emit");
 }

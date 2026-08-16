@@ -57,6 +57,7 @@ use codex_rollout::state_db::StateDbHandle;
 
 #[derive(Clone, Debug)]
 pub struct ThreadConfigSnapshot {
+    pub agent_role: Option<String>,
     pub model: String,
     pub model_provider_id: String,
     pub service_tier: Option<String>,

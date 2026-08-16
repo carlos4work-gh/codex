@@ -412,6 +412,7 @@ pub struct CodexSpawnOk {
 
 pub(crate) struct CodexSpawnArgs {
     pub(crate) config: Config,
+    pub(crate) agent_role: Option<String>,
     pub(crate) user_instructions: LoadedUserInstructions,
     pub(crate) installation_id: String,
     pub(crate) auth_manager: Arc<AuthManager>,
@@ -501,6 +502,7 @@ impl Codex {
     async fn spawn_internal(args: CodexSpawnArgs) -> CodexResult<CodexSpawnOk> {
         let CodexSpawnArgs {
             mut config,
+            agent_role,
             user_instructions,
             installation_id,
             auth_manager,
@@ -618,6 +620,7 @@ impl Codex {
             &model_info,
         );
         let session_configuration = SessionConfiguration {
+            agent_role,
             provider: config.model_provider.clone(),
             collaboration_mode,
             multi_agent_mode,

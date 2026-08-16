@@ -6,6 +6,7 @@ use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
+use codex_app_server_protocol::AgentRoleListResponse;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
@@ -195,6 +196,101 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
     let started: ThreadStartedNotification =
         serde_json::from_value(notif.params.expect("params must be present"))?;
     assert_eq!(started.thread, thread);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn memythos_agent_role_catalog_id_is_accepted_by_thread_start() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+
+    let roles_dir = codex_home.path().join("agents");
+    std::fs::create_dir_all(&roles_dir)?;
+    std::fs::write(
+        roles_dir.join("room_concierge.toml"),
+        r#"
+name = "room_concierge"
+description = "Coordinates peer dialogue without business authority"
+developer_instructions = "Coordinate the room and preserve each peer's independent authority."
+personality = "pragmatic"
+"#,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let list_request_id = mcp.send_agent_role_list_request().await?;
+    let list_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_request_id)),
+    )
+    .await??;
+    let catalog = to_response::<AgentRoleListResponse>(list_response)?;
+    assert!(catalog.roles.iter().any(|role| role.id == "room_concierge"));
+
+    let request_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            agent_role: Some("room_concierge".to_string()),
+            developer_instructions: Some(
+                "Coordinate arena-bpm-e2e until native room evidence satisfies its completion criteria."
+                    .to_string(),
+            ),
+            thread_source: Some(ThreadSource::User),
+            ..Default::default()
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(response)?;
+
+    assert_eq!(thread.agent_role.as_deref(), Some("room_concierge"));
+    assert_eq!(thread.parent_thread_id, None);
+
+    let turn_request_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            input: vec![V2UserInput::Text {
+                text: "Open the room discussion.".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_request_id)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let requests = server
+        .received_requests()
+        .await
+        .context("failed to fetch received requests")?;
+    let model_request = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .context("expected model request")?;
+    let model_request_body = model_request
+        .body_json::<Value>()
+        .context("model request body should be JSON")?
+        .to_string();
+    assert!(
+        model_request_body
+            .contains("Coordinate the room and preserve each peer's independent authority.")
+    );
+    assert!(model_request_body.contains(
+        "Coordinate arena-bpm-e2e until native room evidence satisfies its completion criteria."
+    ));
 
     Ok(())
 }

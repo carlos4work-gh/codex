@@ -49,6 +49,46 @@ fn session_flags_layer_count(config: &Config) -> usize {
 }
 
 #[tokio::test]
+async fn memythos_effective_role_catalog_uses_user_precedence_and_exposes_planner_capabilities() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.agent_roles.insert(
+        DEFAULT_ROLE_NAME.to_string(),
+        AgentRoleConfig {
+            description: Some("User-defined default role".to_string()),
+            planner_capabilities: Some(
+                codex_config::config_toml::AgentRolePlannerCapabilitiesToml {
+                    work_modes: vec!["competitive_debate".to_string()],
+                    proposal_bearing: true,
+                    supports_multiple_stances: true,
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        },
+    );
+
+    let catalog = effective_role_catalog(&config);
+    let default_role = catalog
+        .iter()
+        .find(|entry| entry.id == DEFAULT_ROLE_NAME)
+        .expect("default role must be present");
+
+    assert_eq!(default_role.origin, AgentRoleOrigin::UserConfigured);
+    assert_eq!(
+        default_role.config.description.as_deref(),
+        Some("User-defined default role")
+    );
+    let capabilities = default_role
+        .config
+        .planner_capabilities
+        .as_ref()
+        .expect("planner capabilities must be exposed");
+    assert_eq!(capabilities.work_modes, ["competitive_debate"]);
+    assert!(capabilities.proposal_bearing);
+    assert!(capabilities.supports_multiple_stances);
+}
+
+#[tokio::test]
 async fn apply_role_defaults_to_default_and_leaves_config_unchanged() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let before = config.clone();
@@ -111,6 +151,7 @@ async fn apply_role_returns_unavailable_for_missing_user_role_file() {
             description: None,
             config_file: Some(PathBuf::from("/path/does/not/exist.toml")),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
 
@@ -131,6 +172,7 @@ async fn apply_role_returns_unavailable_for_invalid_user_role_toml() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
 
@@ -162,6 +204,7 @@ model = "role-model"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
 
@@ -193,6 +236,7 @@ async fn apply_role_preserves_unspecified_keys() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
 
@@ -229,6 +273,7 @@ service_tier = "priority"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
 
@@ -259,6 +304,7 @@ async fn apply_role_preserves_existing_service_tier_without_override() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
 
@@ -303,6 +349,7 @@ writable_roots = ["./sandbox-root"]
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
 
@@ -365,6 +412,7 @@ async fn apply_role_takes_precedence_over_existing_session_flags_for_same_key() 
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
 
@@ -408,6 +456,7 @@ enabled = false
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
 
@@ -449,6 +498,7 @@ fn spawn_tool_spec_build_deduplicates_user_defined_built_in_roles() {
                 description: Some("user override".to_string()),
                 config_file: None,
                 nickname_candidates: None,
+                planner_capabilities: None,
             },
         ),
         ("researcher".to_string(), AgentRoleConfig::default()),
@@ -470,6 +520,7 @@ fn spawn_tool_spec_lists_user_defined_roles_before_built_ins() {
             description: Some("first".to_string()),
             config_file: None,
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     )]);
 
@@ -497,6 +548,7 @@ fn spawn_tool_spec_marks_role_locked_model_and_reasoning_effort() {
             description: Some("Research carefully.".to_string()),
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     )]);
 
@@ -522,6 +574,7 @@ fn spawn_tool_spec_marks_role_locked_reasoning_effort_only() {
             description: Some("Review carefully.".to_string()),
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     )]);
 
@@ -547,6 +600,7 @@ fn spawn_tool_spec_marks_role_locked_service_tier() {
             description: Some("Stay fast.".to_string()),
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     )]);
 

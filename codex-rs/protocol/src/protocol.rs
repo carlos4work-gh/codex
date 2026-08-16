@@ -698,6 +698,9 @@ pub struct InterAgentCommunication {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub metadata: Option<ResponseItemMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub final_output_json_schema: Option<Value>,
     pub trigger_turn: bool,
 }
 
@@ -716,6 +719,7 @@ impl InterAgentCommunication {
             content,
             encrypted_content: None,
             metadata: None,
+            final_output_json_schema: None,
             trigger_turn,
         }
     }
@@ -734,8 +738,14 @@ impl InterAgentCommunication {
             content: String::new(),
             encrypted_content: Some(encrypted_content),
             metadata: None,
+            final_output_json_schema: None,
             trigger_turn,
         }
+    }
+
+    pub fn with_final_output_json_schema(mut self, schema: Option<Value>) -> Self {
+        self.final_output_json_schema = schema;
+        self
     }
 
     pub fn to_response_input_item(&self) -> ResponseInputItem {
@@ -2589,6 +2599,11 @@ impl InitialHistory {
     pub fn get_resumed_parent_thread_id(&self) -> Option<ThreadId> {
         self.get_resumed_session_meta()
             .and_then(|meta| meta.parent_thread_id)
+    }
+
+    pub fn get_resumed_agent_role(&self) -> Option<String> {
+        self.get_resumed_session_meta()
+            .and_then(|meta| meta.agent_role.clone())
     }
 
     fn get_resumed_session_meta(&self) -> Option<&SessionMeta> {

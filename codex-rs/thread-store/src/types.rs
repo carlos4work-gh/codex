@@ -73,6 +73,9 @@ pub struct CreateThreadParams {
     pub parent_thread_id: Option<ThreadId>,
     /// Runtime source for the thread.
     pub source: SessionSource,
+    /// Named role selected for this thread independently of its runtime source.
+    #[serde(default)]
+    pub agent_role: Option<String>,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
     /// Base instructions persisted in session metadata.

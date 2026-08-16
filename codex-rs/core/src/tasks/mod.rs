@@ -456,9 +456,16 @@ impl Session {
     ///
     /// This helper generates a fresh sub-id for the synthetic turn before delegating to the
     /// explicit-sub-id variant.
-    pub(crate) async fn maybe_start_turn_for_pending_work(self: &Arc<Self>) {
-        self.maybe_start_turn_for_pending_work_with_sub_id(uuid::Uuid::new_v4().to_string())
-            .await;
+    pub(crate) fn maybe_start_turn_for_pending_work(self: &Arc<Self>) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let sub_id = self
+                .input_queue
+                .pending_trigger_turn_submission_id()
+                .await
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            self.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
+                .await;
+        })
     }
 
     /// Starts a regular turn with the provided sub-id when pending work should wake an idle
@@ -466,27 +473,41 @@ impl Session {
     ///
     /// The turn is created only when there is mailbox mail marked with `trigger_turn`, and only
     /// if the session is currently idle.
-    pub(crate) async fn maybe_start_turn_for_pending_work_with_sub_id(
+    pub(crate) fn maybe_start_turn_for_pending_work_with_sub_id(
         self: &Arc<Self>,
         sub_id: String,
-    ) {
-        if !self.input_queue.has_trigger_turn_mailbox_items().await {
-            return;
-        }
-
-        {
-            let mut active_turn = self.active_turn.lock().await;
-            if active_turn.is_some() {
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if !self.input_queue.has_trigger_turn_mailbox_items().await {
                 return;
             }
-            *active_turn = Some(ActiveTurn::default());
-        }
 
-        let turn_context = self.new_default_turn_with_sub_id(sub_id).await;
-        self.maybe_emit_unknown_model_warning_for_turn(turn_context.as_ref())
-            .await;
-        self.start_task(turn_context, Vec::new(), RegularTask::new())
-            .await;
+            {
+                let mut active_turn = self.active_turn.lock().await;
+                if active_turn.is_some() {
+                    return;
+                }
+                *active_turn = Some(ActiveTurn::default());
+            }
+
+            let input = self
+                .input_queue
+                .drain_mailbox_input_items_for_turn(Some(&sub_id))
+                .await;
+            let final_output_json_schema = input.iter().find_map(|item| match item {
+                TurnInput::InterAgentCommunication(communication) if communication.trigger_turn => {
+                    communication.final_output_json_schema.clone()
+                }
+                _ => None,
+            });
+            let turn_context = self
+                .new_default_turn_with_sub_id_and_schema(sub_id, final_output_json_schema)
+                .await;
+            self.maybe_emit_unknown_model_warning_for_turn(turn_context.as_ref())
+                .await;
+            self.start_task(turn_context, input, RegularTask::new())
+                .await;
+        })
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
@@ -796,6 +817,10 @@ impl Session {
         if !cleared_active_turn {
             return;
         }
+        // Mail marked `trigger_turn` can arrive while the current task is active. The enqueue
+        // path cannot wake the session in that case, so normal task completion must give the
+        // pending-work scheduler another chance before declaring the thread idle.
+        self.maybe_start_turn_for_pending_work().await;
         self.emit_thread_idle_lifecycle_if_idle().await;
     }
 

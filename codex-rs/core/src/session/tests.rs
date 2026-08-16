@@ -166,6 +166,7 @@ use opentelemetry_sdk::metrics::data::MetricData;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
 use std::path::Path;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
 use tokio::time::timeout;
@@ -3401,6 +3402,7 @@ async fn set_rate_limits_retains_previous_credits() {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -3508,6 +3510,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -3755,6 +3758,7 @@ async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            agent_role: None,
             thread_source: None,
             base_instructions: BaseInstructions::default(),
             dynamic_tools: Vec::new(),
@@ -4036,6 +4040,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     }
@@ -4552,6 +4557,7 @@ enabled = false
             description: None,
             config_file: Some(role_path.to_path_buf()),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
     crate::agent::role::apply_role_to_config(&mut child_config, Some("custom"))
@@ -4903,6 +4909,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -5016,6 +5023,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -5262,6 +5270,7 @@ async fn make_session_with_config_and_rx(
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -5369,6 +5378,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools: Vec::new(),
         user_shell_override: None,
     };
@@ -6595,6 +6605,7 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            agent_role: None,
             thread_source: None,
             base_instructions: BaseInstructions::default(),
             dynamic_tools: Vec::new(),
@@ -7076,6 +7087,7 @@ where
         forked_from_thread_id: None,
         parent_thread_id: None,
         thread_source: None,
+        agent_role: None,
         dynamic_tools,
         user_shell_override: None,
     };
@@ -8705,6 +8717,33 @@ impl SessionTask for CompletingTask {
     }
 }
 
+struct GatedCompletingTask {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl SessionTask for GatedCompletingTask {
+    fn kind(&self) -> TaskKind {
+        TaskKind::Regular
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.gated_completing"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        _session: Arc<SessionTaskContext>,
+        _ctx: Arc<TurnContext>,
+        _input: Vec<TurnInput>,
+        _cancellation_token: CancellationToken,
+    ) -> SessionTaskResult {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(None)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct NeverEndingTask {
     kind: TaskKind,
@@ -9113,6 +9152,83 @@ async fn task_finish_emits_thread_idle_lifecycle_after_active_turn_clears() {
         .expect("idle receiver open");
     assert_eq!(1, calls.load(std::sync::atomic::Ordering::SeqCst));
     assert!(session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_finish_starts_pending_trigger_turn_mailbox_work_before_thread_idle() {
+    let (sess, turn_context, rx) = make_session_and_context_with_rx().await;
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let first_turn_id = turn_context.sub_id.clone();
+
+    sess.spawn_task(
+        turn_context,
+        Vec::new(),
+        GatedCompletingTask {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        },
+    )
+    .await;
+    timeout(StdDuration::from_secs(2), started.notified())
+        .await
+        .expect("first task should start");
+
+    let deferred_turn_id = "mail-arrived-during-active-turn".to_string();
+    handlers::inter_agent_communication(
+        &sess,
+        deferred_turn_id.clone(),
+        InterAgentCommunication::new(
+            AgentPath::try_from("/root/worker").expect("worker path should parse"),
+            AgentPath::root(),
+            Vec::new(),
+            "wake after normal completion".to_string(),
+            /*trigger_turn*/ true,
+        )
+        .with_final_output_json_schema(Some(serde_json::json!({
+            "type": "object",
+            "properties": {"winner": {"type": "string"}},
+            "required": ["winner"],
+            "additionalProperties": false
+        }))),
+    )
+    .await;
+    assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
+
+    release.notify_one();
+
+    let second_turn_id = timeout(StdDuration::from_secs(2), async {
+        loop {
+            let event = rx.recv().await.expect("event channel open");
+            if let EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) = event.msg
+                && turn_id != first_turn_id
+            {
+                break turn_id;
+            }
+        }
+    })
+    .await
+    .expect("pending trigger-turn mail should start a new turn after normal completion");
+
+    assert_eq!(deferred_turn_id, second_turn_id);
+    assert_ne!(first_turn_id, second_turn_id);
+    assert!(!sess.input_queue.has_trigger_turn_mailbox_items().await);
+    let active_turn = sess.active_turn.lock().await;
+    let applied_schema = active_turn
+        .as_ref()
+        .and_then(|turn| turn.task.as_ref())
+        .and_then(|task| task.turn_context.final_output_json_schema.as_ref());
+    assert_eq!(
+        applied_schema,
+        Some(&serde_json::json!({
+            "type": "object",
+            "properties": {"winner": {"type": "string"}},
+            "required": ["winner"],
+            "additionalProperties": false
+        }))
+    );
+    drop(active_turn);
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 
 #[tokio::test]

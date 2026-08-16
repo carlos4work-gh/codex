@@ -16,6 +16,7 @@ use codex_rollout::state_db::StateDbHandle;
 use codex_utils_path_uri::LegacyAppPathString;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::Weak;
@@ -26,6 +27,7 @@ use tokio::sync::watch;
 use tracing::error;
 
 type PendingInterruptQueue = Vec<ConnectionRequestId>;
+const TERMINAL_TURN_SNAPSHOT_LIMIT: usize = 32;
 
 pub(crate) struct PendingThreadResumeRequest {
     pub(crate) request_id: ConnectionRequestId,
@@ -78,6 +80,7 @@ pub(crate) struct ThreadState {
     pub(crate) pending_rollbacks: Option<ConnectionRequestId>,
     pub(crate) turn_summary: TurnSummary,
     pub(crate) last_terminal_turn_id: Option<String>,
+    terminal_turn_snapshots: VecDeque<Turn>,
     pub(crate) cancel_tx: Option<oneshot::Sender<()>>,
     pub(crate) experimental_raw_events: bool,
     pub(crate) listener_generation: u64,
@@ -139,6 +142,14 @@ impl ThreadState {
         self.current_turn_history.active_turn_snapshot()
     }
 
+    pub(crate) fn terminal_turn_snapshot(&self, turn_id: &str) -> Option<Turn> {
+        self.terminal_turn_snapshots
+            .iter()
+            .rev()
+            .find(|turn| turn.id == turn_id)
+            .cloned()
+    }
+
     pub(crate) fn track_current_turn_event(&mut self, event_turn_id: &str, event: &EventMsg) {
         if let EventMsg::TurnStarted(payload) = event {
             self.turn_summary.started_at = payload.started_at;
@@ -147,6 +158,14 @@ impl ThreadState {
         if matches!(event, EventMsg::TurnAborted(_) | EventMsg::TurnComplete(_))
             && !self.current_turn_history.has_active_turn()
         {
+            if let Some(turn) = self.current_turn_history.turn_snapshot(event_turn_id) {
+                self.terminal_turn_snapshots
+                    .retain(|snapshot| snapshot.id != event_turn_id);
+                self.terminal_turn_snapshots.push_back(turn);
+                while self.terminal_turn_snapshots.len() > TERMINAL_TURN_SNAPSHOT_LIMIT {
+                    self.terminal_turn_snapshots.pop_front();
+                }
+            }
             self.last_terminal_turn_id = Some(event_turn_id.to_string());
             self.current_turn_history.reset();
         }
@@ -200,6 +219,10 @@ mod tests {
     use codex_protocol::config_types::CollaborationMode;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
+    use codex_protocol::protocol::CodexErrorInfo;
+    use codex_protocol::protocol::ErrorEvent;
+    use codex_protocol::protocol::TurnCompleteEvent;
+    use codex_protocol::protocol::TurnStartedEvent;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
 
@@ -217,6 +240,51 @@ mod tests {
         ];
 
         assert_eq!(results, vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn memythos_terminal_turn_snapshot_preserves_native_failure_after_history_reset() {
+        let mut state = ThreadState::default();
+        state.track_current_turn_event(
+            "turn-failed",
+            &EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-failed".to_string(),
+                trace_id: None,
+                started_at: Some(10),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+        );
+        state.track_current_turn_event(
+            "turn-failed",
+            &EventMsg::Error(ErrorEvent {
+                message: "Selected model is at capacity.".to_string(),
+                codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
+            }),
+        );
+        state.track_current_turn_event(
+            "turn-failed",
+            &EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-failed".to_string(),
+                last_agent_message: None,
+                completed_at: Some(11),
+                duration_ms: Some(1_000),
+                time_to_first_token_ms: None,
+            }),
+        );
+
+        assert!(state.active_turn_snapshot().is_none());
+        let snapshot = state
+            .terminal_turn_snapshot("turn-failed")
+            .expect("terminal turn should remain available to native consumers");
+        assert_eq!(
+            snapshot.status,
+            codex_app_server_protocol::TurnStatus::Failed
+        );
+        assert_eq!(
+            snapshot.error.as_ref().map(|error| error.message.as_str()),
+            Some("Selected model is at capacity.")
+        );
     }
 
     fn thread_settings(model: &str) -> ThreadSettings {

@@ -267,6 +267,13 @@
     }
   },
   "properties": {
+    "agentRole": {
+      "description": "Named agent role applied to this root thread using the same role configuration mechanism used by spawned agents. This does not create a parent-child relationship.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "approvalPolicy": {
       "anyOf": [
         {
