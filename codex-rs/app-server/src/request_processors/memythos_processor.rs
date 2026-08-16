@@ -10892,7 +10892,6 @@ fn validate_thread_contract_assemble_request(
     Ok(())
 }
 
-
 #[cfg(test)]
 #[path = "memythos_processor_tests.rs"]
 mod tests;
