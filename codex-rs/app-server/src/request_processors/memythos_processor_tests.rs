@@ -2613,6 +2613,65 @@ async fn arena_request_owns_planning_provisioning_and_initial_activation() {
     assert_eq!(state.arena_message_deliveries.len(), 2);
 }
 
+#[tokio::test]
+async fn arena_request_state_survives_the_request_connection_boundary() {
+    let contract = competitive_composition_params().contract;
+    let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+        AppServerRpcTransport::InProcess,
+        Arc::new(FakeLivePeerParentDeliveryAdapter),
+        Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+        Arc::new(RecordOnlyThreadConsolidationAdapter),
+        Arc::new(RecordOnlyParentTurnResponseAdapter),
+        Arc::new(CompositionParentConfigurationAdapter),
+        Arc::new(FakeArenaParentProvisioningAdapter::default()),
+        Arc::new(FakeArenaCompositionPlanningAdapter { contract }),
+    );
+
+    let response = processor
+        .arena_request(semantic_arena_request_params(), ConnectionId(41))
+        .await
+        .expect("the ephemeral requester should hand the arena to app-server");
+    let ClientResponsePayload::MemythosArenaRequest(response) = response else {
+        panic!("expected semantic arena request response");
+    };
+    let round_id = response
+        .initial_delivery
+        .expect("initial request should activate the concierge")
+        .round_id;
+    drop(response.composition);
+
+    let state_response = processor
+        .arena_state_get(MemythosArenaStateGetParams {
+            arena_id: "arena-composition".to_string(),
+        })
+        .await
+        .expect("a later observer should read state without the requester connection");
+    let ClientResponsePayload::MemythosArenaStateGet(state_response) = state_response else {
+        panic!("expected MemythosArenaStateGet response");
+    };
+    assert!(!state_response.local_ts_arena_state_used);
+    assert_eq!(
+        state_response.arena.lifecycle_state,
+        MemythosArenaLifecycleState::Running
+    );
+
+    let run_response = processor
+        .arena_run(MemythosArenaRunParams {
+            arena_id: "arena-composition".to_string(),
+            round_id,
+        })
+        .await
+        .expect("the native runtime should outlive the request connection");
+    let ClientResponsePayload::MemythosArenaRun(run_response) = run_response else {
+        panic!("expected MemythosArenaRun response");
+    };
+    assert!(!run_response.local_ts_arena_state_used);
+    assert_eq!(
+        run_response.lifecycle_state,
+        MemythosArenaLifecycleState::Running
+    );
+}
+
 #[test]
 fn arena_intake_makes_app_server_the_only_activation_authority() {
     let params = semantic_arena_request_params();
