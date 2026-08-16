@@ -336,8 +336,7 @@ impl GoalService {
 
     pub(crate) fn register_runtime(&self, runtime: &Arc<GoalRuntimeHandle>) {
         let key = runtime.thread_id().to_string();
-        self.runtimes()
-            .insert(key.clone(), Arc::downgrade(runtime));
+        self.runtimes().insert(key.clone(), Arc::downgrade(runtime));
         if let Some(goal_id) = self.pending_completions().remove(&key) {
             runtime.arm_completion_after_next_turn(goal_id);
         }
