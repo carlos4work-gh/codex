@@ -8,8 +8,8 @@ pub(crate) enum NativeArenaStatus {
     Draft,
     Active,
     PhaseComplete,
+    AwaitingParent,
     ClosedCleanly,
-    ClosedDegraded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,8 +27,8 @@ pub(crate) enum ArenaCommand {
     Activate,
     StartPhase { round_id: String, phase: String },
     ClosePhase { round_id: String, phase: String },
+    AwaitParent,
     CloseCleanly,
-    CloseDegraded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,8 +39,8 @@ pub(crate) enum ArenaEventKind {
     PhaseStartRetained,
     PhaseClosed,
     PhaseCloseRetained,
+    AwaitingParent,
     ClosedCleanly,
-    ClosedDegraded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,8 +61,8 @@ impl ArenaEvent {
             ArenaEventKind::PhaseStartRetained => "start-retained",
             ArenaEventKind::PhaseClosed => "closed",
             ArenaEventKind::PhaseCloseRetained => "close-retained",
+            ArenaEventKind::AwaitingParent => "awaiting-parent",
             ArenaEventKind::ClosedCleanly => "closed-cleanly",
-            ArenaEventKind::ClosedDegraded => "closed-degraded",
         }
     }
 }
@@ -125,16 +125,18 @@ impl NativeArenaState {
             NativeArenaStatus::Draft => MemythosArenaLifecycleState::Draft,
             NativeArenaStatus::Active => MemythosArenaLifecycleState::Running,
             NativeArenaStatus::PhaseComplete => MemythosArenaLifecycleState::ArtifactComplete,
+            NativeArenaStatus::AwaitingParent => MemythosArenaLifecycleState::AwaitingParent,
             NativeArenaStatus::ClosedCleanly => MemythosArenaLifecycleState::ClosedCleanly,
-            NativeArenaStatus::ClosedDegraded => MemythosArenaLifecycleState::ClosedDegraded,
         }
     }
 
-    pub(crate) fn active_round_id(&self) -> Option<&str> {
+    #[cfg(test)]
+    fn active_round_id(&self) -> Option<&str> {
         self.active_round_id.as_deref()
     }
 
-    pub(crate) fn active_phase(&self) -> Option<&str> {
+    #[cfg(test)]
+    fn active_phase(&self) -> Option<&str> {
         self.active_phase.as_deref()
     }
 
@@ -142,10 +144,7 @@ impl NativeArenaState {
         &self,
         command: &ArenaCommand,
     ) -> Result<(ArenaEventKind, Option<String>, Option<String>), ArenaDomainError> {
-        if matches!(
-            self.status,
-            NativeArenaStatus::ClosedCleanly | NativeArenaStatus::ClosedDegraded
-        ) {
+        if matches!(self.status, NativeArenaStatus::ClosedCleanly) {
             return Err(ArenaDomainError::new(format!(
                 "arena {} is terminal and rejects further commands",
                 self.arena_id
@@ -212,7 +211,7 @@ impl NativeArenaState {
                 ))
             }
             ArenaCommand::CloseCleanly => Ok((ArenaEventKind::ClosedCleanly, None, None)),
-            ArenaCommand::CloseDegraded => Ok((ArenaEventKind::ClosedDegraded, None, None)),
+            ArenaCommand::AwaitParent => Ok((ArenaEventKind::AwaitingParent, None, None)),
         }
     }
 
@@ -237,13 +236,13 @@ impl NativeArenaState {
             ArenaEventKind::PhaseCloseRetained => {
                 self.status = NativeArenaStatus::PhaseComplete;
             }
-            ArenaEventKind::ClosedCleanly => {
-                self.status = NativeArenaStatus::ClosedCleanly;
+            ArenaEventKind::AwaitingParent => {
+                self.status = NativeArenaStatus::AwaitingParent;
                 self.active_round_id = None;
                 self.active_phase = None;
             }
-            ArenaEventKind::ClosedDegraded => {
-                self.status = NativeArenaStatus::ClosedDegraded;
+            ArenaEventKind::ClosedCleanly => {
+                self.status = NativeArenaStatus::ClosedCleanly;
                 self.active_round_id = None;
                 self.active_phase = None;
             }
@@ -352,19 +351,6 @@ mod tests {
         assert_eq!(
             state.protocol_state(),
             MemythosArenaLifecycleState::ClosedCleanly
-        );
-    }
-
-    #[test]
-    fn degraded_close_projects_protocol_state() {
-        let mut state = NativeArenaState::new("arena-1").unwrap();
-        let event = state.transition(ArenaCommand::CloseDegraded).unwrap();
-
-        assert_eq!(event.kind, ArenaEventKind::ClosedDegraded);
-        assert_eq!(event.action(), "closed-degraded");
-        assert_eq!(
-            state.protocol_state(),
-            MemythosArenaLifecycleState::ClosedDegraded
         );
     }
 }
