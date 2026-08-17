@@ -647,6 +647,24 @@ client_request_definitions! {
         serialization: global_shared_read("memythos"),
         response: v2::MemythosArenaMessageListResponse,
     },
+    #[experimental("memythos/mailbox/quarantine/list")]
+    MemythosMailboxQuarantineList => "memythos/mailbox/quarantine/list" {
+        params: v2::MemythosMailboxQuarantineListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosMailboxQuarantineListResponse,
+    },
+    #[experimental("memythos/mailbox/quarantine/get")]
+    MemythosMailboxQuarantineGet => "memythos/mailbox/quarantine/get" {
+        params: v2::MemythosMailboxQuarantineGetParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosMailboxQuarantineGetResponse,
+    },
+    #[experimental("memythos/mailbox/quarantine/resolve")]
+    MemythosMailboxQuarantineResolve => "memythos/mailbox/quarantine/resolve" {
+        params: v2::MemythosMailboxQuarantineResolveParams,
+        serialization: global("memythos"),
+        response: v2::MemythosMailboxQuarantineResolveResponse,
+    },
     #[experimental("memythos/arena/message/observation/list")]
     MemythosArenaMessageObservationList => "memythos/arena/message/observation/list" {
         params: v2::MemythosArenaMessageObservationListParams,

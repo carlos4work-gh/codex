@@ -1291,6 +1291,21 @@ impl MessageProcessor {
                 .arena_message_list(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosMailboxQuarantineList { params, .. } => self
+                .memythos_processor
+                .mailbox_quarantine_list(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosMailboxQuarantineGet { params, .. } => self
+                .memythos_processor
+                .mailbox_quarantine_get(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosMailboxQuarantineResolve { params, .. } => self
+                .memythos_processor
+                .mailbox_quarantine_resolve(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosArenaMessageObservationList { params, .. } => self
                 .memythos_processor
                 .arena_message_observation_list(params)

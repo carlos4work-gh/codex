@@ -72,6 +72,14 @@ use codex_app_server_protocol::MemythosLayerCreateParams;
 use codex_app_server_protocol::MemythosLayerCreateResponse;
 use codex_app_server_protocol::MemythosLayerListParams;
 use codex_app_server_protocol::MemythosLayerListResponse;
+use codex_app_server_protocol::MemythosMailboxQuarantineGetParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineGetResponse;
+use codex_app_server_protocol::MemythosMailboxQuarantineListParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineListResponse;
+use codex_app_server_protocol::MemythosMailboxQuarantineRecord;
+use codex_app_server_protocol::MemythosMailboxQuarantineResolutionAction;
+use codex_app_server_protocol::MemythosMailboxQuarantineResolveParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineResolveResponse;
 use codex_app_server_protocol::MemythosParentConfiguration;
 use codex_app_server_protocol::MemythosParentContinuityListParams;
 use codex_app_server_protocol::MemythosParentContinuityListResponse;
@@ -165,6 +173,9 @@ use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_rollout::state_db::StateDbHandle;
 use codex_state::ArenaSnapshotRecord;
+use codex_state::NativeMailboxCommunicationRecord;
+use codex_state::NativeMailboxResolutionAction;
+use codex_state::NativeMailboxResolutionCommand;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
@@ -175,6 +186,7 @@ use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
 use tracing::warn;
 
+use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
@@ -5830,6 +5842,134 @@ impl MemythosRequestProcessor {
         Ok(MemythosArenaMessageListResponse { deliveries }.into())
     }
 
+    pub(crate) async fn mailbox_quarantine_list(
+        &self,
+        params: MemythosMailboxQuarantineListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state_db = self
+            .arena_state_db
+            .as_ref()
+            .ok_or_else(|| internal_error("state DB is unavailable"))?;
+        let communications = state_db
+            .list_quarantined_native_mailbox_communications(params.receiver_thread_id.as_deref())
+            .await
+            .map_err(|error| internal_error(format!("failed to list mailbox quarantine: {error}")))?
+            .into_iter()
+            .map(mailbox_quarantine_record)
+            .collect();
+        Ok(MemythosMailboxQuarantineListResponse { communications }.into())
+    }
+
+    pub(crate) async fn mailbox_quarantine_get(
+        &self,
+        params: MemythosMailboxQuarantineGetParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state_db = self
+            .arena_state_db
+            .as_ref()
+            .ok_or_else(|| internal_error("state DB is unavailable"))?;
+        let communication = state_db
+            .get_native_mailbox_communication(&params.receiver_thread_id, &params.communication_id)
+            .await
+            .map_err(|error| internal_error(format!("failed to read mailbox quarantine: {error}")))?
+            .filter(|record| record.status == "quarantined")
+            .ok_or_else(|| invalid_params("unknown quarantined mailbox communication"))?;
+        Ok(MemythosMailboxQuarantineGetResponse {
+            communication: mailbox_quarantine_record(communication),
+        }
+        .into())
+    }
+
+    pub(crate) async fn mailbox_quarantine_resolve(
+        &self,
+        params: MemythosMailboxQuarantineResolveParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state_db = self
+            .arena_state_db
+            .as_ref()
+            .ok_or_else(|| internal_error("state DB is unavailable"))?;
+        let action = match params.action {
+            MemythosMailboxQuarantineResolutionAction::Retry => {
+                NativeMailboxResolutionAction::Retry
+            }
+            MemythosMailboxQuarantineResolutionAction::Skip => NativeMailboxResolutionAction::Skip,
+            MemythosMailboxQuarantineResolutionAction::Replace => {
+                NativeMailboxResolutionAction::Replace
+            }
+            MemythosMailboxQuarantineResolutionAction::Abort => {
+                NativeMailboxResolutionAction::Abort
+            }
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let replacement = params
+            .replacement_message
+            .map(|message| {
+                if message.to_parent_thread_id != params.receiver_thread_id {
+                    return Err(invalid_params(
+                        "replacement message must target the same receiver thread",
+                    ));
+                }
+                let mut communication = InterAgentCommunication::new(
+                    AgentPath::root(),
+                    AgentPath::root(),
+                    Vec::new(),
+                    build_peer_parent_envelope(&message),
+                    message.requires_response,
+                )
+                .with_final_output_json_schema(message.output_schema.clone());
+                communication
+                    .metadata
+                    .get_or_insert_default()
+                    .source_call_id = Some(message.message_id.clone());
+                let communication_json =
+                    serde_json::to_string(&communication).map_err(|error| {
+                        internal_error(format!("failed to serialize replacement message: {error}"))
+                    })?;
+                Ok(NativeMailboxCommunicationRecord {
+                    receiver_thread_id: params.receiver_thread_id.clone(),
+                    communication_id: message.message_id.clone(),
+                    source_call_id: Some(message.message_id),
+                    submission_id: None,
+                    payload_hash: format!(
+                        "sha256:{:x}",
+                        Sha256::digest(communication_json.as_bytes())
+                    ),
+                    communication_json,
+                    status: "pending".to_string(),
+                    attempt_count: 0,
+                    failure_fingerprint: None,
+                    last_progress_ref: None,
+                    quarantine_reason: None,
+                    created_at_ms: now,
+                    updated_at_ms: now,
+                })
+            })
+            .transpose()?;
+        let outcome = state_db
+            .resolve_native_mailbox_quarantine(&NativeMailboxResolutionCommand {
+                receiver_thread_id: params.receiver_thread_id,
+                communication_id: params.communication_id,
+                command_id: params.command_id,
+                action,
+                actor: params.actor,
+                reason: params.reason,
+                replacement,
+                created_at_ms: now,
+            })
+            .await
+            .map_err(|error| invalid_params(format!("failed to resolve quarantine: {error}")))?;
+        Ok(MemythosMailboxQuarantineResolveResponse {
+            receiver_thread_id: outcome.receiver_thread_id,
+            communication_id: outcome.communication_id,
+            command_id: outcome.command_id,
+            action: outcome.action,
+            resulting_status: outcome.resulting_status,
+            replacement_communication_id: outcome.replacement_communication_id,
+            existing: outcome.existing,
+        }
+        .into())
+    }
+
     pub(crate) async fn arena_message_read(
         &self,
         params: MemythosArenaMessageReadParams,
@@ -8859,6 +8999,24 @@ impl MemythosRequestProcessor {
     fn next_id(&self, prefix: &str, counter: &AtomicU64) -> String {
         let next = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         format!("{prefix}_{next}")
+    }
+}
+
+fn mailbox_quarantine_record(
+    record: NativeMailboxCommunicationRecord,
+) -> MemythosMailboxQuarantineRecord {
+    MemythosMailboxQuarantineRecord {
+        receiver_thread_id: record.receiver_thread_id,
+        communication_id: record.communication_id,
+        source_call_id: record.source_call_id,
+        payload_hash: record.payload_hash,
+        status: record.status,
+        attempt_count: record.attempt_count,
+        failure_fingerprint: record.failure_fingerprint,
+        last_progress_ref: record.last_progress_ref,
+        quarantine_reason: record.quarantine_reason,
+        created_at_ms: record.created_at_ms,
+        updated_at_ms: record.updated_at_ms,
     }
 }
 

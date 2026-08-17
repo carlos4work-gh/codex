@@ -1270,6 +1270,95 @@ pub struct MemythosArenaMessageReadResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct MemythosMailboxQuarantineRecord {
+    pub receiver_thread_id: String,
+    pub communication_id: String,
+    #[ts(optional = nullable)]
+    pub source_call_id: Option<String>,
+    pub payload_hash: String,
+    pub status: String,
+    pub attempt_count: i64,
+    #[ts(optional = nullable)]
+    pub failure_fingerprint: Option<String>,
+    #[ts(optional = nullable)]
+    pub last_progress_ref: Option<String>,
+    #[ts(optional = nullable)]
+    pub quarantine_reason: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosMailboxQuarantineListParams {
+    #[ts(optional = nullable)]
+    pub receiver_thread_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosMailboxQuarantineListResponse {
+    pub communications: Vec<MemythosMailboxQuarantineRecord>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosMailboxQuarantineGetParams {
+    pub receiver_thread_id: String,
+    pub communication_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosMailboxQuarantineGetResponse {
+    pub communication: MemythosMailboxQuarantineRecord,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = "v2/")]
+pub enum MemythosMailboxQuarantineResolutionAction {
+    Retry,
+    Skip,
+    Replace,
+    Abort,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosMailboxQuarantineResolveParams {
+    pub receiver_thread_id: String,
+    pub communication_id: String,
+    pub command_id: String,
+    pub action: MemythosMailboxQuarantineResolutionAction,
+    pub actor: String,
+    pub reason: String,
+    #[ts(optional = nullable)]
+    pub replacement_message: Option<MemythosArenaMessage>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosMailboxQuarantineResolveResponse {
+    pub receiver_thread_id: String,
+    pub communication_id: String,
+    pub command_id: String,
+    pub action: String,
+    pub resulting_status: String,
+    #[ts(optional = nullable)]
+    pub replacement_communication_id: Option<String>,
+    pub existing: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct MemythosParentPeerResponseObservation {
     pub observation_id: String,
     pub message_id: String,
