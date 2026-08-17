@@ -5418,7 +5418,7 @@ impl MemythosRequestProcessor {
             .get(&params.arena_id)
             .cloned()
             .ok_or_else(|| invalid_params(format!("unknown arena id: {}", params.arena_id)))?;
-        arena.lifecycle_state = state
+        let protocol_snapshot = state
             .arena_lifecycles
             .get(&params.arena_id)
             .ok_or_else(|| {
@@ -5427,6 +5427,9 @@ impl MemythosRequestProcessor {
                     params.arena_id
                 ))
             })?
+            .protocol_snapshot();
+        arena.lifecycle_state = NativeArenaState::restore_protocol_snapshot(protocol_snapshot)
+            .map_err(|error| invalid_params(error.to_string()))?
             .protocol_state();
         let mut parents = state
             .arena_parents

@@ -2,14 +2,38 @@ use std::collections::HashSet;
 use std::fmt;
 
 use codex_app_server_protocol::MemythosArenaLifecycleState;
+use serde::Deserialize;
+use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) const ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum NativeArenaStatus {
     Draft,
     Active,
     PhaseComplete,
     AwaitingParent,
     ClosedCleanly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeArenaProtocolSnapshot {
+    pub(crate) schema_version: u32,
+    pub(crate) arena_id: String,
+    pub(crate) status: NativeArenaStatus,
+    pub(crate) active_round_id: Option<String>,
+    pub(crate) active_phase: Option<String>,
+    pub(crate) completed_phases: Vec<NativeArenaCompletedPhaseSnapshot>,
+    pub(crate) sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeArenaCompletedPhaseSnapshot {
+    pub(crate) round_id: String,
+    pub(crate) phase: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +152,88 @@ impl NativeArenaState {
             NativeArenaStatus::AwaitingParent => MemythosArenaLifecycleState::AwaitingParent,
             NativeArenaStatus::ClosedCleanly => MemythosArenaLifecycleState::ClosedCleanly,
         }
+    }
+
+    pub(crate) fn protocol_snapshot(&self) -> NativeArenaProtocolSnapshot {
+        let mut completed_phases = self
+            .completed_phases
+            .iter()
+            .map(|(round_id, phase)| NativeArenaCompletedPhaseSnapshot {
+                round_id: round_id.clone(),
+                phase: phase.clone(),
+            })
+            .collect::<Vec<_>>();
+        completed_phases.sort();
+        NativeArenaProtocolSnapshot {
+            schema_version: ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION,
+            arena_id: self.arena_id.clone(),
+            status: self.status,
+            active_round_id: self.active_round_id.clone(),
+            active_phase: self.active_phase.clone(),
+            completed_phases,
+            sequence: self.sequence,
+        }
+    }
+
+    pub(crate) fn restore_protocol_snapshot(
+        snapshot: NativeArenaProtocolSnapshot,
+    ) -> Result<Self, ArenaDomainError> {
+        if snapshot.schema_version != ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION {
+            return Err(ArenaDomainError::new(format!(
+                "unsupported arena protocol snapshot schema {}; expected {}",
+                snapshot.schema_version, ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION
+            )));
+        }
+        if snapshot.arena_id.trim().is_empty() {
+            return Err(ArenaDomainError::new(
+                "arena protocol snapshot requires arena_id",
+            ));
+        }
+        match (&snapshot.active_round_id, &snapshot.active_phase) {
+            (Some(round_id), Some(phase)) => validate_round_and_phase(round_id, phase)?,
+            (None, None) => {}
+            _ => {
+                return Err(ArenaDomainError::new(
+                    "arena protocol snapshot requires active round and phase together",
+                ));
+            }
+        }
+        if matches!(
+            snapshot.status,
+            NativeArenaStatus::AwaitingParent | NativeArenaStatus::ClosedCleanly
+        ) && snapshot.active_round_id.is_some()
+        {
+            return Err(ArenaDomainError::new(
+                "terminal or awaiting-parent arena snapshot cannot retain an active phase",
+            ));
+        }
+
+        let mut completed_phases = HashSet::new();
+        for completed_phase in snapshot.completed_phases {
+            validate_round_and_phase(&completed_phase.round_id, &completed_phase.phase)?;
+            let completed = (completed_phase.round_id, completed_phase.phase);
+            if snapshot.active_round_id.as_deref() == Some(completed.0.as_str())
+                && snapshot.active_phase.as_deref() == Some(completed.1.as_str())
+            {
+                return Err(ArenaDomainError::new(
+                    "arena protocol snapshot cannot mark its active phase complete",
+                ));
+            }
+            if !completed_phases.insert(completed) {
+                return Err(ArenaDomainError::new(
+                    "arena protocol snapshot contains a duplicate completed phase",
+                ));
+            }
+        }
+
+        Ok(Self {
+            arena_id: snapshot.arena_id,
+            status: snapshot.status,
+            active_round_id: snapshot.active_round_id,
+            active_phase: snapshot.active_phase,
+            completed_phases,
+            sequence: snapshot.sequence,
+        })
     }
 
     #[cfg(test)]
@@ -282,6 +388,71 @@ mod tests {
 
         assert!(error.to_string().contains("proposal is active"));
         assert_eq!(state.active_phase(), Some("proposal"));
+    }
+
+    #[test]
+    fn protocol_snapshot_round_trips_deterministically_without_semantic_state() {
+        let mut state = NativeArenaState::new("arena-620").unwrap();
+        state
+            .transition(ArenaCommand::StartPhase {
+                round_id: "round-2".to_string(),
+                phase: "proposal".to_string(),
+            })
+            .unwrap();
+        state
+            .transition(ArenaCommand::ClosePhase {
+                round_id: "round-2".to_string(),
+                phase: "proposal".to_string(),
+            })
+            .unwrap();
+        state
+            .transition(ArenaCommand::StartPhase {
+                round_id: "round-1".to_string(),
+                phase: "review".to_string(),
+            })
+            .unwrap();
+        state
+            .transition(ArenaCommand::ClosePhase {
+                round_id: "round-1".to_string(),
+                phase: "review".to_string(),
+            })
+            .unwrap();
+
+        let snapshot = state.protocol_snapshot();
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        assert!(!serialized.contains("next_action"));
+        assert!(!serialized.contains("summary"));
+        assert!(!serialized.contains("agenda"));
+        assert!(serialized.find("round-1").unwrap() < serialized.find("round-2").unwrap());
+
+        let restored = NativeArenaState::restore_protocol_snapshot(snapshot).unwrap();
+        assert_eq!(restored, state);
+        assert_eq!(
+            serde_json::to_string(&restored.protocol_snapshot()).unwrap(),
+            serialized
+        );
+    }
+
+    #[test]
+    fn protocol_snapshot_rejects_future_schema_and_invalid_active_phase() {
+        let state = NativeArenaState::new("arena-620").unwrap();
+        let mut future = state.protocol_snapshot();
+        future.schema_version += 1;
+        assert!(
+            NativeArenaState::restore_protocol_snapshot(future)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported arena protocol snapshot schema")
+        );
+
+        let mut invalid = state.protocol_snapshot();
+        invalid.active_round_id = Some("round-1".to_string());
+        assert!(
+            NativeArenaState::restore_protocol_snapshot(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("active round and phase together")
+        );
     }
 
     #[test]
