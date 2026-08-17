@@ -55,6 +55,10 @@ use codex_app_server_protocol::MarketplaceRemoveParams;
 use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::McpResourceReadParams;
 use codex_app_server_protocol::McpServerToolCallParams;
+use codex_app_server_protocol::MemythosArenaCompositionProvisionParams;
+use codex_app_server_protocol::MemythosArenaPhaseStartParams;
+use codex_app_server_protocol::MemythosArenaRunParams;
+use codex_app_server_protocol::MemythosArenaStateGetParams;
 use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelProviderCapabilitiesReadParams;
@@ -132,6 +136,13 @@ const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_C
 
 impl TestAppServer {
     pub async fn wait_for_exit(&mut self) -> std::io::Result<ExitStatus> {
+        self.process.wait().await
+    }
+
+    #[cfg(unix)]
+    pub async fn sigkill(&mut self) -> std::io::Result<ExitStatus> {
+        drop(self.stdin.take());
+        self.process.start_kill()?;
         self.process.wait().await
     }
 
@@ -447,6 +458,47 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/start", params).await
+    }
+
+    pub async fn send_memythos_arena_composition_provision_request(
+        &mut self,
+        params: MemythosArenaCompositionProvisionParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/arena/composition/provision",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_arena_phase_start_request(
+        &mut self,
+        params: MemythosArenaPhaseStartParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/arena/phase/start",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_arena_run_request(
+        &mut self,
+        params: MemythosArenaRunParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request("memythos/arena/run", Some(serde_json::to_value(params)?))
+            .await
+    }
+
+    pub async fn send_memythos_arena_state_get_request(
+        &mut self,
+        params: MemythosArenaStateGetParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/arena/state/get",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
     }
 
     /// Send an `agentRole/list` JSON-RPC request.

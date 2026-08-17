@@ -46,3 +46,6 @@ jobs:
 
       - name: OOTB Arena restart recovery
         run: cargo test -p codex-app-server canonical_arena_restores_from_ootb_state_without_replanning
+
+      - name: Arena SIGKILL recovery boundary
+        run: cargo test -p codex-app-server --test all arena_provision_checkpoint_survives_sigkill_without_duplicate_parents

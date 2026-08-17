@@ -32,6 +32,8 @@ mod mcp_server_elicitation;
 mod mcp_server_status;
 mod mcp_tool;
 mod memory_reset;
+#[cfg(unix)]
+mod memythos_arena_recovery;
 mod model_list;
 mod model_provider_capabilities_read;
 mod output_schema;

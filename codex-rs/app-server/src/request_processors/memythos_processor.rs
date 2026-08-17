@@ -5047,6 +5047,21 @@ impl MemythosRequestProcessor {
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         self.ensure_arena_state_restored().await?;
         validate_arena_composition_contract(&params)?;
+        {
+            let state = self.state.lock().await;
+            if state
+                .restored_coordination_snapshots
+                .contains_key(&params.contract.arena_id)
+                && !state
+                    .arena_compositions
+                    .contains_key(&params.contract.arena_id)
+            {
+                return Err(invalid_params(format!(
+                    "Arena {} was restored from its canonical checkpoint; continue through the same OOTB Room Concierge instead of provisioning duplicate parents",
+                    params.contract.arena_id
+                )));
+            }
+        }
         for participant in &params.contract.participants {
             self.arena_parent_provisioning_adapter
                 .validate_role_stance(&participant.agent_role, &participant.stance)?;
