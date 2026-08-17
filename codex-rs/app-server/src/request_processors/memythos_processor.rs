@@ -17,6 +17,7 @@ use codex_app_server_protocol::MemythosArenaAggregateContract;
 use codex_app_server_protocol::MemythosArenaAggregateState;
 use codex_app_server_protocol::MemythosArenaCheckpointState;
 use codex_app_server_protocol::MemythosArenaCompositionContract;
+use codex_app_server_protocol::MemythosArenaCompositionCoordination;
 use codex_app_server_protocol::MemythosArenaCompositionLease;
 use codex_app_server_protocol::MemythosArenaCompositionLifecycleState;
 use codex_app_server_protocol::MemythosArenaCompositionProvisionParams;
@@ -162,6 +163,8 @@ use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
+use codex_rollout::state_db::StateDbHandle;
+use codex_state::ArenaSnapshotRecord;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
@@ -169,6 +172,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::path::PathBuf;
 use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
 use tracing::warn;
 
 use crate::error_code::invalid_params;
@@ -179,6 +183,7 @@ use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
 use crate::request_processors::memythos_arena_state::ArenaCommand;
 use crate::request_processors::memythos_arena_state::ArenaEventKind;
+use crate::request_processors::memythos_arena_state::NativeArenaProtocolSnapshot;
 use crate::request_processors::memythos_arena_state::NativeArenaState;
 use crate::request_processors::thread_processor::with_memythos_room_tools;
 
@@ -198,6 +203,7 @@ struct MemythosRuntimeState {
     thread_attachments: HashMap<String, MemythosThreadAttachment>,
     arena_parents: HashMap<String, MemythosArenaParent>,
     arena_compositions: HashMap<String, MemythosArenaCompositionProvisionResponse>,
+    restored_coordination_snapshots: HashMap<String, PersistedArenaCoordinationSnapshot>,
     arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
     arena_messages: HashMap<String, MemythosArenaMessage>,
     arena_message_aggregates: HashMap<String, NativeArenaMessageAggregate>,
@@ -209,6 +215,154 @@ struct MemythosRuntimeState {
     native_thread_usage_totals: HashMap<String, MemythosTokenUsageBreakdown>,
     native_turn_usage: HashMap<String, MemythosTurnUsageAttribution>,
     telemetry_refs: Vec<MemythosTelemetryRef>,
+}
+
+const ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedArenaCoordinationSnapshot {
+    schema_version: u32,
+    protocol: NativeArenaProtocolSnapshot,
+    layer_id: String,
+    room: MemythosRoom,
+    contract_version: String,
+    coordination: MemythosArenaCompositionCoordination,
+    composition_version: u32,
+    composition_lifecycle_state: MemythosArenaCompositionLifecycleState,
+    leases: Vec<MemythosArenaCompositionLease>,
+    deliveries: Vec<PersistedArenaDeliveryCheckpoint>,
+    aggregates: Vec<PersistedArenaAggregateCheckpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedArenaDeliveryCheckpoint {
+    delivery_id: String,
+    message_id: String,
+    status: String,
+    sender_thread_id: String,
+    receiver_thread_id: String,
+    round_id: String,
+    phase: Option<String>,
+    delivery_mechanism: String,
+    delivery_policy: Option<MemythosArenaDeliveryPolicy>,
+    aggregate_id: Option<String>,
+    aggregate_state: Option<MemythosArenaAggregateState>,
+    checkpoint_state: Option<MemythosArenaCheckpointState>,
+    checkpoint_event_refs: Vec<String>,
+    receiver_turn_id: Option<String>,
+    receiver_response_event_ref: Option<String>,
+    event_refs: Vec<String>,
+    rejection_reason: Option<String>,
+    failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedArenaAggregateCheckpoint {
+    key: String,
+    contract: MemythosArenaAggregateContract,
+    state: MemythosArenaAggregateState,
+    received_source_thread_ids: Vec<String>,
+    received_message_ids: Vec<String>,
+    trigger_message_id: Option<String>,
+    checkpoint_state: MemythosArenaCheckpointState,
+    checkpoint_history: Vec<MemythosArenaCheckpointState>,
+}
+
+impl PersistedArenaDeliveryCheckpoint {
+    fn capture(delivery: &MemythosArenaMessageDelivery) -> Self {
+        Self {
+            delivery_id: delivery.delivery_id.clone(),
+            message_id: delivery.message_id.clone(),
+            status: delivery.status.clone(),
+            sender_thread_id: delivery.sender_thread_id.clone(),
+            receiver_thread_id: delivery.receiver_thread_id.clone(),
+            round_id: delivery.round_id.clone(),
+            phase: delivery.phase.clone(),
+            delivery_mechanism: delivery.delivery_mechanism.clone(),
+            delivery_policy: delivery.delivery_policy,
+            aggregate_id: delivery.aggregate_id.clone(),
+            aggregate_state: delivery.aggregate_state,
+            checkpoint_state: delivery.checkpoint_state,
+            checkpoint_event_refs: delivery.checkpoint_event_refs.clone(),
+            receiver_turn_id: delivery.receiver_turn_id.clone(),
+            receiver_response_event_ref: delivery.receiver_response_event_ref.clone(),
+            event_refs: delivery.event_refs.clone(),
+            rejection_reason: delivery.rejection_reason.clone(),
+            failure_reason: delivery.failure_reason.clone(),
+        }
+    }
+
+    fn restore(self, arena_id: &str) -> MemythosArenaMessageDelivery {
+        MemythosArenaMessageDelivery {
+            delivery_id: self.delivery_id,
+            message_id: self.message_id,
+            human_summary: String::new(),
+            status: self.status,
+            sender_thread_id: self.sender_thread_id,
+            receiver_thread_id: self.receiver_thread_id,
+            arena_id: arena_id.to_string(),
+            round_id: self.round_id,
+            phase: self.phase,
+            delivery_mechanism: self.delivery_mechanism,
+            delivery_policy: self.delivery_policy,
+            aggregate_id: self.aggregate_id,
+            aggregate_state: self.aggregate_state,
+            checkpoint_state: self.checkpoint_state,
+            checkpoint_event_refs: self.checkpoint_event_refs,
+            receiver_turn_id: self.receiver_turn_id,
+            receiver_response_event_ref: self.receiver_response_event_ref,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: self.event_refs,
+            rejection_reason: self.rejection_reason,
+            failure_reason: self.failure_reason,
+        }
+    }
+}
+
+impl PersistedArenaAggregateCheckpoint {
+    fn capture(key: &str, aggregate: &NativeArenaMessageAggregate) -> Self {
+        let mut received_source_thread_ids = aggregate
+            .received_source_thread_ids
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        received_source_thread_ids.sort();
+        let mut received_message_ids = aggregate
+            .received_message_ids
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        received_message_ids.sort();
+        Self {
+            key: key.to_string(),
+            contract: aggregate.contract.clone(),
+            state: aggregate.state,
+            received_source_thread_ids,
+            received_message_ids,
+            trigger_message_id: aggregate.trigger_message_id.clone(),
+            checkpoint_state: aggregate.checkpoint_state,
+            checkpoint_history: aggregate.checkpoint_history.clone(),
+        }
+    }
+
+    fn restore(self) -> (String, NativeArenaMessageAggregate) {
+        (
+            self.key,
+            NativeArenaMessageAggregate {
+                contract: self.contract,
+                state: self.state,
+                received_source_thread_ids: self.received_source_thread_ids.into_iter().collect(),
+                received_message_ids: self.received_message_ids.into_iter().collect(),
+                trigger_message_id: self.trigger_message_id,
+                checkpoint_state: self.checkpoint_state,
+                checkpoint_history: self.checkpoint_history,
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1771,6 +1925,10 @@ fn native_arena_parent_identity_sha256(
     )
 }
 
+fn arena_snapshot_sha256(snapshot_json: &str) -> String {
+    format!("{:x}", Sha256::digest(snapshot_json.as_bytes()))
+}
+
 fn validate_reusable_parent_identity(
     developer_instructions: Option<&str>,
     params: &MemythosArenaCompositionProvisionParams,
@@ -2745,25 +2903,21 @@ fn apply_native_checkpoint_execution_contract(
             "peer_review_and_objection" | "peer_bet"
         )
     {
-        let composition = state
-            .arena_compositions
-            .get(&message.arena_id)
-            .ok_or_else(|| invalid_params("mechanism contract requires an arena composition"))?;
-        let participant_id = composition
-            .leases
+        let (_, leases) =
+            arena_coordination_and_leases(state, &message.arena_id).ok_or_else(|| {
+                invalid_params("mechanism contract requires an Arena coordination checkpoint")
+            })?;
+        let participant_id = leases
             .iter()
             .find(|lease| lease.thread_id == message.to_parent_thread_id)
             .map(|lease| lease.participant_id.as_str())
             .ok_or_else(|| invalid_params("mechanism contract requires a leased bettor parent"))?;
-        let eligible_bettor_ids = composition
-            .contract
-            .participants
+        let eligible_bettor_ids = leases
             .iter()
-            .filter(|participant| participant.agent_role == "bettor")
-            .map(|participant| participant.participant_id.clone())
+            .filter(|lease| lease.role == MemythosParentRole::Bettor.as_wire())
+            .map(|lease| lease.participant_id.clone())
             .collect::<Vec<_>>();
-        let bettor_thread_ids = composition
-            .leases
+        let bettor_thread_ids = leases
             .iter()
             .filter(|lease| eligible_bettor_ids.contains(&lease.participant_id))
             .map(|lease| lease.thread_id.as_str())
@@ -3821,6 +3975,8 @@ impl ThreadConsolidationAdapter for TurnStartThreadConsolidationAdapter {
 #[derive(Clone)]
 pub(crate) struct MemythosRequestProcessor {
     state: Arc<Mutex<MemythosRuntimeState>>,
+    arena_state_db: Option<StateDbHandle>,
+    arena_restore_result: Arc<OnceCell<Result<(), String>>>,
     peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
     parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
     thread_consolidation_adapter: Arc<dyn ThreadConsolidationAdapter>,
@@ -3885,6 +4041,7 @@ impl MemythosRequestProcessor {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_for_transport_with_native_adapters(
         rpc_transport: AppServerRpcTransport,
         peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
@@ -3894,6 +4051,31 @@ impl MemythosRequestProcessor {
         parent_configuration_adapter: Arc<dyn ParentConfigurationAdapter>,
         arena_parent_provisioning_adapter: Arc<dyn ArenaParentProvisioningAdapter>,
         arena_composition_planning_adapter: Arc<dyn ArenaCompositionPlanningAdapter>,
+    ) -> Self {
+        Self::new_for_transport_with_native_adapters_and_state_db(
+            rpc_transport,
+            peer_parent_delivery_adapter,
+            parent_goal_snapshot_adapter,
+            thread_consolidation_adapter,
+            parent_turn_response_adapter,
+            parent_configuration_adapter,
+            arena_parent_provisioning_adapter,
+            arena_composition_planning_adapter,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_transport_with_native_adapters_and_state_db(
+        rpc_transport: AppServerRpcTransport,
+        peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
+        parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
+        thread_consolidation_adapter: Arc<dyn ThreadConsolidationAdapter>,
+        parent_turn_response_adapter: Arc<dyn ParentTurnResponseAdapter>,
+        parent_configuration_adapter: Arc<dyn ParentConfigurationAdapter>,
+        arena_parent_provisioning_adapter: Arc<dyn ArenaParentProvisioningAdapter>,
+        arena_composition_planning_adapter: Arc<dyn ArenaCompositionPlanningAdapter>,
+        arena_state_db: Option<StateDbHandle>,
     ) -> Self {
         let (connection_mode, transport_owner, transport_id, daemon_runtime_verified) =
             match rpc_transport {
@@ -3929,6 +4111,7 @@ impl MemythosRequestProcessor {
                 thread_attachments: HashMap::new(),
                 arena_parents: HashMap::new(),
                 arena_compositions: HashMap::new(),
+                restored_coordination_snapshots: HashMap::new(),
                 arena_message_deliveries: Vec::new(),
                 arena_messages: HashMap::new(),
                 arena_message_aggregates: HashMap::new(),
@@ -3941,6 +4124,8 @@ impl MemythosRequestProcessor {
                 native_turn_usage: HashMap::new(),
                 telemetry_refs: Vec::new(),
             })),
+            arena_state_db,
+            arena_restore_result: Arc::new(OnceCell::new()),
             peer_parent_delivery_adapter,
             parent_goal_snapshot_adapter,
             thread_consolidation_adapter,
@@ -3956,6 +4141,252 @@ impl MemythosRequestProcessor {
             next_contract_id: Arc::new(AtomicU64::default()),
             next_telemetry_ref_id: Arc::new(AtomicU64::default()),
         }
+    }
+
+    async fn ensure_arena_state_restored(&self) -> Result<(), JSONRPCErrorError> {
+        let result = self
+            .arena_restore_result
+            .get_or_init(|| async {
+                self.restore_arena_coordination_snapshots()
+                    .await
+                    .map_err(|error| error.message)
+            })
+            .await;
+        result.clone().map_err(invalid_params)
+    }
+
+    async fn restore_arena_coordination_snapshots(&self) -> Result<(), JSONRPCErrorError> {
+        let Some(state_db) = self.arena_state_db.as_ref() else {
+            return Ok(());
+        };
+        let records = state_db.list_arena_snapshots().await.map_err(|error| {
+            invalid_params(format!(
+                "failed to load Arena snapshots from app-server state: {error}"
+            ))
+        })?;
+        for record in records {
+            if record.schema_version != i64::from(ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION) {
+                return Err(invalid_params(format!(
+                    "unsupported Arena coordination snapshot schema {} for {}",
+                    record.schema_version, record.arena_id
+                )));
+            }
+            let actual_hash = arena_snapshot_sha256(&record.snapshot_json);
+            if actual_hash != record.last_event_hash {
+                return Err(invalid_params(format!(
+                    "Arena snapshot hash mismatch for {}",
+                    record.arena_id
+                )));
+            }
+            let snapshot: PersistedArenaCoordinationSnapshot =
+                serde_json::from_str(&record.snapshot_json).map_err(|error| {
+                    invalid_params(format!(
+                        "invalid Arena coordination snapshot for {}: {error}",
+                        record.arena_id
+                    ))
+                })?;
+            if snapshot.schema_version != ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
+                || snapshot.protocol.arena_id != record.arena_id
+                || snapshot.room.arena_id != record.arena_id
+            {
+                return Err(invalid_params(format!(
+                    "Arena snapshot identity mismatch for {}",
+                    record.arena_id
+                )));
+            }
+            let lifecycle = NativeArenaState::restore_protocol_snapshot(snapshot.protocol.clone())
+                .map_err(|error| invalid_params(error.to_string()))?;
+            if i64::try_from(snapshot.protocol.sequence).ok() != Some(record.snapshot_sequence) {
+                return Err(invalid_params(format!(
+                    "Arena snapshot sequence mismatch for {}",
+                    record.arena_id
+                )));
+            }
+            let concierge = snapshot
+                .room
+                .participants
+                .iter()
+                .find(|participant| participant.parent_role == "room_concierge")
+                .ok_or_else(|| {
+                    invalid_params(format!(
+                        "Arena {} snapshot has no OOTB Room Concierge",
+                        record.arena_id
+                    ))
+                })?;
+            if concierge.thread_id != record.concierge_thread_id || concierge.goal_ref.is_none() {
+                return Err(invalid_params(format!(
+                    "Arena {} Concierge reference is inconsistent",
+                    record.arena_id
+                )));
+            }
+
+            let mut restored_goals = HashMap::new();
+            for participant in &snapshot.room.participants {
+                let goal = self
+                    .arena_parent_provisioning_adapter
+                    .read_parent_goal(&participant.thread_id)
+                    .await?
+                    .ok_or_else(|| {
+                        invalid_params(format!(
+                            "Arena {} recovery paused: OOTB goal missing for parent {}",
+                            record.arena_id, participant.thread_id
+                        ))
+                    })?;
+                restored_goals.insert(participant.thread_id.clone(), goal);
+            }
+            let concierge_goal = restored_goals
+                .get(&concierge.thread_id)
+                .expect("Concierge goal was resolved above");
+            let lifecycle_state = lifecycle.protocol_state();
+            let arena = MemythosArena {
+                arena_id: record.arena_id.clone(),
+                layer_id: snapshot.layer_id.clone(),
+                name: record.arena_id.clone(),
+                kind: codex_app_server_protocol::MemythosArenaKind::Debate,
+                lifecycle_state,
+                objective: concierge_goal.objective.clone(),
+                participant_ids: snapshot
+                    .room
+                    .participants
+                    .iter()
+                    .map(|participant| participant.thread_id.clone())
+                    .collect(),
+            };
+
+            let mut state = self.state.lock().await;
+            state.arenas.insert(record.arena_id.clone(), arena);
+            state
+                .arena_lifecycles
+                .insert(record.arena_id.clone(), lifecycle);
+            state
+                .rooms
+                .insert(snapshot.room.room_id.clone(), snapshot.room.clone());
+            for participant in &snapshot.room.participants {
+                state.arena_parents.insert(
+                    arena_parent_key(&record.arena_id, &participant.thread_id),
+                    MemythosArenaParent {
+                        arena_id: record.arena_id.clone(),
+                        thread_id: participant.thread_id.clone(),
+                        parent_role: participant.parent_role.clone(),
+                        stance_profile: participant.stance_profile.clone(),
+                        authority_scope: participant.authority_scope.clone(),
+                        lifecycle_state,
+                    },
+                );
+            }
+            state.arena_message_deliveries.extend(
+                snapshot
+                    .deliveries
+                    .clone()
+                    .into_iter()
+                    .map(|delivery| delivery.restore(&record.arena_id)),
+            );
+            for aggregate in snapshot.aggregates.clone() {
+                let (key, aggregate) = aggregate.restore();
+                state.arena_message_aggregates.insert(key, aggregate);
+            }
+            state
+                .restored_coordination_snapshots
+                .insert(record.arena_id, snapshot);
+        }
+        Ok(())
+    }
+
+    async fn persist_arena_coordination_snapshot(
+        &self,
+        arena_id: &str,
+    ) -> Result<(), JSONRPCErrorError> {
+        let Some(state_db) = self.arena_state_db.as_ref() else {
+            return Ok(());
+        };
+        let snapshot = {
+            let state = self.state.lock().await;
+            let protocol = state
+                .arena_lifecycles
+                .get(arena_id)
+                .ok_or_else(|| {
+                    invalid_params(format!(
+                        "Arena {arena_id} cannot persist without a canonical lifecycle"
+                    ))
+                })?
+                .protocol_snapshot();
+            let mut deliveries = state
+                .arena_message_deliveries
+                .iter()
+                .filter(|delivery| delivery.arena_id == arena_id)
+                .map(PersistedArenaDeliveryCheckpoint::capture)
+                .collect::<Vec<_>>();
+            deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
+            let aggregate_prefix = format!("{arena_id}::");
+            let mut aggregates = state
+                .arena_message_aggregates
+                .iter()
+                .filter(|(key, _)| key.starts_with(&aggregate_prefix))
+                .map(|(key, aggregate)| PersistedArenaAggregateCheckpoint::capture(key, aggregate))
+                .collect::<Vec<_>>();
+            aggregates.sort_by(|left, right| left.key.cmp(&right.key));
+            if let Some(composition) = state.arena_compositions.get(arena_id) {
+                PersistedArenaCoordinationSnapshot {
+                    schema_version: ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION,
+                    protocol,
+                    layer_id: composition.room.layer_id.clone(),
+                    room: composition.room.clone(),
+                    contract_version: composition.contract.contract_version.clone(),
+                    coordination: composition.contract.coordination.clone(),
+                    composition_version: composition.composition_version,
+                    composition_lifecycle_state: composition.lifecycle_state,
+                    leases: composition.leases.clone(),
+                    deliveries,
+                    aggregates,
+                }
+            } else {
+                let mut restored = state
+                    .restored_coordination_snapshots
+                    .get(arena_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        invalid_params(format!(
+                            "Arena {arena_id} cannot persist without a coordination checkpoint"
+                        ))
+                    })?;
+                restored.protocol = protocol;
+                restored.deliveries = deliveries;
+                restored.aggregates = aggregates;
+                restored
+            }
+        };
+        let concierge = snapshot
+            .room
+            .participants
+            .iter()
+            .find(|participant| participant.parent_role == "room_concierge")
+            .ok_or_else(|| invalid_params(format!("Arena {arena_id} has no Room Concierge")))?;
+        if concierge.goal_ref.is_none() {
+            return Err(invalid_params(format!(
+                "Arena {arena_id} Concierge has no OOTB goal reference"
+            )));
+        }
+        let snapshot_json = serde_json::to_string(&snapshot).map_err(|error| {
+            invalid_params(format!("failed to serialize Arena {arena_id}: {error}"))
+        })?;
+        let snapshot_sequence = i64::try_from(snapshot.protocol.sequence)
+            .map_err(|_| invalid_params(format!("Arena {arena_id} sequence exceeds i64")))?;
+        state_db
+            .upsert_arena_snapshot(&ArenaSnapshotRecord {
+                arena_id: arena_id.to_string(),
+                concierge_thread_id: concierge.thread_id.clone(),
+                schema_version: i64::from(ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION),
+                snapshot_sequence,
+                last_event_hash: arena_snapshot_sha256(&snapshot_json),
+                snapshot_json,
+                updated_at_ms: Utc::now().timestamp_millis(),
+            })
+            .await
+            .map_err(|error| {
+                invalid_params(format!(
+                    "failed to persist Arena {arena_id} in app-server state: {error}"
+                ))
+            })
     }
 
     async fn prepare_parent_goal_for_delivery(
@@ -4269,6 +4700,7 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosArenaListParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let state = self.state.lock().await;
         let mut arenas: Vec<_> = state
             .arenas
@@ -4291,6 +4723,7 @@ impl MemythosRequestProcessor {
         params: MemythosArenaRequestParams,
         connection_id: ConnectionId,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         if params.case_id.trim().is_empty()
             || params.layer_id.trim().is_empty()
             || params.arena_id.trim().is_empty()
@@ -4309,6 +4742,16 @@ impl MemythosRequestProcessor {
         validate_arena_cost_context(params.cost_context.as_ref())?;
         let previous = {
             let state = self.state.lock().await;
+            if state
+                .restored_coordination_snapshots
+                .contains_key(&params.arena_id)
+                && !state.arena_compositions.contains_key(&params.arena_id)
+            {
+                return Err(invalid_params(format!(
+                    "Arena {} was restored from its canonical checkpoint; resume through the same OOTB Room Concierge instead of replanning",
+                    params.arena_id
+                )));
+            }
             state.arena_compositions.get(&params.arena_id).cloned()
         };
         let resume = if let Some(previous) = previous.as_ref() {
@@ -4602,6 +5045,7 @@ impl MemythosRequestProcessor {
         params: MemythosArenaCompositionProvisionParams,
         connection_id: ConnectionId,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         validate_arena_composition_contract(&params)?;
         for participant in &params.contract.participants {
             self.arena_parent_provisioning_adapter
@@ -4923,6 +5367,9 @@ impl MemythosRequestProcessor {
         state
             .arena_compositions
             .insert(response.contract.arena_id.clone(), response.clone());
+        let arena_id = response.contract.arena_id.clone();
+        drop(state);
+        self.persist_arena_coordination_snapshot(&arena_id).await?;
 
         Ok(response.into())
     }
@@ -5111,6 +5558,7 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosArenaMessageSendParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let mut message = params.message;
         let (layer_id, aggregate_state, target_reasoning_effort) = {
             let mut state = self.state.lock().await;
@@ -5242,6 +5690,8 @@ impl MemythosRequestProcessor {
         );
 
         drop(state);
+        self.persist_arena_coordination_snapshot(&delivery.arena_id)
+            .await?;
 
         Ok(MemythosArenaMessageSendResponse { delivery }.into())
     }
@@ -5266,6 +5716,7 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosParentContinuityListParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let state = self.state.lock().await;
         if !state.arenas.contains_key(&params.arena_id) {
             return Err(invalid_params(format!(
@@ -5311,6 +5762,7 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosArenaMessageListParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let state = self.state.lock().await;
         if !state.arenas.contains_key(&params.arena_id) {
             return Err(invalid_params(format!(
@@ -5338,6 +5790,7 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosArenaMessageReadParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let state = self.state.lock().await;
         let message = state
             .arena_messages
@@ -5362,6 +5815,7 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosArenaMessageObservationListParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let state = self.state.lock().await;
         if !state.arenas.contains_key(&params.arena_id) {
             return Err(invalid_params(format!(
@@ -5412,6 +5866,7 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosArenaStateGetParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let state = self.state.lock().await;
         let mut arena = state
             .arenas
@@ -5462,6 +5917,7 @@ impl MemythosRequestProcessor {
         phase: String,
         start: bool,
     ) -> Result<MemythosArenaPhaseUpdate, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let mut state = self.state.lock().await;
         if !state.arenas.contains_key(&arena_id) {
             return Err(invalid_params(format!("unknown arena id: {}", arena_id)));
@@ -5539,13 +5995,17 @@ impl MemythosRequestProcessor {
                 event.sequence
             ),
         );
-        Ok(MemythosArenaPhaseUpdate {
+        let update = MemythosArenaPhaseUpdate {
             arena_id,
             round_id,
             phase,
             lifecycle_state,
             event_refs: vec![event_ref],
-        })
+        };
+        drop(state);
+        self.persist_arena_coordination_snapshot(&update.arena_id)
+            .await?;
+        Ok(update)
     }
 
     pub(crate) async fn arena_phase_close(
@@ -5570,6 +6030,7 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosArenaRunParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let state = self.state.lock().await;
         let arena = state
             .arenas
@@ -7684,6 +8145,10 @@ impl MemythosRequestProcessor {
         failure_reason: Option<String>,
         last_agent_message: Option<String>,
     ) -> bool {
+        if let Err(error) = self.ensure_arena_state_restored().await {
+            warn!(error = %error.message, "failed to restore Arena state before turn completion");
+            return false;
+        }
         let (matched_delivery, arena_id, loopbacks, completed_delivery_message_ids) = {
             let mut state = self.state.lock().await;
             let Some((layer_id, arena_id)) = find_attachment_context(&state, thread_id) else {
@@ -7895,6 +8360,16 @@ impl MemythosRequestProcessor {
             if let Some(candidate) = closure_candidate {
                 self.terminalize_arena_parent_goals(candidate).await;
             }
+        }
+
+        if matched_delivery
+            && let Err(error) = self.persist_arena_coordination_snapshot(&arena_id).await
+        {
+            warn!(
+                arena_id,
+                error = %error.message,
+                "failed to persist Arena state after turn completion"
+            );
         }
 
         matched_delivery
@@ -9522,6 +9997,22 @@ fn mark_composition_leases_reused(composition: &mut MemythosArenaCompositionProv
     }
 }
 
+fn arena_coordination_and_leases<'a>(
+    state: &'a MemythosRuntimeState,
+    arena_id: &str,
+) -> Option<(
+    &'a MemythosArenaCompositionCoordination,
+    &'a [MemythosArenaCompositionLease],
+)> {
+    if let Some(composition) = state.arena_compositions.get(arena_id) {
+        return Some((&composition.contract.coordination, &composition.leases));
+    }
+    state
+        .restored_coordination_snapshots
+        .get(arena_id)
+        .map(|snapshot| (&snapshot.coordination, snapshot.leases.as_slice()))
+}
+
 fn arena_closure_candidate(
     state: &MemythosRuntimeState,
     arena_id: &str,
@@ -9531,20 +10022,14 @@ fn arena_closure_candidate(
     if arena.lifecycle_state == MemythosArenaLifecycleState::ClosedCleanly {
         return None;
     }
-    let composition = state.arena_compositions.get(arena_id)?;
-    let coordinator_id = composition
-        .contract
-        .coordination
-        .concierge_participant_id
-        .as_ref()?;
-    let coordinator_thread_id = composition
-        .leases
+    let (coordination, leases) = arena_coordination_and_leases(state, arena_id)?;
+    let coordinator_id = coordination.concierge_participant_id.as_ref()?;
+    let coordinator_thread_id = leases
         .iter()
         .find(|lease| &lease.participant_id == coordinator_id)?
         .thread_id
         .as_str();
-    if !composition
-        .leases
+    if !leases
         .iter()
         .any(|lease| lease.thread_id == completion_trigger_thread_id)
     {
@@ -9582,8 +10067,8 @@ fn arena_closure_candidate(
     }
 
     let mut terminal_outcome = ArenaTerminalOutcome::Close;
-    if is_competitive_method(composition.contract.coordination.decision_method) {
-        let policy = composition.contract.coordination.round_policy.as_ref()?;
+    if is_competitive_method(coordination.decision_method) {
+        let policy = coordination.round_policy.as_ref()?;
         let minimum_positions = policy.minimum_competing_positions as usize;
         let distinct_completed_targets = |phase: &str| {
             deliveries
@@ -9593,19 +10078,13 @@ fn arena_closure_candidate(
                 .collect::<HashSet<_>>()
                 .len()
         };
-        let judge_id = composition
-            .contract
-            .coordination
-            .judge_participant_id
-            .as_ref()?;
-        let judge_thread_id = composition
-            .leases
+        let judge_id = coordination.judge_participant_id.as_ref()?;
+        let judge_thread_id = leases
             .iter()
             .find(|lease| &lease.participant_id == judge_id)?
             .thread_id
             .as_str();
-        let eligible_winner_ids = composition
-            .leases
+        let eligible_winner_ids = leases
             .iter()
             .filter(|lease| lease.role == MemythosParentRole::Bettor.as_wire())
             .map(|lease| lease.participant_id.as_str())
@@ -9621,8 +10100,7 @@ fn arena_closure_candidate(
                 .affected_participant_ids
                 .iter()
                 .collect::<HashSet<_>>();
-            let expected_affected_threads = composition
-                .leases
+            let expected_affected_threads = leases
                 .iter()
                 .filter(|lease| {
                     lease.role == MemythosParentRole::Bettor.as_wire()
@@ -9680,11 +10158,7 @@ fn arena_closure_candidate(
     Some(ArenaClosureCandidate {
         arena_id: arena_id.to_string(),
         layer_id: arena.layer_id.clone(),
-        parent_thread_ids: composition
-            .leases
-            .iter()
-            .map(|lease| lease.thread_id.clone())
-            .collect(),
+        parent_thread_ids: leases.iter().map(|lease| lease.thread_id.clone()).collect(),
         outcome: terminal_outcome,
     })
 }
@@ -9694,9 +10168,8 @@ fn arena_parent_reasoning_effort(
     arena_id: &str,
     thread_id: &str,
 ) -> Option<ReasoningEffort> {
-    let composition = state.arena_compositions.get(arena_id)?;
-    composition
-        .leases
+    let (_, leases) = arena_coordination_and_leases(state, arena_id)?;
+    leases
         .iter()
         .find(|lease| lease.thread_id == thread_id)
         .map(|lease| lease.reasoning_effort.clone())

@@ -522,38 +522,40 @@ impl MessageProcessor {
             Arc::clone(&skills_watcher),
             Arc::clone(&memythos_processor_holder),
         );
-        let memythos_processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
-            rpc_transport,
-            Arc::new(NativeMailboxPeerParentDeliveryAdapter::new(
-                turn_processor.clone(),
-                Arc::clone(&thread_manager),
-            )),
-            Arc::new(ThreadGoalParentSnapshotAdapter::new(
-                thread_goal_processor.clone(),
-            )),
-            Arc::new(TurnStartThreadConsolidationAdapter::new(
-                thread_processor.clone(),
-                turn_processor.clone(),
-            )),
-            Arc::new(ThreadTurnsParentResponseAdapter::new(
-                thread_processor.clone(),
-            )),
-            Arc::new(ThreadManagerParentConfigurationAdapter::new(Arc::clone(
-                &thread_manager,
-            ))),
-            Arc::new(NativeArenaParentProvisioningAdapter::new(
-                Arc::clone(&thread_manager),
-                Arc::clone(&config),
-                thread_goal_processor.clone(),
-                thread_processor.clone(),
-            )),
-            Arc::new(NativeArenaCompositionPlanningAdapter::new(
-                Arc::clone(&thread_manager),
-                Arc::clone(&config),
-                thread_processor.clone(),
-                turn_processor.clone(),
-            )),
-        );
+        let memythos_processor =
+            MemythosRequestProcessor::new_for_transport_with_native_adapters_and_state_db(
+                rpc_transport,
+                Arc::new(NativeMailboxPeerParentDeliveryAdapter::new(
+                    turn_processor.clone(),
+                    Arc::clone(&thread_manager),
+                )),
+                Arc::new(ThreadGoalParentSnapshotAdapter::new(
+                    thread_goal_processor.clone(),
+                )),
+                Arc::new(TurnStartThreadConsolidationAdapter::new(
+                    thread_processor.clone(),
+                    turn_processor.clone(),
+                )),
+                Arc::new(ThreadTurnsParentResponseAdapter::new(
+                    thread_processor.clone(),
+                )),
+                Arc::new(ThreadManagerParentConfigurationAdapter::new(Arc::clone(
+                    &thread_manager,
+                ))),
+                Arc::new(NativeArenaParentProvisioningAdapter::new(
+                    Arc::clone(&thread_manager),
+                    Arc::clone(&config),
+                    thread_goal_processor.clone(),
+                    thread_processor.clone(),
+                )),
+                Arc::new(NativeArenaCompositionPlanningAdapter::new(
+                    Arc::clone(&thread_manager),
+                    Arc::clone(&config),
+                    thread_processor.clone(),
+                    turn_processor.clone(),
+                )),
+                state_db.clone(),
+            );
         *memythos_processor_holder
             .lock()
             .expect("memythos processor holder poisoned") = Some(memythos_processor.clone());

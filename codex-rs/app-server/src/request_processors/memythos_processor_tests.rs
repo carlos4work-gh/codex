@@ -660,6 +660,10 @@ struct FakeParentConfigurationAdapter;
 #[derive(Debug)]
 struct CompositionParentConfigurationAdapter;
 
+struct MappedParentConfigurationAdapter {
+    roles: HashMap<String, String>,
+}
+
 impl ParentConfigurationAdapter for CompositionParentConfigurationAdapter {
     fn read_configuration<'a>(&'a self, thread_id: &'a str) -> ParentConfigurationFuture<'a> {
         Box::pin(async move {
@@ -677,9 +681,27 @@ impl ParentConfigurationAdapter for CompositionParentConfigurationAdapter {
     }
 }
 
+impl ParentConfigurationAdapter for MappedParentConfigurationAdapter {
+    fn read_configuration<'a>(&'a self, thread_id: &'a str) -> ParentConfigurationFuture<'a> {
+        Box::pin(async move {
+            let role = self.roles.get(thread_id).cloned();
+            ParentConfigurationSnapshot {
+                proposal_bearing: role.as_deref().map(|role| role == "bettor"),
+                agent_role: role,
+                collaboration_mode: "default".to_string(),
+                session_source: "app_server".to_string(),
+                lifecycle_state: "loaded".to_string(),
+                config_sources: vec![format!("app-server://threads/{thread_id}/config")],
+                ..Default::default()
+            }
+        })
+    }
+}
+
 #[derive(Default)]
 struct FakeArenaParentProvisioningAdapter {
     fail_participant: Option<String>,
+    thread_ids: HashMap<String, String>,
     rolled_back: Arc<Mutex<Vec<String>>>,
     goal_transitions: Arc<Mutex<Vec<(String, Option<String>, ThreadGoalStatus, bool)>>>,
     goals: Arc<Mutex<HashMap<String, ThreadGoal>>>,
@@ -884,10 +906,15 @@ impl ArenaParentProvisioningAdapter for FakeArenaParentProvisioningAdapter {
             }
             let newly_created = reusable_thread_id.is_none();
             let thread_id = reusable_thread_id.map(str::to_string).unwrap_or_else(|| {
-                format!(
-                    "test::{}::{}",
-                    participant.agent_role, participant.participant_id
-                )
+                self.thread_ids
+                    .get(&participant.participant_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        format!(
+                            "test::{}::{}",
+                            participant.agent_role, participant.participant_id
+                        )
+                    })
             });
             let goal = ThreadGoal {
                 thread_id: thread_id.clone(),
@@ -2670,6 +2697,210 @@ async fn arena_request_state_survives_the_request_connection_boundary() {
         run_response.lifecycle_state,
         MemythosArenaLifecycleState::Running
     );
+}
+
+#[tokio::test]
+async fn canonical_arena_restores_from_ootb_state_without_replanning() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let state_db = codex_state::StateRuntime::init(
+        codex_home.path().to_path_buf(),
+        "test-provider".to_string(),
+    )
+    .await
+    .expect("initialize OOTB app-server state");
+    let participant_thread_ids = HashMap::from([
+        (
+            "concierge".to_string(),
+            "00000000-0000-4000-8000-000000000620".to_string(),
+        ),
+        (
+            "bettor-growth".to_string(),
+            "00000000-0000-4000-8000-000000000621".to_string(),
+        ),
+        (
+            "bettor-risk".to_string(),
+            "00000000-0000-4000-8000-000000000622".to_string(),
+        ),
+        (
+            "judge".to_string(),
+            "00000000-0000-4000-8000-000000000623".to_string(),
+        ),
+    ]);
+    for thread_id in participant_thread_ids.values() {
+        let thread_id = ThreadId::from_string(thread_id).expect("valid parent thread id");
+        let mut metadata = codex_state::ThreadMetadataBuilder::new(
+            thread_id,
+            codex_home
+                .path()
+                .join("sessions")
+                .join(format!("{thread_id}.jsonl")),
+            Utc::now(),
+            codex_protocol::protocol::SessionSource::Cli,
+        );
+        metadata.cwd = codex_home.path().to_path_buf();
+        state_db
+            .upsert_thread(&metadata.build("test-provider"))
+            .await
+            .expect("persist OOTB parent thread");
+    }
+
+    let provisioning = Arc::new(FakeArenaParentProvisioningAdapter {
+        thread_ids: participant_thread_ids.clone(),
+        ..Default::default()
+    });
+    let roles_by_thread_id = HashMap::from([
+        (
+            participant_thread_ids["concierge"].clone(),
+            "room_concierge".to_string(),
+        ),
+        (
+            participant_thread_ids["bettor-growth"].clone(),
+            "bettor".to_string(),
+        ),
+        (
+            participant_thread_ids["bettor-risk"].clone(),
+            "bettor".to_string(),
+        ),
+        (participant_thread_ids["judge"].clone(), "judge".to_string()),
+    ]);
+    let make_processor = || {
+        MemythosRequestProcessor::new_for_transport_with_native_adapters_and_state_db(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(MappedParentConfigurationAdapter {
+                roles: roles_by_thread_id.clone(),
+            }),
+            provisioning.clone(),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+            Some(state_db.clone()),
+        )
+    };
+
+    let first_process = make_processor();
+    first_process
+        .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+        .await
+        .expect("provision canonical Arena");
+    first_process
+        .arena_phase_start(MemythosArenaPhaseStartParams {
+            arena_id: "arena-composition".to_string(),
+            round_id: "round-1".to_string(),
+            phase: "proposal".to_string(),
+        })
+        .await
+        .expect("open proposal phase");
+    let persisted_before_restart = state_db
+        .get_arena_snapshot("arena-composition")
+        .await
+        .expect("read persisted Arena")
+        .expect("Arena snapshot exists");
+    assert!(
+        !persisted_before_restart
+            .snapshot_json
+            .contains("shared_objective")
+    );
+    assert!(
+        !persisted_before_restart
+            .snapshot_json
+            .contains("Resolve the BPM decision")
+    );
+    assert!(
+        !persisted_before_restart
+            .snapshot_json
+            .contains("human_summary")
+    );
+    assert!(
+        !persisted_before_restart
+            .snapshot_json
+            .contains("next_action")
+    );
+    drop(first_process);
+
+    let second_process = make_processor();
+    let run_response = second_process
+        .arena_run(MemythosArenaRunParams {
+            arena_id: "arena-composition".to_string(),
+            round_id: "round-1".to_string(),
+        })
+        .await
+        .expect("the first post-restart command should restore transparently");
+    let ClientResponsePayload::MemythosArenaRun(run_response) = run_response else {
+        panic!("expected restored Arena run response");
+    };
+    assert_eq!(
+        run_response.lifecycle_state,
+        MemythosArenaLifecycleState::Running
+    );
+    let state_response = second_process
+        .arena_state_get(MemythosArenaStateGetParams {
+            arena_id: "arena-composition".to_string(),
+        })
+        .await
+        .expect("restore Arena through the next process");
+    let ClientResponsePayload::MemythosArenaStateGet(state_response) = state_response else {
+        panic!("expected restored Arena state");
+    };
+    assert_eq!(
+        state_response.arena.lifecycle_state,
+        MemythosArenaLifecycleState::Running
+    );
+    assert_eq!(state_response.parents.len(), 4);
+    assert_eq!(
+        state_response.arena.objective,
+        "Fulfil the concierge responsibility"
+    );
+    assert_eq!(
+        state_response
+            .arena
+            .participant_ids
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        participant_thread_ids
+            .values()
+            .cloned()
+            .collect::<HashSet<_>>()
+    );
+
+    let replanning_error = second_process
+        .arena_request(semantic_arena_request_params(), ConnectionId(0))
+        .await
+        .expect_err("restored Arena must not invoke planning");
+    assert!(
+        replanning_error
+            .message
+            .contains("same OOTB Room Concierge")
+    );
+    second_process
+        .arena_phase_close(MemythosArenaPhaseCloseParams {
+            arena_id: "arena-composition".to_string(),
+            round_id: "round-1".to_string(),
+            phase: "proposal".to_string(),
+        })
+        .await
+        .expect("close restored proposal phase");
+    let persisted_after_restart = state_db
+        .get_arena_snapshot("arena-composition")
+        .await
+        .expect("read advanced Arena")
+        .expect("advanced Arena snapshot exists");
+    assert!(persisted_after_restart.snapshot_sequence > persisted_before_restart.snapshot_sequence);
+
+    provisioning
+        .goals
+        .lock()
+        .await
+        .remove(&participant_thread_ids["judge"]);
+    let missing_reference_process = make_processor();
+    let missing_reference = missing_reference_process
+        .arena_state_get(MemythosArenaStateGetParams {
+            arena_id: "arena-composition".to_string(),
+        })
+        .await
+        .expect_err("missing OOTB parent goal must pause recovery");
+    assert!(missing_reference.message.contains("OOTB goal missing"));
 }
 
 #[test]
