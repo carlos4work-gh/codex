@@ -34,6 +34,9 @@ jobs:
       - name: Native proposal fanout reconciliation
         run: cargo test -p codex-app-server completed_bettor_proposals_fan_out_and_trigger_each_bettor_once
 
+      - name: OOTB Arena snapshot persistence
+        run: cargo test -p codex-state arena_snapshot_round_trips_without_semantic_concierge_state
+
       - name: Canonical Rust state reducer
         run: cargo test -p codex-app-server memythos_arena_state::tests
 
