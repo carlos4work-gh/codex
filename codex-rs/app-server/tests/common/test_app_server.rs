@@ -60,6 +60,9 @@ use codex_app_server_protocol::MemythosArenaMessageSendParams;
 use codex_app_server_protocol::MemythosArenaPhaseStartParams;
 use codex_app_server_protocol::MemythosArenaRunParams;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineGetParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineListParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineResolveParams;
 use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelProviderCapabilitiesReadParams;
@@ -508,6 +511,39 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         self.send_request(
             "memythos/arena/state/get",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_mailbox_quarantine_list_request(
+        &mut self,
+        params: MemythosMailboxQuarantineListParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/mailbox/quarantine/list",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_mailbox_quarantine_get_request(
+        &mut self,
+        params: MemythosMailboxQuarantineGetParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/mailbox/quarantine/get",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_mailbox_quarantine_resolve_request(
+        &mut self,
+        params: MemythosMailboxQuarantineResolveParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/mailbox/quarantine/resolve",
             Some(serde_json::to_value(params)?),
         )
         .await

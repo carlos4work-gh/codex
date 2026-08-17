@@ -30,6 +30,13 @@ use codex_app_server_protocol::MemythosArenaRunParams;
 use codex_app_server_protocol::MemythosArenaRunResponse;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
 use codex_app_server_protocol::MemythosArenaStateGetResponse;
+use codex_app_server_protocol::MemythosMailboxQuarantineGetParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineGetResponse;
+use codex_app_server_protocol::MemythosMailboxQuarantineListParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineListResponse;
+use codex_app_server_protocol::MemythosMailboxQuarantineResolutionAction;
+use codex_app_server_protocol::MemythosMailboxQuarantineResolveParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineResolveResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadListParams;
@@ -316,6 +323,7 @@ async fn arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once() -
 async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Result<()> {
     const POISON_PAYLOAD_MARKER: &str = "POISON_MAILBOX_PAYLOAD_MUST_BE_QUARANTINED";
     const HEALTHY_WAKE_MARKER: &str = "HEALTHY_WAKE_AFTER_QUARANTINE";
+    const RETRY_WAKE_MARKER: &str = "HEALTHY_WAKE_AFTER_AUTHORIZED_RETRY";
 
     let model_server = create_mock_responses_server_repeating_assistant("healthy recovery").await;
     let codex_home = TempDir::new()?;
@@ -400,6 +408,38 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
     assert!(warning.message.contains("message-poison-crash-loop"));
     assert!(warning.message.contains("automatic recovery stopped"));
 
+    let list_id = quarantining_process
+        .send_memythos_mailbox_quarantine_list_request(MemythosMailboxQuarantineListParams {
+            receiver_thread_id: Some(bettor.thread_id.clone()),
+        })
+        .await?;
+    let list_response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        quarantining_process.read_stream_until_response_message(RequestId::Integer(list_id)),
+    )
+    .await??;
+    let listed = to_response::<MemythosMailboxQuarantineListResponse>(list_response)?;
+    assert_eq!(listed.communications.len(), 1);
+    assert_eq!(
+        listed.communications[0].communication_id,
+        "message-poison-crash-loop"
+    );
+
+    let get_id = quarantining_process
+        .send_memythos_mailbox_quarantine_get_request(MemythosMailboxQuarantineGetParams {
+            receiver_thread_id: bettor.thread_id.clone(),
+            communication_id: "message-poison-crash-loop".to_string(),
+        })
+        .await?;
+    let get_response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        quarantining_process.read_stream_until_response_message(RequestId::Integer(get_id)),
+    )
+    .await??;
+    let inspected = to_response::<MemythosMailboxQuarantineGetResponse>(get_response)?;
+    assert_eq!(inspected.communication.status, "quarantined");
+    assert_eq!(inspected.communication.attempt_count, 4);
+
     let state_db = codex_state::StateRuntime::init(
         codex_home.path().to_path_buf(),
         "mock_provider".to_string(),
@@ -437,6 +477,77 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
     let request_body = requests[0].body_json::<serde_json::Value>()?.to_string();
     assert!(request_body.contains(HEALTHY_WAKE_MARKER));
     assert!(!request_body.contains(POISON_PAYLOAD_MARKER));
+
+    let resolve_params = MemythosMailboxQuarantineResolveParams {
+        receiver_thread_id: bettor.thread_id.clone(),
+        communication_id: "message-poison-crash-loop".to_string(),
+        command_id: "retry-poison-once".to_string(),
+        action: MemythosMailboxQuarantineResolutionAction::Retry,
+        actor: "operator:e2e".to_string(),
+        reason: "payload fixed externally".to_string(),
+        replacement_message: None,
+    };
+    let resolve_id = quarantining_process
+        .send_memythos_mailbox_quarantine_resolve_request(resolve_params.clone())
+        .await?;
+    let resolve_response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        quarantining_process.read_stream_until_response_message(RequestId::Integer(resolve_id)),
+    )
+    .await??;
+    let resolved = to_response::<MemythosMailboxQuarantineResolveResponse>(resolve_response)?;
+    assert_eq!(resolved.resulting_status, "pending");
+    assert!(!resolved.existing);
+
+    let replay_id = quarantining_process
+        .send_memythos_mailbox_quarantine_resolve_request(resolve_params)
+        .await?;
+    let replay_response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        quarantining_process.read_stream_until_response_message(RequestId::Integer(replay_id)),
+    )
+    .await??;
+    assert!(
+        to_response::<MemythosMailboxQuarantineResolveResponse>(replay_response)?.existing,
+        "repeating a resolution command must be idempotent"
+    );
+
+    let killed = quarantining_process.sigkill().await?;
+    assert_eq!(killed.signal(), Some(9));
+    drop(quarantining_process);
+    let mut retry_process = TestAppServer::new(codex_home.path()).await?;
+    timeout(RESPONSE_TIMEOUT, retry_process.initialize()).await??;
+    resume_native_thread(&mut retry_process, &bettor.thread_id).await?;
+    let mut retry_wake = triggered_proposal_message(
+        "message-wake-authorized-retry",
+        &concierge.thread_id,
+        &bettor.thread_id,
+    );
+    retry_wake.execution_prompt = Some(RETRY_WAKE_MARKER.to_string());
+    send_arena_message(&mut retry_process, retry_wake).await?;
+    wait_for_turn_completed(&mut retry_process).await?;
+    let requests = model_server
+        .received_requests()
+        .await
+        .expect("mock model server must record authorized retry");
+    assert_eq!(requests.len(), 2);
+    let retry_body = requests[1].body_json::<serde_json::Value>()?.to_string();
+    assert!(retry_body.contains(POISON_PAYLOAD_MARKER));
+    assert!(retry_body.contains(RETRY_WAKE_MARKER));
+
+    let state_db = codex_state::StateRuntime::init(
+        codex_home.path().to_path_buf(),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    assert_eq!(
+        state_db
+            .get_native_mailbox_communication(&bettor.thread_id, "message-poison-crash-loop")
+            .await?
+            .expect("retried communication remains auditable")
+            .status,
+        "consumed"
+    );
 
     Ok(())
 }

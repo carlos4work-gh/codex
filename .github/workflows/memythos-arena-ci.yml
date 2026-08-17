@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "codex-rs/app-server/**"
+      - "codex-rs/app-server-protocol/**"
       - "codex-rs/core/**"
       - "codex-rs/state/**"
       - ".github/workflows/memythos-arena-ci.yml"
@@ -41,6 +42,9 @@ jobs:
 
       - name: Durable native mailbox state contract
         run: cargo test -p codex-state native_mailbox_
+
+      - name: Native mailbox quarantine protocol contract
+        run: cargo test -p codex-app-server-protocol memythos_mailbox_quarantine_methods_deserialize
 
       - name: Canonical Rust state reducer
         run: cargo test -p codex-app-server memythos_arena_state::tests
