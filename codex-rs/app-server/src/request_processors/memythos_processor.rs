@@ -2551,6 +2551,11 @@ async fn deliver_native_parent_mailbox_message(
         trigger_turn,
     )
     .with_final_output_json_schema(message.output_schema.clone());
+    let mut communication = communication;
+    communication
+        .metadata
+        .get_or_insert_default()
+        .source_call_id = Some(message.message_id.clone());
     match thread_manager
         .send_inter_agent_communication(target_thread_id, communication)
         .await

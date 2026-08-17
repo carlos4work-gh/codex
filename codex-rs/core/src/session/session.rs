@@ -1084,6 +1084,8 @@ impl Session {
                 services,
                 next_internal_sub_id: AtomicU64::new(0),
             });
+            sess.restore_native_mailbox_communications(&initial_history)
+                .await?;
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;
                 *guard = Arc::downgrade(&sess);
@@ -1203,6 +1205,14 @@ impl Session {
             {
                 let mut state = sess.state.lock().await;
                 state.queue_pending_session_start_source(session_start_source);
+            }
+            if let Some(submission_id) = sess
+                .input_queue
+                .pending_trigger_turn_submission_id()
+                .await
+            {
+                sess.maybe_start_turn_for_pending_work_with_sub_id(submission_id)
+                    .await;
             }
 
             Ok(sess)

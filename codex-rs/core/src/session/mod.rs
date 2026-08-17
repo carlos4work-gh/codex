@@ -2780,6 +2780,10 @@ impl Session {
         turn_context: &TurnContext,
         communication: InterAgentCommunication,
     ) {
+        let communication_id = communication
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.source_call_id.clone());
         let response_item = communication.to_model_input_item();
         let items = self.prepare_conversation_items_for_history(
             turn_context,
@@ -2793,9 +2797,81 @@ impl Session {
                 turn_context.model_info.truncation_policy.into(),
             );
         }
-        self.persist_rollout_items(&[RolloutItem::InterAgentCommunication(communication)])
+        let rollout_persisted = self
+            .try_persist_rollout_items(&[RolloutItem::InterAgentCommunication(communication)])
             .await;
+        if rollout_persisted
+            && let Some(communication_id) = communication_id
+            && let Some(state_db) = self.state_db()
+            && let Err(err) = state_db
+                .mark_native_mailbox_communication_consumed(
+                    &self.thread_id.to_string(),
+                    &communication_id,
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .await
+        {
+            warn!("failed to mark native mailbox communication {communication_id} consumed: {err}");
+        }
         self.send_raw_response_items(turn_context, items).await;
+    }
+
+    async fn restore_native_mailbox_communications(
+        &self,
+        initial_history: &InitialHistory,
+    ) -> CodexResult<()> {
+        let Some(state_db) = self.state_db() else {
+            return Ok(());
+        };
+        let materialized_source_call_ids = initial_history
+            .get_rollout_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                RolloutItem::InterAgentCommunication(communication) => communication
+                    .metadata
+                    .and_then(|metadata| metadata.source_call_id),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let pending = state_db
+            .list_pending_native_mailbox_communications(&self.thread_id.to_string())
+            .await
+            .map_err(|err| {
+                CodexErr::Fatal(format!(
+                    "failed to restore native mailbox communications: {err}"
+                ))
+            })?;
+        for record in pending {
+            if materialized_source_call_ids.contains(&record.communication_id) {
+                state_db
+                    .mark_native_mailbox_communication_consumed(
+                        &record.receiver_thread_id,
+                        &record.communication_id,
+                        chrono::Utc::now().timestamp_millis(),
+                    )
+                    .await
+                    .map_err(|err| {
+                        CodexErr::Fatal(format!(
+                            "failed to reconcile materialized native mailbox communication: {err}"
+                        ))
+                    })?;
+                continue;
+            }
+            let communication =
+                serde_json::from_str(&record.communication_json).map_err(|err| {
+                    CodexErr::Fatal(format!(
+                        "failed to decode native mailbox communication {}: {err}",
+                        record.communication_id
+                    ))
+                })?;
+            self.input_queue
+                .enqueue_mailbox_communication_with_submission_id(
+                    record.submission_id,
+                    communication,
+                )
+                .await;
+        }
+        Ok(())
     }
 
     async fn maybe_warn_on_server_model_mismatch(
@@ -3329,11 +3405,17 @@ impl Session {
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
-        if let Some(live_thread) = self.live_thread()
-            && let Err(e) = live_thread.append_items(items).await
-        {
-            error!("failed to record rollout items: {e:#}");
+        self.try_persist_rollout_items(items).await;
+    }
+
+    async fn try_persist_rollout_items(&self, items: &[RolloutItem]) -> bool {
+        if let Some(live_thread) = self.live_thread() {
+            match live_thread.append_items(items).await {
+                Ok(()) => return true,
+                Err(e) => error!("failed to record rollout items: {e:#}"),
+            }
         }
+        false
     }
 
     pub(crate) async fn clone_history(&self) -> ContextManager {

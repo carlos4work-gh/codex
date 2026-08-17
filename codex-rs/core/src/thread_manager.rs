@@ -51,6 +51,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
@@ -58,6 +59,8 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::state_db::StateDbHandle;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
+use codex_state::NativeMailboxCommunicationRecord;
+use codex_state::NativeMailboxInsertOutcome;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
@@ -71,6 +74,8 @@ use codex_thread_store::UpdateThreadMetadataParams;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use sha2::Digest;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -82,6 +87,7 @@ use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tracing::instrument;
 use tracing::warn;
+use uuid::Uuid;
 
 const THREAD_CREATED_CHANNEL_CAPACITY: usize = 1024;
 /// Test-only override for enabling thread-manager behaviors used by integration
@@ -1170,8 +1176,88 @@ impl ThreadManagerState {
     }
 
     /// Send an operation to a thread by ID.
-    pub(crate) async fn send_op(&self, thread_id: ThreadId, op: Op) -> CodexResult<String> {
+    pub(crate) async fn send_op(&self, thread_id: ThreadId, mut op: Op) -> CodexResult<String> {
         let thread = self.get_thread(thread_id).await?;
+        if let Op::InterAgentCommunication { communication } = &mut op {
+            let submission_id = Uuid::now_v7().to_string();
+            let source_call_id = communication
+                .metadata
+                .get_or_insert_default()
+                .source_call_id
+                .get_or_insert_with(|| submission_id.clone())
+                .clone();
+            if let Some(state_db) = self.state_db.as_ref() {
+                let communication_json = serde_json::to_string(communication).map_err(|err| {
+                    CodexErr::Fatal(format!(
+                        "failed to serialize native mailbox communication: {err}"
+                    ))
+                })?;
+                let payload_hash =
+                    format!("sha256:{:x}", Sha256::digest(communication_json.as_bytes()));
+                let now = chrono::Utc::now().timestamp_millis();
+                let record = NativeMailboxCommunicationRecord {
+                    receiver_thread_id: thread_id.to_string(),
+                    communication_id: source_call_id,
+                    source_call_id: communication
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.source_call_id.clone()),
+                    submission_id: Some(submission_id.clone()),
+                    communication_json,
+                    payload_hash,
+                    status: "pending".to_string(),
+                    attempt_count: 0,
+                    failure_fingerprint: None,
+                    last_progress_ref: None,
+                    quarantine_reason: None,
+                    created_at_ms: now,
+                    updated_at_ms: now,
+                };
+                match state_db
+                    .insert_pending_native_mailbox_communication(&record)
+                    .await
+                    .map_err(|err| {
+                        CodexErr::Fatal(format!(
+                            "failed to persist native mailbox communication: {err}"
+                        ))
+                    })? {
+                    NativeMailboxInsertOutcome::Inserted => {}
+                    NativeMailboxInsertOutcome::Existing => {
+                        let existing = state_db
+                            .get_native_mailbox_communication(
+                                &record.receiver_thread_id,
+                                &record.communication_id,
+                            )
+                            .await
+                            .map_err(|err| {
+                                CodexErr::Fatal(format!(
+                                    "failed to read native mailbox communication retry: {err}"
+                                ))
+                            })?
+                            .ok_or_else(|| {
+                                CodexErr::Fatal(
+                                    "native mailbox communication retry disappeared".to_string(),
+                                )
+                            })?;
+                        return Ok(existing.submission_id.unwrap_or(existing.communication_id));
+                    }
+                }
+            }
+            if let Some(ops_log) = &self.ops_log
+                && let Ok(mut log) = ops_log.lock()
+            {
+                log.push((thread_id, op.clone()));
+            }
+            thread
+                .submit_with_id(Submission {
+                    id: submission_id.clone(),
+                    op,
+                    client_user_message_id: None,
+                    trace: None,
+                })
+                .await?;
+            return Ok(submission_id);
+        }
         if let Some(ops_log) = &self.ops_log
             && let Ok(mut log) = ops_log.lock()
         {
