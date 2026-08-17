@@ -149,7 +149,8 @@ async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents()
 }
 
 #[tokio::test]
-async fn arena_mailbox_delivery_survives_sigkill_and_retries_idempotently() -> Result<()> {
+async fn arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once() -> Result<()> {
+    const DURABLE_PAYLOAD_MARKER: &str = "DURABLE_MAILBOX_PAYLOAD_BEFORE_SIGKILL";
     let model_server = create_mock_responses_server_repeating_assistant("unused").await;
     let codex_home = TempDir::new()?;
     write_mock_responses_config_toml(
@@ -179,13 +180,30 @@ async fn arena_mailbox_delivery_survives_sigkill_and_retries_idempotently() -> R
         .collect::<Vec<_>>();
     assert_eq!(bettors.len(), 2);
 
-    let first_message = queued_proposal_message(
+    let mut first_message = queued_proposal_message(
         "message-before-sigkill",
         &concierge.thread_id,
         &bettors[0].thread_id,
     );
+    first_message.execution_prompt = Some(DURABLE_PAYLOAD_MARKER.to_string());
     let first_delivery = send_arena_message(&mut first_process, first_message.clone()).await?;
     assert_eq!(first_delivery.status, "queued_in_native_mailbox");
+
+    {
+        let state_db = codex_state::StateRuntime::init(
+            codex_home.path().to_path_buf(),
+            "mock_provider".to_string(),
+        )
+        .await?;
+        assert_eq!(
+            state_db
+                .get_native_mailbox_communication(&bettors[0].thread_id, "message-before-sigkill",)
+                .await?
+                .expect("queue-only communication must be durable before SIGKILL")
+                .status,
+            "pending"
+        );
+    }
 
     let killed = first_process.sigkill().await?;
     assert_eq!(killed.signal(), Some(9), "app-server must exit by SIGKILL");
@@ -210,6 +228,61 @@ async fn arena_mailbox_delivery_survives_sigkill_and_retries_idempotently() -> R
         1
     );
 
+    resume_native_thread(&mut restarted_process, &bettors[0].thread_id).await?;
+    {
+        let state_db = codex_state::StateRuntime::init(
+            codex_home.path().to_path_buf(),
+            "mock_provider".to_string(),
+        )
+        .await?;
+        assert_eq!(
+            state_db
+                .get_native_mailbox_communication(&bettors[0].thread_id, "message-before-sigkill",)
+                .await?
+                .expect("communication must remain pending until rollout persistence")
+                .status,
+            "pending"
+        );
+    }
+    let wake_delivery = send_arena_message(
+        &mut restarted_process,
+        triggered_proposal_message(
+            "message-wake-rehydrated-mailbox",
+            &concierge.thread_id,
+            &bettors[0].thread_id,
+        ),
+    )
+    .await?;
+    assert_eq!(wake_delivery.status, "delivered_to_native_mailbox_turn");
+    let completed = wait_for_turn_completed(&mut restarted_process).await?;
+    assert_eq!(completed.thread_id, bettors[0].thread_id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+
+    let requests = model_server
+        .received_requests()
+        .await
+        .expect("mock model server must record the resumed turn");
+    assert_eq!(requests.len(), 1, "rehydrated mailbox must start one turn");
+    let request_body = requests[0].body_json::<serde_json::Value>()?.to_string();
+    assert!(
+        request_body.contains(DURABLE_PAYLOAD_MARKER),
+        "the model request must contain the queue-only payload accepted before SIGKILL"
+    );
+
+    let state_db = codex_state::StateRuntime::init(
+        codex_home.path().to_path_buf(),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    assert_eq!(
+        state_db
+            .get_native_mailbox_communication(&bettors[0].thread_id, "message-before-sigkill",)
+            .await?
+            .expect("durable queue-only communication must remain auditable")
+            .status,
+        "consumed"
+    );
+
     resume_native_thread(&mut restarted_process, &bettors[1].thread_id).await?;
     let second_delivery = send_arena_message(
         &mut restarted_process,
@@ -224,7 +297,7 @@ async fn arena_mailbox_delivery_survives_sigkill_and_retries_idempotently() -> R
     assert_eq!(second_delivery.status, "queued_in_native_mailbox");
     assert!(second_delivery.rejection_reason.is_none());
     let final_state = read_arena_state(&mut restarted_process).await?;
-    assert_eq!(final_state.deliveries.len(), 2);
+    assert_eq!(final_state.deliveries.len(), 3);
     assert_eq!(
         final_state
             .deliveries
@@ -232,7 +305,7 @@ async fn arena_mailbox_delivery_survives_sigkill_and_retries_idempotently() -> R
             .map(|delivery| delivery.delivery_id.as_str())
             .collect::<HashSet<_>>()
             .len(),
-        2
+        3
     );
 
     Ok(())
