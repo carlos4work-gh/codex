@@ -84,6 +84,7 @@ pub use goals::GoalUpdate;
 pub use memories::MemoryStore;
 pub use native_mailbox::NativeMailboxCommunicationRecord;
 pub use native_mailbox::NativeMailboxInsertOutcome;
+pub use native_mailbox::NativeMailboxRecoveryOutcome;
 pub use recovery::RuntimeDbBackup;
 pub use recovery::backup_runtime_db_for_fresh_start;
 pub use recovery::is_sqlite_corruption_error;

@@ -23,6 +23,12 @@ pub enum NativeMailboxInsertOutcome {
     Existing,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeMailboxRecoveryOutcome {
+    Claimed(NativeMailboxCommunicationRecord),
+    Quarantined(NativeMailboxCommunicationRecord),
+}
+
 impl StateRuntime {
     pub async fn insert_pending_native_mailbox_communication(
         &self,
@@ -142,6 +148,64 @@ WHERE receiver_thread_id = ? AND communication_id = ? AND status = 'pending'
         .execute(self.pool.as_ref())
         .await?;
         Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn claim_native_mailbox_communication_for_recovery(
+        &self,
+        receiver_thread_id: &str,
+        communication_id: &str,
+        max_recovery_attempts: i64,
+        updated_at_ms: i64,
+    ) -> anyhow::Result<Option<NativeMailboxRecoveryOutcome>> {
+        anyhow::ensure!(
+            max_recovery_attempts > 0,
+            "native mailbox recovery budget must be positive"
+        );
+        let quarantine_reason = format!(
+            "native mailbox recovery budget exhausted after {max_recovery_attempts} attempts without durable progress"
+        );
+        let row = sqlx::query(
+            r#"
+UPDATE native_mailbox_communications
+SET attempt_count = attempt_count + 1,
+    status = CASE
+        WHEN attempt_count + 1 > ? THEN 'quarantined'
+        ELSE status
+    END,
+    failure_fingerprint = CASE
+        WHEN attempt_count + 1 > ? THEN 'native_mailbox_recovery_without_progress'
+        ELSE failure_fingerprint
+    END,
+    quarantine_reason = CASE
+        WHEN attempt_count + 1 > ? THEN ?
+        ELSE quarantine_reason
+    END,
+    updated_at_ms = ?
+WHERE receiver_thread_id = ? AND communication_id = ? AND status = 'pending'
+RETURNING receiver_thread_id, communication_id, source_call_id, submission_id,
+    communication_json, payload_hash, status, attempt_count,
+    failure_fingerprint, last_progress_ref, quarantine_reason,
+    created_at_ms, updated_at_ms
+            "#,
+        )
+        .bind(max_recovery_attempts)
+        .bind(max_recovery_attempts)
+        .bind(max_recovery_attempts)
+        .bind(quarantine_reason)
+        .bind(updated_at_ms)
+        .bind(receiver_thread_id)
+        .bind(communication_id)
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+
+        let Some(record) = row.map(native_mailbox_record_from_row).transpose()? else {
+            return Ok(None);
+        };
+        if record.status == "quarantined" {
+            Ok(Some(NativeMailboxRecoveryOutcome::Quarantined(record)))
+        } else {
+            Ok(Some(NativeMailboxRecoveryOutcome::Claimed(record)))
+        }
     }
 }
 
@@ -268,6 +332,111 @@ mod tests {
                 .expect("communication remains auditable")
                 .status,
             "consumed"
+        );
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn native_mailbox_recovery_budget_quarantines_without_reenqueue() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-4000-8000-000000000630").expect("valid thread id");
+        let mut builder = ThreadMetadataBuilder::new(
+            thread_id,
+            codex_home.join("sessions").join("receiver.jsonl"),
+            Utc::now(),
+            SessionSource::Cli,
+        );
+        builder.cwd = codex_home.clone();
+        runtime
+            .upsert_thread(&builder.build("test-provider"))
+            .await
+            .expect("persist receiver thread");
+
+        let now = Utc::now().timestamp_millis();
+        let record = NativeMailboxCommunicationRecord {
+            receiver_thread_id: thread_id.to_string(),
+            communication_id: "poison-communication".to_string(),
+            source_call_id: Some("poison-communication".to_string()),
+            submission_id: Some("submission-poison".to_string()),
+            communication_json: r#"{"content":"poison"}"#.to_string(),
+            payload_hash: "sha256:poison".to_string(),
+            status: "pending".to_string(),
+            attempt_count: 0,
+            failure_fingerprint: None,
+            last_progress_ref: None,
+            quarantine_reason: None,
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        runtime
+            .insert_pending_native_mailbox_communication(&record)
+            .await
+            .expect("insert poison communication");
+
+        for expected_attempt in 1..=3 {
+            let outcome = runtime
+                .claim_native_mailbox_communication_for_recovery(
+                    &thread_id.to_string(),
+                    &record.communication_id,
+                    3,
+                    now + expected_attempt,
+                )
+                .await
+                .expect("claim recovery")
+                .expect("pending communication must be claimable");
+            let NativeMailboxRecoveryOutcome::Claimed(claimed) = outcome else {
+                panic!("attempt {expected_attempt} must remain recoverable");
+            };
+            assert_eq!(claimed.attempt_count, expected_attempt);
+        }
+
+        let outcome = runtime
+            .claim_native_mailbox_communication_for_recovery(
+                &thread_id.to_string(),
+                &record.communication_id,
+                3,
+                now + 4,
+            )
+            .await
+            .expect("exhaust recovery budget")
+            .expect("pending communication must transition to quarantine");
+        let NativeMailboxRecoveryOutcome::Quarantined(quarantined) = outcome else {
+            panic!("fourth recovery must quarantine the communication");
+        };
+        assert_eq!(quarantined.attempt_count, 4);
+        assert_eq!(
+            quarantined.failure_fingerprint.as_deref(),
+            Some("native_mailbox_recovery_without_progress")
+        );
+        assert!(
+            quarantined
+                .quarantine_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("after 3 attempts"))
+        );
+        assert!(
+            runtime
+                .list_pending_native_mailbox_communications(&thread_id.to_string())
+                .await
+                .expect("list pending after quarantine")
+                .is_empty()
+        );
+        assert!(
+            runtime
+                .claim_native_mailbox_communication_for_recovery(
+                    &thread_id.to_string(),
+                    &record.communication_id,
+                    3,
+                    now + 5,
+                )
+                .await
+                .expect("quarantined row is not claimable")
+                .is_none()
         );
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;

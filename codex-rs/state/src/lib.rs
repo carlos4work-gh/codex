@@ -68,6 +68,7 @@ pub use runtime::GoalUpdate;
 pub use runtime::MemoryStore;
 pub use runtime::NativeMailboxCommunicationRecord;
 pub use runtime::NativeMailboxInsertOutcome;
+pub use runtime::NativeMailboxRecoveryOutcome;
 pub use runtime::RemoteControlEnrollmentRecord;
 pub use runtime::RuntimeDbBackup;
 pub use runtime::RuntimeDbPath;
