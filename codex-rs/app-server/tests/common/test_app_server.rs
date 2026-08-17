@@ -56,6 +56,7 @@ use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::McpResourceReadParams;
 use codex_app_server_protocol::McpServerToolCallParams;
 use codex_app_server_protocol::MemythosArenaCompositionProvisionParams;
+use codex_app_server_protocol::MemythosArenaMessageSendParams;
 use codex_app_server_protocol::MemythosArenaPhaseStartParams;
 use codex_app_server_protocol::MemythosArenaRunParams;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
@@ -477,6 +478,17 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         self.send_request(
             "memythos/arena/phase/start",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_arena_message_request(
+        &mut self,
+        params: MemythosArenaMessageSendParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/arena/message",
             Some(serde_json::to_value(params)?),
         )
         .await

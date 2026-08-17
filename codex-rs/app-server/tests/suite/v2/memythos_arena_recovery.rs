@@ -18,7 +18,12 @@ use codex_app_server_protocol::MemythosArenaCostEnvelope;
 use codex_app_server_protocol::MemythosArenaCostEnvelopeMode;
 use codex_app_server_protocol::MemythosArenaCostExhaustionPolicy;
 use codex_app_server_protocol::MemythosArenaDecisionMethod;
+use codex_app_server_protocol::MemythosArenaDeliveryPolicy;
 use codex_app_server_protocol::MemythosArenaLifecycleState;
+use codex_app_server_protocol::MemythosArenaMessage;
+use codex_app_server_protocol::MemythosArenaMessageDelivery;
+use codex_app_server_protocol::MemythosArenaMessageSendParams;
+use codex_app_server_protocol::MemythosArenaMessageSendResponse;
 use codex_app_server_protocol::MemythosArenaPhaseStartParams;
 use codex_app_server_protocol::MemythosArenaRoundPolicy;
 use codex_app_server_protocol::MemythosArenaRunParams;
@@ -28,6 +33,7 @@ use codex_app_server_protocol::MemythosArenaStateGetResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
+use codex_app_server_protocol::ThreadResumeParams;
 use codex_protocol::openai_models::ReasoningEffort;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -137,6 +143,183 @@ async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents()
     Ok(())
 }
 
+#[tokio::test]
+async fn arena_mailbox_delivery_survives_sigkill_and_retries_idempotently() -> Result<()> {
+    let model_server = create_mock_responses_server_repeating_assistant("unused").await;
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml(
+        codex_home.path(),
+        &model_server.uri(),
+        &BTreeMap::new(),
+        /* auto_compact_limit */ 1024,
+        /* requires_openai_auth */ None,
+        "mock_provider",
+        "compact",
+    )?;
+    write_arena_role_catalog(&codex_home)?;
+
+    let mut first_process = TestAppServer::new(codex_home.path()).await?;
+    timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
+    let provisioned = provision_arena(&mut first_process).await?;
+    start_proposal_phase(&mut first_process).await?;
+    let concierge = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "room_concierge")
+        .expect("fixture must provision a Concierge");
+    let bettors = provisioned
+        .leases
+        .iter()
+        .filter(|lease| lease.role == "bettor")
+        .collect::<Vec<_>>();
+    assert_eq!(bettors.len(), 2);
+
+    let first_message = queued_proposal_message(
+        "message-before-sigkill",
+        &concierge.thread_id,
+        &bettors[0].thread_id,
+    );
+    let first_delivery = send_arena_message(&mut first_process, first_message.clone()).await?;
+    assert_eq!(first_delivery.status, "queued_in_native_mailbox");
+
+    let killed = first_process.sigkill().await?;
+    assert_eq!(killed.signal(), Some(9), "app-server must exit by SIGKILL");
+    drop(first_process);
+
+    let mut restarted_process = TestAppServer::new(codex_home.path()).await?;
+    timeout(RESPONSE_TIMEOUT, restarted_process.initialize()).await??;
+    let restored = read_arena_state(&mut restarted_process).await?;
+    assert_eq!(restored.deliveries.len(), 1);
+    assert_eq!(
+        restored.deliveries[0].delivery_id,
+        first_delivery.delivery_id
+    );
+
+    let replayed = send_arena_message(&mut restarted_process, first_message).await?;
+    assert_eq!(replayed.delivery_id, first_delivery.delivery_id);
+    assert_eq!(
+        read_arena_state(&mut restarted_process)
+            .await?
+            .deliveries
+            .len(),
+        1
+    );
+
+    resume_native_thread(&mut restarted_process, &bettors[1].thread_id).await?;
+    let second_delivery = send_arena_message(
+        &mut restarted_process,
+        queued_proposal_message(
+            "message-after-sigkill",
+            &concierge.thread_id,
+            &bettors[1].thread_id,
+        ),
+    )
+    .await?;
+    assert_ne!(second_delivery.delivery_id, first_delivery.delivery_id);
+    assert_eq!(second_delivery.status, "queued_in_native_mailbox");
+    assert!(second_delivery.rejection_reason.is_none());
+    let final_state = read_arena_state(&mut restarted_process).await?;
+    assert_eq!(final_state.deliveries.len(), 2);
+    assert_eq!(
+        final_state
+            .deliveries
+            .iter()
+            .map(|delivery| delivery.delivery_id.as_str())
+            .collect::<HashSet<_>>()
+            .len(),
+        2
+    );
+
+    Ok(())
+}
+
+async fn provision_arena(
+    server: &mut TestAppServer,
+) -> Result<MemythosArenaCompositionProvisionResponse> {
+    let provision_id = server
+        .send_memythos_arena_composition_provision_request(competitive_composition_params())
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        server.read_stream_until_response_message(RequestId::Integer(provision_id)),
+    )
+    .await??;
+    to_response(response)
+}
+
+async fn start_proposal_phase(server: &mut TestAppServer) -> Result<()> {
+    let phase_id = server
+        .send_memythos_arena_phase_start_request(MemythosArenaPhaseStartParams {
+            arena_id: "arena-sigkill".to_string(),
+            round_id: "round-1".to_string(),
+            phase: "proposal".to_string(),
+        })
+        .await?;
+    timeout(
+        RESPONSE_TIMEOUT,
+        server.read_stream_until_response_message(RequestId::Integer(phase_id)),
+    )
+    .await??;
+    Ok(())
+}
+
+fn queued_proposal_message(
+    message_id: &str,
+    concierge_thread_id: &str,
+    bettor_thread_id: &str,
+) -> MemythosArenaMessage {
+    MemythosArenaMessage {
+        message_id: message_id.to_string(),
+        case_id: "case-sigkill".to_string(),
+        arena_id: "arena-sigkill".to_string(),
+        round_id: "round-1".to_string(),
+        from_parent_thread_id: concierge_thread_id.to_string(),
+        from_parent_role: "room_concierge".to_string(),
+        to_parent_thread_id: bettor_thread_id.to_string(),
+        to_parent_role: "bettor".to_string(),
+        message_kind: "peer_proposal".to_string(),
+        human_summary: "Prepare one independent proposal.".to_string(),
+        execution_prompt: None,
+        context_packet_ref: "app-server://arena-sigkill/context/proposal".to_string(),
+        artifact_refs: Vec::new(),
+        requires_response: false,
+        delivery_policy: Some(MemythosArenaDeliveryPolicy::QueueOnly),
+        aggregate_contract: None,
+        response_contract: None,
+        output_schema: None,
+    }
+}
+
+async fn send_arena_message(
+    server: &mut TestAppServer,
+    message: MemythosArenaMessage,
+) -> Result<MemythosArenaMessageDelivery> {
+    let message_id = server
+        .send_memythos_arena_message_request(MemythosArenaMessageSendParams { message })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        server.read_stream_until_response_message(RequestId::Integer(message_id)),
+    )
+    .await??;
+    Ok(to_response::<MemythosArenaMessageSendResponse>(response)?.delivery)
+}
+
+async fn resume_native_thread(server: &mut TestAppServer, thread_id: &str) -> Result<()> {
+    let resume_id = server
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        RESPONSE_TIMEOUT,
+        server.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    Ok(())
+}
+
 async fn read_native_thread_ids(server: &mut TestAppServer) -> Result<HashSet<String>> {
     let list_id = server
         .send_thread_list_request(ThreadListParams {
@@ -209,6 +392,15 @@ proposal_bearing = false
 }
 
 async fn read_arena_thread_ids(server: &mut TestAppServer) -> Result<HashSet<String>> {
+    Ok(read_arena_state(server)
+        .await?
+        .parents
+        .into_iter()
+        .map(|parent| parent.thread_id)
+        .collect())
+}
+
+async fn read_arena_state(server: &mut TestAppServer) -> Result<MemythosArenaStateGetResponse> {
     let state_id = server
         .send_memythos_arena_state_get_request(MemythosArenaStateGetParams {
             arena_id: "arena-sigkill".to_string(),
@@ -219,13 +411,7 @@ async fn read_arena_thread_ids(server: &mut TestAppServer) -> Result<HashSet<Str
         server.read_stream_until_response_message(RequestId::Integer(state_id)),
     )
     .await??;
-    Ok(
-        to_response::<MemythosArenaStateGetResponse>(state_response)?
-            .parents
-            .into_iter()
-            .map(|parent| parent.thread_id)
-            .collect(),
-    )
+    to_response(state_response)
 }
 
 fn competitive_composition_params() -> MemythosArenaCompositionProvisionParams {

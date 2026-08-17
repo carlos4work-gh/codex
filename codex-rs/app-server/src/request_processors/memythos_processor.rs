@@ -1929,6 +1929,10 @@ fn arena_snapshot_sha256(snapshot_json: &str) -> String {
     format!("{:x}", Sha256::digest(snapshot_json.as_bytes()))
 }
 
+fn generated_id_sequence(id: &str, prefix: &str) -> Option<u64> {
+    id.strip_prefix(prefix)?.strip_prefix('_')?.parse().ok()
+}
+
 fn validate_reusable_parent_identity(
     developer_instructions: Option<&str>,
     params: &MemythosArenaCompositionProvisionParams,
@@ -4254,6 +4258,15 @@ impl MemythosRequestProcessor {
             };
 
             let mut state = self.state.lock().await;
+            if let Some(max_delivery_id) = snapshot
+                .deliveries
+                .iter()
+                .filter_map(|delivery| generated_id_sequence(&delivery.delivery_id, "mem_delivery"))
+                .max()
+            {
+                self.next_delivery_id
+                    .fetch_max(max_delivery_id, std::sync::atomic::Ordering::Relaxed);
+            }
             state.arenas.insert(record.arena_id.clone(), arena);
             state
                 .arena_lifecycles
@@ -5575,6 +5588,17 @@ impl MemythosRequestProcessor {
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         self.ensure_arena_state_restored().await?;
         let mut message = params.message;
+        {
+            let state = self.state.lock().await;
+            if let Some(delivery) = state.arena_message_deliveries.iter().find(|delivery| {
+                delivery.arena_id == message.arena_id && delivery.message_id == message.message_id
+            }) {
+                return Ok(MemythosArenaMessageSendResponse {
+                    delivery: delivery.clone(),
+                }
+                .into());
+            }
+        }
         let (layer_id, aggregate_state, target_reasoning_effort) = {
             let mut state = self.state.lock().await;
             let Some(arena) = state.arenas.get(&message.arena_id) else {

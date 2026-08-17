@@ -49,3 +49,6 @@ jobs:
 
       - name: Arena SIGKILL recovery boundary
         run: cargo test -p codex-app-server --test all arena_provision_checkpoint_survives_sigkill_without_duplicate_parents
+
+      - name: Arena delivery retry after SIGKILL
+        run: cargo test -p codex-app-server --test all arena_mailbox_delivery_survives_sigkill_and_retries_idempotently
