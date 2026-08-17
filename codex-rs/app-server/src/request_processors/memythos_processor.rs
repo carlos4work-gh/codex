@@ -177,6 +177,9 @@ use crate::outgoing_message::ConnectionRequestId;
 use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
+use crate::request_processors::memythos_arena_state::ArenaCommand;
+use crate::request_processors::memythos_arena_state::ArenaEventKind;
+use crate::request_processors::memythos_arena_state::NativeArenaState;
 use crate::request_processors::thread_processor::with_memythos_room_tools;
 
 struct MemythosRuntimeState {
@@ -190,6 +193,7 @@ struct MemythosRuntimeState {
     degraded_reasons: Vec<String>,
     layers: HashMap<String, MemythosLayer>,
     arenas: HashMap<String, MemythosArena>,
+    arena_lifecycles: HashMap<String, NativeArenaState>,
     rooms: HashMap<String, MemythosRoom>,
     thread_attachments: HashMap<String, MemythosThreadAttachment>,
     arena_parents: HashMap<String, MemythosArenaParent>,
@@ -3920,6 +3924,7 @@ impl MemythosRequestProcessor {
                 degraded_reasons: Vec::new(),
                 layers: HashMap::new(),
                 arenas: HashMap::new(),
+                arena_lifecycles: HashMap::new(),
                 rooms: HashMap::new(),
                 thread_attachments: HashMap::new(),
                 arena_parents: HashMap::new(),
@@ -4237,6 +4242,12 @@ impl MemythosRequestProcessor {
             objective: params.objective,
             participant_ids: params.participant_ids,
         };
+        state.arena_lifecycles.insert(
+            arena_id.clone(),
+            NativeArenaState::new(arena_id.clone()).map_err(|error| {
+                invalid_params(format!("failed to initialize native arena state: {error}"))
+            })?,
+        );
         state.arenas.insert(arena_id, arena.clone());
         self.push_telemetry_ref(
             &mut state,
@@ -4459,8 +4470,26 @@ impl MemythosRequestProcessor {
                 resume_assessment.resume_execution_plan.clone(),
             );
             if resume_assessment.disposition == MemythosArenaResumeDisposition::PartialResume {
+                let lifecycle_state = state
+                    .arena_lifecycles
+                    .get_mut(&params.arena_id)
+                    .ok_or_else(|| {
+                        invalid_params(format!(
+                            "arena {} has no canonical native lifecycle",
+                            params.arena_id
+                        ))
+                    })?
+                    .transition(ArenaCommand::Activate)
+                    .map_err(|error| invalid_params(error.to_string()))
+                    .map(|_| {
+                        state
+                            .arena_lifecycles
+                            .get(&params.arena_id)
+                            .expect("arena lifecycle exists after resume activation")
+                            .protocol_state()
+                    })?;
                 if let Some(arena) = state.arenas.get_mut(&params.arena_id) {
-                    arena.lifecycle_state = MemythosArenaLifecycleState::Running;
+                    arena.lifecycle_state = lifecycle_state;
                 }
                 if let Some(composition) = state.arena_compositions.get_mut(&params.arena_id) {
                     composition.lifecycle_state =
@@ -4802,6 +4831,18 @@ impl MemythosRequestProcessor {
 
         // Commit the validated composition as one state mutation. No partial room is observable.
         let mut state = self.state.lock().await;
+        let native_lifecycle = state
+            .arena_lifecycles
+            .entry(params.contract.arena_id.clone())
+            .or_insert(
+                NativeArenaState::new(params.contract.arena_id.clone()).map_err(|error| {
+                    invalid_params(format!("failed to initialize native arena state: {error}"))
+                })?,
+            );
+        let lifecycle_event = native_lifecycle
+            .transition(ArenaCommand::Activate)
+            .map_err(|error| invalid_params(error.to_string()))?;
+        let arena_lifecycle_state = native_lifecycle.protocol_state();
         state
             .thread_attachments
             .retain(|_, attachment| attachment.arena_id != params.contract.arena_id);
@@ -4813,7 +4854,7 @@ impl MemythosRequestProcessor {
             layer_id: params.layer_id.clone(),
             name: params.contract.arena_id.clone(),
             kind: codex_app_server_protocol::MemythosArenaKind::Debate,
-            lifecycle_state: MemythosArenaLifecycleState::Running,
+            lifecycle_state: arena_lifecycle_state,
             objective: params.contract.shared_objective.clone(),
             participant_ids: participants
                 .iter()
@@ -4862,9 +4903,10 @@ impl MemythosRequestProcessor {
             None,
             MemythosEventChannel::StateTransition,
             format!(
-                "Arena composition {} provisioned atomically with {} native parents.",
+                "Arena composition {} provisioned atomically with {} native parents at transition {}.",
                 params.contract.arena_id,
-                participants.len()
+                participants.len(),
+                lifecycle_event.sequence
             ),
         );
 
@@ -4890,19 +4932,39 @@ impl MemythosRequestProcessor {
         params: MemythosThreadAttachParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let mut state = self.state.lock().await;
-        let Some(arena) = state.arenas.get_mut(&params.arena_id) else {
+        if !state.arenas.contains_key(&params.arena_id) {
             return Err(invalid_params(format!(
                 "unknown arena id: {}",
                 params.arena_id
             )));
-        };
+        }
+        let lifecycle_state = state
+            .arena_lifecycles
+            .get_mut(&params.arena_id)
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "arena {} has no canonical native lifecycle",
+                    params.arena_id
+                ))
+            })?
+            .transition(ArenaCommand::Activate)
+            .map_err(|error| invalid_params(error.to_string()))
+            .map(|_| {
+                state
+                    .arena_lifecycles
+                    .get(&params.arena_id)
+                    .expect("arena lifecycle exists after activation")
+                    .protocol_state()
+            })?;
+        let arena = state
+            .arenas
+            .get_mut(&params.arena_id)
+            .expect("arena existence checked before lifecycle transition");
 
         if !arena.participant_ids.contains(&params.thread_id) {
             arena.participant_ids.push(params.thread_id.clone());
         }
-        if arena.lifecycle_state == MemythosArenaLifecycleState::Draft {
-            arena.lifecycle_state = MemythosArenaLifecycleState::Running;
-        }
+        arena.lifecycle_state = lifecycle_state;
         let layer_id = arena.layer_id.clone();
 
         let attachment_id = self.next_id("mem_attach", &self.next_attachment_id);
@@ -5032,13 +5094,7 @@ impl MemythosRequestProcessor {
         params: MemythosArenaPhaseStartParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let update = self
-            .update_arena_phase(
-                params.arena_id,
-                params.round_id,
-                params.phase,
-                MemythosArenaLifecycleState::Running,
-                "started",
-            )
+            .update_arena_phase(params.arena_id, params.round_id, params.phase, true)
             .await?;
         Ok(MemythosArenaPhaseStartResponse {
             arena_id: update.arena_id,
@@ -5357,11 +5413,21 @@ impl MemythosRequestProcessor {
         params: MemythosArenaStateGetParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let state = self.state.lock().await;
-        let arena = state
+        let mut arena = state
             .arenas
             .get(&params.arena_id)
             .cloned()
             .ok_or_else(|| invalid_params(format!("unknown arena id: {}", params.arena_id)))?;
+        arena.lifecycle_state = state
+            .arena_lifecycles
+            .get(&params.arena_id)
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "arena {} has no canonical native lifecycle",
+                    params.arena_id
+                ))
+            })?
+            .protocol_state();
         let mut parents = state
             .arena_parents
             .values()
@@ -5391,20 +5457,45 @@ impl MemythosRequestProcessor {
         arena_id: String,
         round_id: String,
         phase: String,
-        lifecycle_state: MemythosArenaLifecycleState,
-        action: &str,
+        start: bool,
     ) -> Result<MemythosArenaPhaseUpdate, JSONRPCErrorError> {
         let mut state = self.state.lock().await;
-        let Some(arena) = state.arenas.get_mut(&arena_id) else {
+        if !state.arenas.contains_key(&arena_id) {
             return Err(invalid_params(format!("unknown arena id: {}", arena_id)));
+        }
+        let command = if start {
+            ArenaCommand::StartPhase {
+                round_id: round_id.clone(),
+                phase: phase.clone(),
+            }
+        } else {
+            ArenaCommand::ClosePhase {
+                round_id: round_id.clone(),
+                phase: phase.clone(),
+            }
         };
+        let lifecycle = state.arena_lifecycles.get_mut(&arena_id).ok_or_else(|| {
+            invalid_params(format!(
+                "arena {arena_id} has no canonical native lifecycle"
+            ))
+        })?;
+        let event = lifecycle
+            .transition(command)
+            .map_err(|error| invalid_params(error.to_string()))?;
+        let lifecycle_state = lifecycle.protocol_state();
+        let arena = state
+            .arenas
+            .get_mut(&arena_id)
+            .expect("arena existence checked before native transition");
         arena.lifecycle_state = lifecycle_state;
         let layer_id = arena.layer_id.clone();
         let arena_id = arena.arena_id.clone();
         let event_ref = format!(
-            "app-server://memythos/arenas/{arena_id}/rounds/{round_id}/phases/{phase}/{action}"
+            "app-server://memythos/arenas/{arena_id}/rounds/{round_id}/phases/{phase}/{}?sequence={}",
+            event.action(),
+            event.sequence
         );
-        if action == "closed" {
+        if event.kind == ArenaEventKind::PhaseClosed {
             let aggregate_prefix = format!("{arena_id}::{round_id}::");
             for aggregate in state
                 .arena_message_aggregates
@@ -5439,7 +5530,11 @@ impl MemythosRequestProcessor {
             Some(event_ref.clone()),
             None,
             MemythosEventChannel::StateTransition,
-            format!("Arena {arena_id} phase {phase} {action}."),
+            format!(
+                "Arena {arena_id} phase {phase} {} through canonical native transition {}.",
+                event.action(),
+                event.sequence
+            ),
         );
         Ok(MemythosArenaPhaseUpdate {
             arena_id,
@@ -5455,13 +5550,7 @@ impl MemythosRequestProcessor {
         params: MemythosArenaPhaseCloseParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let update = self
-            .update_arena_phase(
-                params.arena_id,
-                params.round_id,
-                params.phase,
-                MemythosArenaLifecycleState::ArtifactComplete,
-                "closed",
-            )
+            .update_arena_phase(params.arena_id, params.round_id, params.phase, false)
             .await?;
         Ok(MemythosArenaPhaseCloseResponse {
             arena_id: update.arena_id,
@@ -5484,15 +5573,25 @@ impl MemythosRequestProcessor {
             .get(&params.arena_id)
             .cloned()
             .ok_or_else(|| invalid_params(format!("unknown arena id: {}", params.arena_id)))?;
+        let lifecycle_state = state
+            .arena_lifecycles
+            .get(&params.arena_id)
+            .ok_or_else(|| {
+                invalid_params(format!(
+                    "arena {} has no canonical native lifecycle",
+                    params.arena_id
+                ))
+            })?
+            .protocol_state();
         Ok(MemythosArenaRunResponse {
             arena_id: params.arena_id,
             round_id: params.round_id,
-            lifecycle_state: arena.lifecycle_state,
+            lifecycle_state,
             phase_state_source: "app_server_protocol".to_string(),
             local_ts_arena_state_used: false,
             event_refs: vec![format!(
                 "app-server://memythos/arenas/{}/run/{}",
-                arena.arena_id, arena.lifecycle_state as u8
+                arena.arena_id, lifecycle_state as u8
             )],
         }
         .into())
@@ -7916,9 +8015,9 @@ impl MemythosRequestProcessor {
         }
 
         let mut state = self.state.lock().await;
-        let (arena_state, composition_state, state_ref, summary) = match candidate.outcome {
+        let (command, composition_state, state_ref, summary) = match candidate.outcome {
             ArenaTerminalOutcome::Close => (
-                MemythosArenaLifecycleState::ClosedCleanly,
+                ArenaCommand::CloseCleanly,
                 MemythosArenaCompositionLifecycleState::Closed,
                 "closed-cleanly",
                 format!(
@@ -7927,7 +8026,7 @@ impl MemythosRequestProcessor {
                 ),
             ),
             ArenaTerminalOutcome::ParentRollup => (
-                MemythosArenaLifecycleState::AwaitingParent,
+                ArenaCommand::AwaitParent,
                 MemythosArenaCompositionLifecycleState::BlockedAuthority,
                 "awaiting-parent",
                 format!(
@@ -7936,6 +8035,22 @@ impl MemythosRequestProcessor {
                 ),
             ),
         };
+        let native_lifecycle = state
+            .arena_lifecycles
+            .get_mut(&candidate.arena_id)
+            .expect("terminal arena candidate requires canonical native lifecycle");
+        let lifecycle_event = match native_lifecycle.transition(command) {
+            Ok(event) => event,
+            Err(error) => {
+                warn!(
+                    arena_id = candidate.arena_id,
+                    error = %error,
+                    "cannot terminalize native arena because its canonical transition was rejected"
+                );
+                return;
+            }
+        };
+        let arena_state = native_lifecycle.protocol_state();
         if let Some(arena) = state.arenas.get_mut(&candidate.arena_id) {
             arena.lifecycle_state = arena_state;
         }
@@ -7950,8 +8065,8 @@ impl MemythosRequestProcessor {
             Some(candidate.arena_id.clone()),
             None,
             Some(format!(
-                "app-server://memythos/arenas/{}/{state_ref}",
-                candidate.arena_id,
+                "app-server://memythos/arenas/{}/{state_ref}?sequence={}",
+                candidate.arena_id, lifecycle_event.sequence,
             )),
             None,
             MemythosEventChannel::StateTransition,

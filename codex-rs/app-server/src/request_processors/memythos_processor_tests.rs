@@ -2613,6 +2613,65 @@ async fn arena_request_owns_planning_provisioning_and_initial_activation() {
     assert_eq!(state.arena_message_deliveries.len(), 2);
 }
 
+#[tokio::test]
+async fn arena_request_state_survives_the_request_connection_boundary() {
+    let contract = competitive_composition_params().contract;
+    let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+        AppServerRpcTransport::InProcess,
+        Arc::new(FakeLivePeerParentDeliveryAdapter),
+        Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+        Arc::new(RecordOnlyThreadConsolidationAdapter),
+        Arc::new(RecordOnlyParentTurnResponseAdapter),
+        Arc::new(CompositionParentConfigurationAdapter),
+        Arc::new(FakeArenaParentProvisioningAdapter::default()),
+        Arc::new(FakeArenaCompositionPlanningAdapter { contract }),
+    );
+
+    let response = processor
+        .arena_request(semantic_arena_request_params(), ConnectionId(41))
+        .await
+        .expect("the ephemeral requester should hand the arena to app-server");
+    let ClientResponsePayload::MemythosArenaRequest(response) = response else {
+        panic!("expected semantic arena request response");
+    };
+    let round_id = response
+        .initial_delivery
+        .expect("initial request should activate the concierge")
+        .round_id;
+    drop(response.composition);
+
+    let state_response = processor
+        .arena_state_get(MemythosArenaStateGetParams {
+            arena_id: "arena-composition".to_string(),
+        })
+        .await
+        .expect("a later observer should read state without the requester connection");
+    let ClientResponsePayload::MemythosArenaStateGet(state_response) = state_response else {
+        panic!("expected MemythosArenaStateGet response");
+    };
+    assert!(!state_response.local_ts_arena_state_used);
+    assert_eq!(
+        state_response.arena.lifecycle_state,
+        MemythosArenaLifecycleState::Running
+    );
+
+    let run_response = processor
+        .arena_run(MemythosArenaRunParams {
+            arena_id: "arena-composition".to_string(),
+            round_id,
+        })
+        .await
+        .expect("the native runtime should outlive the request connection");
+    let ClientResponsePayload::MemythosArenaRun(run_response) = run_response else {
+        panic!("expected MemythosArenaRun response");
+    };
+    assert!(!run_response.local_ts_arena_state_used);
+    assert_eq!(
+        run_response.lifecycle_state,
+        MemythosArenaLifecycleState::Running
+    );
+}
+
 #[test]
 fn arena_intake_makes_app_server_the_only_activation_authority() {
     let params = semantic_arena_request_params();
@@ -7105,6 +7164,125 @@ async fn creates_layer_and_arena_contract() {
     assert_eq!(
         arena_response.arena.lifecycle_state,
         MemythosArenaLifecycleState::Draft
+    );
+}
+
+#[tokio::test]
+async fn canonical_arena_lifecycle_is_owned_by_rust_across_rpc_calls() {
+    let processor = MemythosRequestProcessor::new();
+    let layer_response = processor
+        .layer_create(MemythosLayerCreateParams {
+            name: "Native lifecycle".to_string(),
+            kind: MemythosLayerKind::BpmEndToEnd,
+            parent_layer_id: None,
+            objective: "Exercise canonical Arena transitions.".to_string(),
+        })
+        .await
+        .unwrap();
+    let ClientResponsePayload::MemythosLayerCreate(layer_response) = layer_response else {
+        panic!("expected MemythosLayerCreate response");
+    };
+    let arena_response = processor
+        .arena_create(MemythosArenaCreateParams {
+            layer_id: layer_response.layer.layer_id,
+            name: "Canonical lifecycle".to_string(),
+            kind: MemythosArenaKind::Debate,
+            objective: "Keep lifecycle authority in Rust.".to_string(),
+            participant_ids: vec![],
+        })
+        .await
+        .unwrap();
+    let ClientResponsePayload::MemythosArenaCreate(arena_response) = arena_response else {
+        panic!("expected MemythosArenaCreate response");
+    };
+    let arena_id = arena_response.arena.arena_id;
+    let start = MemythosArenaPhaseStartParams {
+        arena_id: arena_id.clone(),
+        round_id: "round-1".to_string(),
+        phase: "proposal".to_string(),
+    };
+
+    let first_start = processor.arena_phase_start(start.clone()).await.unwrap();
+    let ClientResponsePayload::MemythosArenaPhaseStart(first_start) = first_start else {
+        panic!("expected MemythosArenaPhaseStart response");
+    };
+    assert_eq!(
+        first_start.lifecycle_state,
+        MemythosArenaLifecycleState::Running
+    );
+    assert!(first_start.event_refs[0].contains("started?sequence=1"));
+
+    let retained_start = processor.arena_phase_start(start).await.unwrap();
+    let ClientResponsePayload::MemythosArenaPhaseStart(retained_start) = retained_start else {
+        panic!("expected MemythosArenaPhaseStart response");
+    };
+    assert!(
+        retained_start.event_refs[0].contains("start-retained?sequence=2"),
+        "repeating the RPC must retain the canonical phase"
+    );
+
+    let concurrent = processor
+        .arena_phase_start(MemythosArenaPhaseStartParams {
+            arena_id: arena_id.clone(),
+            round_id: "round-1".to_string(),
+            phase: "bet".to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert!(concurrent.message.contains("proposal is active"));
+
+    let state_response = processor
+        .arena_state_get(MemythosArenaStateGetParams {
+            arena_id: arena_id.clone(),
+        })
+        .await
+        .unwrap();
+    let ClientResponsePayload::MemythosArenaStateGet(state_response) = state_response else {
+        panic!("expected MemythosArenaStateGet response");
+    };
+    assert!(!state_response.local_ts_arena_state_used);
+    assert_eq!(
+        state_response.arena.lifecycle_state,
+        MemythosArenaLifecycleState::Running
+    );
+
+    let close = MemythosArenaPhaseCloseParams {
+        arena_id: arena_id.clone(),
+        round_id: "round-1".to_string(),
+        phase: "proposal".to_string(),
+    };
+    processor.arena_phase_close(close.clone()).await.unwrap();
+    let retained_close = processor.arena_phase_close(close).await.unwrap();
+    let ClientResponsePayload::MemythosArenaPhaseClose(retained_close) = retained_close else {
+        panic!("expected MemythosArenaPhaseClose response");
+    };
+    assert!(
+        retained_close.event_refs[0].contains("close-retained?sequence=4"),
+        "repeating close must not duplicate the transition"
+    );
+
+    processor
+        .arena_phase_start(MemythosArenaPhaseStartParams {
+            arena_id: arena_id.clone(),
+            round_id: "round-1".to_string(),
+            phase: "bet".to_string(),
+        })
+        .await
+        .unwrap();
+    let run_response = processor
+        .arena_run(MemythosArenaRunParams {
+            arena_id,
+            round_id: "round-1".to_string(),
+        })
+        .await
+        .unwrap();
+    let ClientResponsePayload::MemythosArenaRun(run_response) = run_response else {
+        panic!("expected MemythosArenaRun response");
+    };
+    assert!(!run_response.local_ts_arena_state_used);
+    assert_eq!(
+        run_response.lifecycle_state,
+        MemythosArenaLifecycleState::Running
     );
 }
 

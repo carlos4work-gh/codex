@@ -30,3 +30,9 @@ jobs:
 
       - name: Bounded resume regression
         run: cargo test -p codex-app-server arena_request_partially_resumes_without_replanning_the_active_composition
+
+      - name: Canonical Rust state reducer
+        run: cargo test -p codex-app-server memythos_arena_state::tests
+
+      - name: Requester disconnect regression
+        run: cargo test -p codex-app-server arena_request_state_survives_the_request_connection_boundary
