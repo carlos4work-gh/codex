@@ -52,3 +52,6 @@ jobs:
 
       - name: Arena delivery retry after SIGKILL
         run: cargo test -p codex-app-server --test all arena_mailbox_delivery_survives_sigkill_and_retries_idempotently
+
+      - name: Arena turn acknowledgement after SIGKILL
+        run: cargo test -p codex-app-server --test all arena_completed_turn_ack_survives_sigkill_without_duplicate_turn

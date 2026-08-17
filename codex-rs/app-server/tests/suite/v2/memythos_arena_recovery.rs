@@ -31,9 +31,14 @@ use codex_app_server_protocol::MemythosArenaRunResponse;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
 use codex_app_server_protocol::MemythosArenaStateGetResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadTurnsListParams;
+use codex_app_server_protocol::ThreadTurnsListResponse;
+use codex_app_server_protocol::TurnCompletedNotification;
+use codex_app_server_protocol::TurnStatus;
 use codex_protocol::openai_models::ReasoningEffort;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -233,6 +238,99 @@ async fn arena_mailbox_delivery_survives_sigkill_and_retries_idempotently() -> R
     Ok(())
 }
 
+#[tokio::test]
+async fn arena_completed_turn_ack_survives_sigkill_without_duplicate_turn() -> Result<()> {
+    let model_server = create_mock_responses_server_repeating_assistant("proposal complete").await;
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml(
+        codex_home.path(),
+        &model_server.uri(),
+        &BTreeMap::new(),
+        /* auto_compact_limit */ 1024,
+        /* requires_openai_auth */ None,
+        "mock_provider",
+        "compact",
+    )?;
+    write_arena_role_catalog(&codex_home)?;
+
+    let mut first_process = TestAppServer::new(codex_home.path()).await?;
+    timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
+    let provisioned = provision_arena(&mut first_process).await?;
+    start_proposal_phase(&mut first_process).await?;
+    let concierge = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "room_concierge")
+        .expect("fixture must provision a Concierge");
+    let bettor = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "bettor")
+        .expect("fixture must provision a bettor");
+    let message = triggered_proposal_message(
+        "message-completed-before-sigkill",
+        &concierge.thread_id,
+        &bettor.thread_id,
+    );
+
+    let delivered = send_arena_message(&mut first_process, message.clone()).await?;
+    assert_eq!(delivered.status, "delivered_to_native_mailbox_turn");
+    let receiver_turn_id = delivered
+        .receiver_turn_id
+        .clone()
+        .expect("triggered mailbox delivery must return a turn id");
+    let completed = wait_for_turn_completed(&mut first_process).await?;
+    assert_eq!(completed.thread_id, bettor.thread_id);
+    assert_eq!(completed.turn.id, receiver_turn_id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+
+    let acknowledged = read_arena_state(&mut first_process).await?;
+    let acknowledged_delivery = acknowledged
+        .deliveries
+        .iter()
+        .find(|delivery| delivery.message_id == message.message_id)
+        .expect("completed delivery must remain in Arena state");
+    assert_eq!(acknowledged_delivery.status, "receiver_turn_completed");
+    assert!(acknowledged_delivery.receiver_response_event_ref.is_some());
+    assert_eq!(
+        read_native_turn_ids(&mut first_process, &bettor.thread_id).await?,
+        vec![receiver_turn_id.clone()]
+    );
+
+    let killed = first_process.sigkill().await?;
+    assert_eq!(killed.signal(), Some(9), "app-server must exit by SIGKILL");
+    drop(first_process);
+
+    let mut restarted_process = TestAppServer::new(codex_home.path()).await?;
+    timeout(RESPONSE_TIMEOUT, restarted_process.initialize()).await??;
+    let restored = read_arena_state(&mut restarted_process).await?;
+    let restored_delivery = restored
+        .deliveries
+        .iter()
+        .find(|delivery| delivery.message_id == message.message_id)
+        .expect("completed delivery checkpoint must be restored");
+    assert_eq!(restored_delivery.status, "receiver_turn_completed");
+    assert_eq!(
+        restored_delivery.receiver_turn_id.as_deref(),
+        Some(receiver_turn_id.as_str())
+    );
+    assert!(restored_delivery.receiver_response_event_ref.is_some());
+
+    let replayed = send_arena_message(&mut restarted_process, message).await?;
+    assert_eq!(replayed.delivery_id, delivered.delivery_id);
+    assert_eq!(replayed.status, "receiver_turn_completed");
+    assert_eq!(
+        replayed.receiver_turn_id.as_deref(),
+        Some(receiver_turn_id.as_str())
+    );
+    assert_eq!(
+        read_native_turn_ids(&mut restarted_process, &bettor.thread_id).await?,
+        vec![receiver_turn_id]
+    );
+
+    Ok(())
+}
+
 async fn provision_arena(
     server: &mut TestAppServer,
 ) -> Result<MemythosArenaCompositionProvisionResponse> {
@@ -290,6 +388,17 @@ fn queued_proposal_message(
     }
 }
 
+fn triggered_proposal_message(
+    message_id: &str,
+    concierge_thread_id: &str,
+    bettor_thread_id: &str,
+) -> MemythosArenaMessage {
+    let mut message = queued_proposal_message(message_id, concierge_thread_id, bettor_thread_id);
+    message.requires_response = true;
+    message.delivery_policy = Some(MemythosArenaDeliveryPolicy::Immediate);
+    message
+}
+
 async fn send_arena_message(
     server: &mut TestAppServer,
     message: MemythosArenaMessage,
@@ -318,6 +427,41 @@ async fn resume_native_thread(server: &mut TestAppServer, thread_id: &str) -> Re
     )
     .await??;
     Ok(())
+}
+
+async fn wait_for_turn_completed(server: &mut TestAppServer) -> Result<TurnCompletedNotification> {
+    let notification = timeout(
+        RESPONSE_TIMEOUT,
+        server.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    Ok(serde_json::from_value(
+        notification
+            .params
+            .expect("turn/completed params must be present"),
+    )?)
+}
+
+async fn read_native_turn_ids(server: &mut TestAppServer, thread_id: &str) -> Result<Vec<String>> {
+    let request_id = server
+        .send_thread_turns_list_request(ThreadTurnsListParams {
+            thread_id: thread_id.to_string(),
+            cursor: None,
+            limit: Some(10),
+            sort_direction: Some(SortDirection::Asc),
+            items_view: None,
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        server.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    Ok(to_response::<ThreadTurnsListResponse>(response)?
+        .data
+        .into_iter()
+        .map(|turn| turn.id)
+        .collect())
 }
 
 async fn read_native_thread_ids(server: &mut TestAppServer) -> Result<HashSet<String>> {
