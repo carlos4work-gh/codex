@@ -40,7 +40,7 @@ jobs:
         run: cargo test -p codex-state arena_snapshot_round_trips_without_semantic_concierge_state
 
       - name: Durable native mailbox state contract
-        run: cargo test -p codex-state native_mailbox_pending_record_is_idempotent_and_consumable
+        run: cargo test -p codex-state native_mailbox_
 
       - name: Canonical Rust state reducer
         run: cargo test -p codex-app-server memythos_arena_state::tests
@@ -56,6 +56,9 @@ jobs:
 
       - name: Native mailbox payload rehydration after SIGKILL
         run: cargo test -p codex-app-server --test all arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once
+
+      - name: Native mailbox crash-loop quarantine
+        run: cargo test -p codex-app-server --test all arena_mailbox_crash_loop_quarantines_poison_payload_and_warns
 
       - name: Arena turn acknowledgement after SIGKILL
         run: cargo test -p codex-app-server --test all arena_completed_turn_ack_survives_sigkill_without_duplicate_turn

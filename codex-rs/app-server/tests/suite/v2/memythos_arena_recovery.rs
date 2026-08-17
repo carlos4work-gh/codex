@@ -39,6 +39,7 @@ use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::WarningNotification;
 use codex_protocol::openai_models::ReasoningEffort;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -307,6 +308,135 @@ async fn arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once() -
             .len(),
         3
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Result<()> {
+    const POISON_PAYLOAD_MARKER: &str = "POISON_MAILBOX_PAYLOAD_MUST_BE_QUARANTINED";
+    const HEALTHY_WAKE_MARKER: &str = "HEALTHY_WAKE_AFTER_QUARANTINE";
+
+    let model_server = create_mock_responses_server_repeating_assistant("healthy recovery").await;
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml(
+        codex_home.path(),
+        &model_server.uri(),
+        &BTreeMap::new(),
+        /* auto_compact_limit */ 1024,
+        /* requires_openai_auth */ None,
+        "mock_provider",
+        "compact",
+    )?;
+    write_arena_role_catalog(&codex_home)?;
+
+    let mut first_process = TestAppServer::new(codex_home.path()).await?;
+    timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
+    let provisioned = provision_arena(&mut first_process).await?;
+    start_proposal_phase(&mut first_process).await?;
+    let concierge = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "room_concierge")
+        .expect("fixture must provision a Concierge");
+    let bettor = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "bettor")
+        .expect("fixture must provision a bettor");
+
+    let mut poison_message = queued_proposal_message(
+        "message-poison-crash-loop",
+        &concierge.thread_id,
+        &bettor.thread_id,
+    );
+    poison_message.execution_prompt = Some(POISON_PAYLOAD_MARKER.to_string());
+    let delivery = send_arena_message(&mut first_process, poison_message).await?;
+    assert_eq!(delivery.status, "queued_in_native_mailbox");
+    let killed = first_process.sigkill().await?;
+    assert_eq!(killed.signal(), Some(9));
+    drop(first_process);
+
+    for expected_attempt in 1..=3 {
+        let mut recovery_process = TestAppServer::new(codex_home.path()).await?;
+        timeout(RESPONSE_TIMEOUT, recovery_process.initialize()).await??;
+        resume_native_thread(&mut recovery_process, &bettor.thread_id).await?;
+
+        let state_db = codex_state::StateRuntime::init(
+            codex_home.path().to_path_buf(),
+            "mock_provider".to_string(),
+        )
+        .await?;
+        let record = state_db
+            .get_native_mailbox_communication(&bettor.thread_id, "message-poison-crash-loop")
+            .await?
+            .expect("poison communication must remain auditable");
+        assert_eq!(record.status, "pending");
+        assert_eq!(record.attempt_count, expected_attempt);
+        drop(state_db);
+
+        let killed = recovery_process.sigkill().await?;
+        assert_eq!(killed.signal(), Some(9));
+        drop(recovery_process);
+    }
+
+    let mut quarantining_process = TestAppServer::new(codex_home.path()).await?;
+    timeout(RESPONSE_TIMEOUT, quarantining_process.initialize()).await??;
+    resume_native_thread(&mut quarantining_process, &bettor.thread_id).await?;
+    let warning_notification = timeout(
+        RESPONSE_TIMEOUT,
+        quarantining_process.read_stream_until_notification_message("warning"),
+    )
+    .await??;
+    let warning: WarningNotification = serde_json::from_value(
+        warning_notification
+            .params
+            .expect("quarantine warning params must be present"),
+    )?;
+    assert_eq!(
+        warning.thread_id.as_deref(),
+        Some(bettor.thread_id.as_str())
+    );
+    assert!(warning.message.contains("message-poison-crash-loop"));
+    assert!(warning.message.contains("automatic recovery stopped"));
+
+    let state_db = codex_state::StateRuntime::init(
+        codex_home.path().to_path_buf(),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let quarantined = state_db
+        .get_native_mailbox_communication(&bettor.thread_id, "message-poison-crash-loop")
+        .await?
+        .expect("quarantined communication must remain auditable");
+    assert_eq!(quarantined.status, "quarantined");
+    assert_eq!(quarantined.attempt_count, 4);
+    assert_eq!(
+        quarantined.failure_fingerprint.as_deref(),
+        Some("native_mailbox_recovery_without_progress")
+    );
+    drop(state_db);
+
+    let mut healthy_wake = triggered_proposal_message(
+        "message-healthy-after-quarantine",
+        &concierge.thread_id,
+        &bettor.thread_id,
+    );
+    healthy_wake.execution_prompt = Some(HEALTHY_WAKE_MARKER.to_string());
+    let healthy_delivery = send_arena_message(&mut quarantining_process, healthy_wake).await?;
+    assert_eq!(healthy_delivery.status, "delivered_to_native_mailbox_turn");
+    let completed = wait_for_turn_completed(&mut quarantining_process).await?;
+    assert_eq!(completed.thread_id, bettor.thread_id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+
+    let requests = model_server
+        .received_requests()
+        .await
+        .expect("mock model server must record the healthy turn");
+    assert_eq!(requests.len(), 1);
+    let request_body = requests[0].body_json::<serde_json::Value>()?.to_string();
+    assert!(request_body.contains(HEALTHY_WAKE_MARKER));
+    assert!(!request_body.contains(POISON_PAYLOAD_MARKER));
 
     Ok(())
 }
