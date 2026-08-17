@@ -553,6 +553,160 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
 }
 
 #[tokio::test]
+async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Result<()> {
+    const SKIP_MARKER: &str = "QUARANTINED_SKIP_MUST_NOT_RUN";
+    const ABORT_MARKER: &str = "QUARANTINED_ABORT_MUST_NOT_RUN";
+    const REPLACED_MARKER: &str = "QUARANTINED_REPLACED_ORIGINAL_MUST_NOT_RUN";
+    const REPLACEMENT_MARKER: &str = "AUTHORIZED_REPLACEMENT_MUST_RUN";
+
+    let model_server = create_mock_responses_server_repeating_assistant("resolved").await;
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml(
+        codex_home.path(),
+        &model_server.uri(),
+        &BTreeMap::new(),
+        1024,
+        None,
+        "mock_provider",
+        "compact",
+    )?;
+    write_arena_role_catalog(&codex_home)?;
+    let mut first_process = TestAppServer::new(codex_home.path()).await?;
+    timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
+    let provisioned = provision_arena(&mut first_process).await?;
+    start_proposal_phase(&mut first_process).await?;
+    let concierge = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "room_concierge")
+        .expect("fixture must provision a Concierge");
+    let bettor = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "bettor")
+        .expect("fixture must provision a bettor");
+
+    for (message_id, marker) in [
+        ("message-terminal-skip", SKIP_MARKER),
+        ("message-terminal-abort", ABORT_MARKER),
+        ("message-terminal-replace", REPLACED_MARKER),
+    ] {
+        let mut message =
+            queued_proposal_message(message_id, &concierge.thread_id, &bettor.thread_id);
+        message.execution_prompt = Some(marker.to_string());
+        assert_eq!(
+            send_arena_message(&mut first_process, message)
+                .await?
+                .status,
+            "queued_in_native_mailbox"
+        );
+    }
+    assert_eq!(first_process.sigkill().await?.signal(), Some(9));
+    drop(first_process);
+
+    let state_db = codex_state::StateRuntime::init(
+        codex_home.path().to_path_buf(),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    for message_id in [
+        "message-terminal-skip",
+        "message-terminal-abort",
+        "message-terminal-replace",
+    ] {
+        for attempt in 1..=4 {
+            state_db
+                .claim_native_mailbox_communication_for_recovery(
+                    &bettor.thread_id,
+                    message_id,
+                    3,
+                    now + attempt,
+                )
+                .await?;
+        }
+    }
+    drop(state_db);
+
+    let mut process = TestAppServer::new(codex_home.path()).await?;
+    timeout(RESPONSE_TIMEOUT, process.initialize()).await??;
+    let skip = resolve_quarantine(
+        &mut process,
+        MemythosMailboxQuarantineResolveParams {
+            receiver_thread_id: bettor.thread_id.clone(),
+            communication_id: "message-terminal-skip".to_string(),
+            command_id: "command-terminal-skip".to_string(),
+            action: MemythosMailboxQuarantineResolutionAction::Skip,
+            actor: "operator:e2e".to_string(),
+            reason: "not required".to_string(),
+            replacement_message: None,
+        },
+    )
+    .await?;
+    assert_eq!(skip.resulting_status, "skipped");
+    let abort = resolve_quarantine(
+        &mut process,
+        MemythosMailboxQuarantineResolveParams {
+            receiver_thread_id: bettor.thread_id.clone(),
+            communication_id: "message-terminal-abort".to_string(),
+            command_id: "command-terminal-abort".to_string(),
+            action: MemythosMailboxQuarantineResolutionAction::Abort,
+            actor: "operator:e2e".to_string(),
+            reason: "unsafe payload".to_string(),
+            replacement_message: None,
+        },
+    )
+    .await?;
+    assert_eq!(abort.resulting_status, "aborted");
+    let mut replacement = queued_proposal_message(
+        "message-terminal-replacement",
+        &concierge.thread_id,
+        &bettor.thread_id,
+    );
+    replacement.execution_prompt = Some(REPLACEMENT_MARKER.to_string());
+    let replaced = resolve_quarantine(
+        &mut process,
+        MemythosMailboxQuarantineResolveParams {
+            receiver_thread_id: bettor.thread_id.clone(),
+            communication_id: "message-terminal-replace".to_string(),
+            command_id: "command-terminal-replace".to_string(),
+            action: MemythosMailboxQuarantineResolutionAction::Replace,
+            actor: "operator:e2e".to_string(),
+            reason: "corrected payload".to_string(),
+            replacement_message: Some(replacement),
+        },
+    )
+    .await?;
+    assert_eq!(replaced.resulting_status, "aborted");
+    assert_eq!(
+        replaced.replacement_communication_id.as_deref(),
+        Some("message-terminal-replacement")
+    );
+
+    resume_native_thread(&mut process, &bettor.thread_id).await?;
+    let mut wake = triggered_proposal_message(
+        "message-terminal-resolution-wake",
+        &concierge.thread_id,
+        &bettor.thread_id,
+    );
+    wake.execution_prompt = Some("TERMINAL_RESOLUTION_WAKE".to_string());
+    send_arena_message(&mut process, wake).await?;
+    wait_for_turn_completed(&mut process).await?;
+    let requests = model_server
+        .received_requests()
+        .await
+        .expect("replacement turn must reach model");
+    assert_eq!(requests.len(), 1);
+    let body = requests[0].body_json::<serde_json::Value>()?.to_string();
+    assert!(body.contains(REPLACEMENT_MARKER));
+    assert!(!body.contains(SKIP_MARKER));
+    assert!(!body.contains(ABORT_MARKER));
+    assert!(!body.contains(REPLACED_MARKER));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn arena_completed_turn_ack_survives_sigkill_without_duplicate_turn() -> Result<()> {
     let model_server = create_mock_responses_server_repeating_assistant("proposal complete").await;
     let codex_home = TempDir::new()?;
@@ -726,6 +880,21 @@ async fn send_arena_message(
     )
     .await??;
     Ok(to_response::<MemythosArenaMessageSendResponse>(response)?.delivery)
+}
+
+async fn resolve_quarantine(
+    server: &mut TestAppServer,
+    params: MemythosMailboxQuarantineResolveParams,
+) -> Result<MemythosMailboxQuarantineResolveResponse> {
+    let request_id = server
+        .send_memythos_mailbox_quarantine_resolve_request(params)
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        server.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    Ok(to_response(response)?)
 }
 
 async fn resume_native_thread(server: &mut TestAppServer, thread_id: &str) -> Result<()> {
