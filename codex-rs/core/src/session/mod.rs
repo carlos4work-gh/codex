@@ -403,6 +403,8 @@ pub struct Codex {
 
 pub(crate) type SessionLoopTermination = Shared<BoxFuture<'static, ()>>;
 
+const NATIVE_MAILBOX_MAX_RECOVERY_ATTEMPTS: i64 = 3;
+
 /// Wrapper returned by [`Codex::spawn`] containing the spawned [`Codex`] and
 /// the unique session id.
 pub struct CodexSpawnOk {
@@ -2819,10 +2821,11 @@ impl Session {
     async fn restore_native_mailbox_communications(
         &self,
         initial_history: &InitialHistory,
-    ) -> CodexResult<()> {
+    ) -> CodexResult<Vec<String>> {
         let Some(state_db) = self.state_db() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
+        let mut warnings = Vec::new();
         let materialized_source_call_ids = initial_history
             .get_rollout_items()
             .into_iter()
@@ -2857,6 +2860,32 @@ impl Session {
                     })?;
                 continue;
             }
+            let recovery = state_db
+                .claim_native_mailbox_communication_for_recovery(
+                    &record.receiver_thread_id,
+                    &record.communication_id,
+                    NATIVE_MAILBOX_MAX_RECOVERY_ATTEMPTS,
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .await
+                .map_err(|err| {
+                    CodexErr::Fatal(format!(
+                        "failed to claim native mailbox communication for recovery: {err}"
+                    ))
+                })?;
+            let record = match recovery {
+                Some(codex_state::NativeMailboxRecoveryOutcome::Claimed(record)) => record,
+                Some(codex_state::NativeMailboxRecoveryOutcome::Quarantined(record)) => {
+                    let warning = format!(
+                        "Native mailbox communication {} was quarantined after {} recovery attempts without durable progress; automatic recovery stopped.",
+                        record.communication_id, record.attempt_count
+                    );
+                    warn!("{warning}");
+                    warnings.push(warning);
+                    continue;
+                }
+                None => continue,
+            };
             let communication =
                 serde_json::from_str(&record.communication_json).map_err(|err| {
                     CodexErr::Fatal(format!(
@@ -2871,7 +2900,7 @@ impl Session {
                 )
                 .await;
         }
-        Ok(())
+        Ok(warnings)
     }
 
     async fn maybe_warn_on_server_model_mismatch(

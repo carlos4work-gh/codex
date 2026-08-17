@@ -1084,8 +1084,15 @@ impl Session {
                 services,
                 next_internal_sub_id: AtomicU64::new(0),
             });
-            sess.restore_native_mailbox_communications(&initial_history)
+            let native_mailbox_recovery_warnings = sess
+                .restore_native_mailbox_communications(&initial_history)
                 .await?;
+            for message in native_mailbox_recovery_warnings {
+                post_session_configured_events.push(Event {
+                    id: INITIAL_SUBMIT_ID.to_owned(),
+                    msg: EventMsg::Warning(WarningEvent { message }),
+                });
+            }
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;
                 *guard = Arc::downgrade(&sess);
