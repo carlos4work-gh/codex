@@ -5372,158 +5372,164 @@ async fn room_tool_routes_concierge_to_selected_parent() {
 
 #[tokio::test]
 async fn completed_bettor_proposals_fan_out_and_trigger_each_bettor_once() {
-    let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
-        AppServerRpcTransport::Websocket,
-        Arc::new(FakeLivePeerParentDeliveryAdapter),
-        Arc::new(FakeParentGoalSnapshotAdapter),
-        Arc::new(RecordOnlyThreadConsolidationAdapter),
-        Arc::new(FakeParentTurnResponseAdapter),
-    );
-    register_room_with_native_arena(&processor, room_register_params_with_concierge_and_judge())
-        .await;
-    let arena_id = processor
-        .state
-        .lock()
-        .await
-        .rooms
-        .get("room-001")
-        .expect("registered room")
-        .arena_id
-        .clone();
-
-    let assignment = |id: &str, receiver: &str| MemythosArenaMessageDelivery {
-        delivery_id: format!("delivery-{id}"),
-        message_id: format!("message-{id}"),
-        human_summary: "Produce one independent proposal.".to_string(),
-        status: "receiver_turn_running".to_string(),
-        sender_thread_id: "thread_concierge".to_string(),
-        receiver_thread_id: receiver.to_string(),
-        arena_id: arena_id.clone(),
-        round_id: "round-1".to_string(),
-        phase: Some("proposal".to_string()),
-        delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
-        delivery_policy: None,
-        aggregate_id: None,
-        aggregate_state: None,
-        checkpoint_state: None,
-        checkpoint_event_refs: Vec::new(),
-        receiver_turn_id: Some(format!("turn-{id}")),
-        receiver_response_event_ref: None,
-        delivered_as_human_instruction: false,
-        memory_replay_required: false,
-        event_refs: Vec::new(),
-        rejection_reason: None,
-        failure_reason: None,
-    };
-    {
-        let mut state = processor.state.lock().await;
-        state
-            .arena_message_deliveries
-            .push(assignment("growth", "thread_growth"));
-        state
-            .arena_message_deliveries
-            .push(assignment("risk", "thread_risk"));
-    }
-
-    assert!(
-        processor
-            .record_native_turn_completed(
-                "thread_growth",
-                "turn-growth",
-                "completed",
-                Some(1_000),
-                Some(250),
-                None,
-                Some("Growth proposal with bounded upside.".to_string()),
-            )
-            .await
-    );
-    {
-        let state = processor.state.lock().await;
-        let responses = state
-            .arena_message_deliveries
-            .iter()
-            .filter(|delivery| {
-                delivery.sender_thread_id == "thread_growth"
-                    && delivery.phase.as_deref() == Some("peer_review_and_objection")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            responses.len(),
-            0,
-            "peer fanout must wait until the proposal set is sealed"
+    for completion_order in [[0_usize, 1_usize], [1_usize, 0_usize]] {
+        let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+            AppServerRpcTransport::Websocket,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(FakeParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(FakeParentTurnResponseAdapter),
+            Arc::new(CompositionParentConfigurationAdapter),
+            Arc::new(FakeArenaParentProvisioningAdapter::default()),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
         );
-    }
-
-    assert!(
-        processor
-            .record_native_turn_completed(
-                "thread_risk",
-                "turn-risk",
-                "completed",
-                Some(1_100),
-                Some(275),
-                None,
-                Some("Risk proposal with explicit downside limits.".to_string()),
-            )
+        let response = processor
+            .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
             .await
-    );
-    let delivery_count = {
-        let state = processor.state.lock().await;
-        let responses = state
-            .arena_message_deliveries
+            .expect("native composition should provision before fanout");
+        let ClientResponsePayload::MemythosArenaCompositionProvision(response) = response else {
+            panic!("expected arena composition provision response");
+        };
+        let concierge_thread_id = response
+            .room
+            .participants
             .iter()
-            .filter(|delivery| {
-                matches!(
-                    delivery.sender_thread_id.as_str(),
-                    "thread_growth" | "thread_risk"
-                ) && delivery.phase.as_deref() == Some("peer_review_and_objection")
-            })
+            .find(|participant| participant.parent_role == "room_concierge")
+            .expect("native room concierge")
+            .thread_id
+            .clone();
+        let bettor_thread_ids = response
+            .room
+            .participants
+            .iter()
+            .filter(|participant| participant.parent_role == "bettor")
+            .map(|participant| participant.thread_id.clone())
             .collect::<Vec<_>>();
-        assert_eq!(responses.len(), 2);
-        assert!(
-            responses
-                .iter()
-                .all(|delivery| { delivery.sender_thread_id != delivery.receiver_thread_id })
-        );
-        assert_eq!(
-            responses
+        assert_eq!(bettor_thread_ids.len(), 2);
+        let bettor_thread_set = bettor_thread_ids.iter().cloned().collect::<HashSet<_>>();
+        let turn_ids = ["proposal-turn-0", "proposal-turn-1"];
+
+        {
+            let mut state = processor.state.lock().await;
+            for (index, receiver_thread_id) in bettor_thread_ids.iter().enumerate() {
+                state
+                    .arena_message_deliveries
+                    .push(MemythosArenaMessageDelivery {
+                        delivery_id: format!("proposal-assignment-{index}"),
+                        message_id: format!("proposal-request-{index}"),
+                        human_summary: "Produce one independent proposal.".to_string(),
+                        status: "receiver_turn_running".to_string(),
+                        sender_thread_id: concierge_thread_id.clone(),
+                        receiver_thread_id: receiver_thread_id.clone(),
+                        arena_id: response.room.arena_id.clone(),
+                        round_id: "round-1".to_string(),
+                        phase: Some("proposal".to_string()),
+                        delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+                        delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+                        aggregate_id: None,
+                        aggregate_state: None,
+                        checkpoint_state: None,
+                        checkpoint_event_refs: Vec::new(),
+                        receiver_turn_id: Some(turn_ids[index].to_string()),
+                        receiver_response_event_ref: None,
+                        delivered_as_human_instruction: false,
+                        memory_replay_required: false,
+                        event_refs: Vec::new(),
+                        rejection_reason: None,
+                        failure_reason: None,
+                    });
+            }
+        }
+
+        for (completion_position, bettor_index) in completion_order.iter().enumerate() {
+            assert!(
+                processor
+                    .record_native_turn_completed(
+                        &bettor_thread_ids[*bettor_index],
+                        turn_ids[*bettor_index],
+                        "completed",
+                        Some(1_000 + i64::try_from(completion_position).expect("small index")),
+                        Some(250),
+                        None,
+                        Some(format!("Proposal {bettor_index} with explicit tradeoffs.")),
+                    )
+                    .await
+            );
+            if completion_position == 0 {
+                let state = processor.state.lock().await;
+                assert_eq!(
+                    state
+                        .arena_message_deliveries
+                        .iter()
+                        .filter(|delivery| {
+                            bettor_thread_set.contains(&delivery.sender_thread_id)
+                                && delivery.phase.as_deref() == Some("peer_review_and_objection")
+                        })
+                        .count(),
+                    0,
+                    "peer fanout must wait until the proposal set is sealed"
+                );
+            }
+        }
+
+        let delivery_count = {
+            let state = processor.state.lock().await;
+            let responses = state
+                .arena_message_deliveries
                 .iter()
                 .filter(|delivery| {
-                    delivery.aggregate_state
-                        == Some(MemythosArenaAggregateState::RecipientTriggered)
+                    bettor_thread_set.contains(&delivery.sender_thread_id)
+                        && delivery.phase.as_deref() == Some("peer_review_and_objection")
                 })
-                .count(),
-            2,
-            "the last proposal must trigger exactly one review turn per bettor"
-        );
-        assert_eq!(
-            responses
-                .iter()
-                .filter_map(|delivery| delivery.receiver_turn_id.as_deref())
-                .filter(|turn_id| *turn_id != "mailbox_queued")
-                .count(),
-            2
-        );
-        state.arena_message_deliveries.len()
-    };
+                .collect::<Vec<_>>();
+            assert_eq!(responses.len(), 2);
+            assert!(
+                responses
+                    .iter()
+                    .all(|delivery| delivery.sender_thread_id != delivery.receiver_thread_id)
+            );
+            assert_eq!(
+                responses
+                    .iter()
+                    .filter(|delivery| {
+                        delivery.aggregate_state
+                            == Some(MemythosArenaAggregateState::RecipientTriggered)
+                    })
+                    .count(),
+                2,
+                "the sealed proposal set must trigger exactly one review turn per bettor"
+            );
+            assert_eq!(
+                responses
+                    .iter()
+                    .filter_map(|delivery| delivery.receiver_turn_id.as_deref())
+                    .filter(|turn_id| *turn_id != "mailbox_queued")
+                    .count(),
+                2
+            );
+            state.arena_message_deliveries.len()
+        };
 
-    processor
-        .record_native_turn_completed(
-            "thread_risk",
-            "turn-risk",
-            "completed",
-            Some(1_100),
-            Some(275),
-            None,
-            Some("Risk proposal with explicit downside limits.".to_string()),
-        )
-        .await;
-    assert_eq!(
-        processor.state.lock().await.arena_message_deliveries.len(),
-        delivery_count,
-        "turn completion replay must not duplicate the native room response"
-    );
+        let replayed_index = completion_order[1];
+        processor
+            .record_native_turn_completed(
+                &bettor_thread_ids[replayed_index],
+                turn_ids[replayed_index],
+                "completed",
+                Some(1_001),
+                Some(250),
+                None,
+                Some(format!(
+                    "Proposal {replayed_index} with explicit tradeoffs."
+                )),
+            )
+            .await;
+        assert_eq!(
+            processor.state.lock().await.arena_message_deliveries.len(),
+            delivery_count,
+            "turn completion replay must not duplicate the native room response"
+        );
+    }
 }
 
 #[tokio::test]
