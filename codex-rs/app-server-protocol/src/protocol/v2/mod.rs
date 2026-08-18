@@ -1,6 +1,7 @@
 mod shared;
 
 mod account;
+mod agent_role;
 mod apps;
 mod attestation;
 mod bedrock;
@@ -16,6 +17,7 @@ mod fs;
 mod hook;
 mod item;
 mod mcp;
+mod memythos;
 mod model;
 mod notification;
 mod permissions;
@@ -33,6 +35,7 @@ mod turn;
 mod windows_sandbox;
 
 pub use account::*;
+pub use agent_role::*;
 pub use apps::*;
 pub use attestation::*;
 pub use bedrock::*;
@@ -48,6 +51,7 @@ pub use fs::*;
 pub use hook::*;
 pub use item::*;
 pub use mcp::*;
+pub use memythos::*;
 pub use model::*;
 pub use notification::*;
 pub use permissions::*;

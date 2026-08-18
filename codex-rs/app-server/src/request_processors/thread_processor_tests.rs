@@ -1,3 +1,136 @@
+use super::MEMYTHOS_ROOM_TOOL_NAMESPACE;
+use super::with_memythos_room_tools;
+use codex_app_server_protocol::DynamicToolNamespaceTool;
+use codex_app_server_protocol::DynamicToolSpec;
+use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
+
+#[test]
+fn memythos_room_tools_are_registered_once() {
+    let tools = with_memythos_room_tools(None);
+    let namespace = tools
+        .iter()
+        .find_map(|tool| match tool {
+            DynamicToolSpec::Namespace(namespace)
+                if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE =>
+            {
+                Some(namespace)
+            }
+            _ => None,
+        })
+        .expect("Memythos room namespace should be registered");
+
+    assert_eq!(namespace.tools.len(), 4);
+    assert_eq!(
+        with_memythos_room_tools(Some(tools))
+            .iter()
+            .filter(|tool| {
+                matches!(
+                    tool,
+                    DynamicToolSpec::Namespace(namespace)
+                        if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE
+                )
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn existing_memythos_room_namespace_is_preserved() {
+    let existing = DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: MEMYTHOS_ROOM_TOOL_NAMESPACE.to_string(),
+        description: "custom room tools".to_string(),
+        tools: Vec::new(),
+    });
+
+    let tools = with_memythos_room_tools(Some(vec![existing]));
+
+    let DynamicToolSpec::Namespace(namespace) = &tools[0] else {
+        panic!("expected namespace");
+    };
+    assert_eq!(namespace.description, "custom room tools");
+    assert!(namespace.tools.is_empty());
+}
+
+#[test]
+fn memythos_room_send_message_is_not_a_reply_transport() {
+    let tools = with_memythos_room_tools(None);
+    let namespace = tools
+        .iter()
+        .find_map(|tool| match tool {
+            DynamicToolSpec::Namespace(namespace)
+                if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE =>
+            {
+                Some(namespace)
+            }
+            _ => None,
+        })
+        .expect("Memythos room namespace should be registered");
+    let send_message = namespace
+        .tools
+        .iter()
+        .find_map(|tool| match tool {
+            DynamicToolNamespaceTool::Function(function) if function.name == "send_message" => {
+                Some(function)
+            }
+            _ => None,
+        })
+        .expect("send_message tool should be registered");
+
+    assert!(send_message.description.contains("Initiate a separate"));
+    assert!(
+        send_message
+            .description
+            .contains("Do not call this tool to answer")
+    );
+    assert!(
+        send_message
+            .description
+            .contains("app-server returns automatically")
+    );
+}
+
+#[test]
+fn memythos_room_cross_room_tools_reuse_native_parent_turns() {
+    let tools = with_memythos_room_tools(None);
+    let namespace = tools
+        .iter()
+        .find_map(|tool| match tool {
+            DynamicToolSpec::Namespace(namespace)
+                if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE =>
+            {
+                Some(namespace)
+            }
+            _ => None,
+        })
+        .expect("Memythos room namespace should be registered");
+    let names = namespace
+        .tools
+        .iter()
+        .filter_map(|tool| match tool {
+            DynamicToolNamespaceTool::Function(function) => Some(function.name.as_str()),
+        })
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"list_rooms"));
+    assert!(names.contains(&"send_to_room"));
+    let send_to_room = namespace
+        .tools
+        .iter()
+        .find_map(|tool| match tool {
+            DynamicToolNamespaceTool::Function(function) if function.name == "send_to_room" => {
+                Some(function)
+            }
+            _ => None,
+        })
+        .expect("send_to_room tool should be registered");
+    assert!(send_to_room.description.contains("live concierge parent"));
+    assert!(
+        send_to_room
+            .description
+            .contains("reuses the same parent thread")
+    );
+}
+
 mod thread_list_cwd_filter_tests {
     use super::super::normalize_thread_list_cwd_filters;
     use codex_app_server_protocol::ThreadListCwdFilter;
@@ -677,6 +810,7 @@ mod thread_processor_behavior_tests {
             initial_turns_page: None,
         };
         let config_snapshot = ThreadConfigSnapshot {
+            agent_role: None,
             model: "gpt-5".to_string(),
             model_provider_id: "openai".to_string(),
             service_tier: Some("flex".to_string()),

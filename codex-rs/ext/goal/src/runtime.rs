@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -50,6 +51,7 @@ struct GoalRuntimeInner {
     enabled: AtomicBool,
     tools_available_for_thread: bool,
     goal_state_lock: Semaphore,
+    complete_after_turn_goal_id: Mutex<Option<String>>,
 }
 
 pub(crate) struct AccountedGoalProgress {
@@ -102,6 +104,7 @@ impl GoalRuntimeHandle {
                 enabled: AtomicBool::new(config.enabled),
                 tools_available_for_thread: config.tools_available_for_thread,
                 goal_state_lock: Semaphore::new(/*permits*/ 1),
+                complete_after_turn_goal_id: Mutex::new(None),
             }),
         }
     }
@@ -132,6 +135,87 @@ impl GoalRuntimeHandle {
             .acquire()
             .await
             .map_err(|err| err.to_string())
+    }
+
+    pub fn arm_completion_after_next_turn(&self, goal_id: String) {
+        *self
+            .inner
+            .complete_after_turn_goal_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(goal_id);
+    }
+
+    pub fn cancel_completion_after_next_turn(&self) {
+        *self
+            .inner
+            .complete_after_turn_goal_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    pub(crate) async fn complete_armed_goal_for_turn(&self, turn_id: &str) -> Result<(), String> {
+        let expected_goal_id = self
+            .inner
+            .complete_after_turn_goal_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(expected_goal_id) = expected_goal_id else {
+            return Ok(());
+        };
+
+        let _goal_state_permit = self.goal_state_permit().await?;
+        let Some(active_goal) = self
+            .inner
+            .state_dbs
+            .thread_goals()
+            .get_thread_goal(self.thread_id())
+            .await
+            .map_err(|err| err.to_string())?
+        else {
+            return Ok(());
+        };
+        if active_goal.goal_id != expected_goal_id
+            || active_goal.status != codex_state::ThreadGoalStatus::Active
+        {
+            return Ok(());
+        }
+
+        let previous_status = Some(active_goal.status);
+        let Some(goal) = self
+            .inner
+            .state_dbs
+            .thread_goals()
+            .update_thread_goal(
+                self.thread_id(),
+                codex_state::GoalUpdate {
+                    objective: None,
+                    status: Some(codex_state::ThreadGoalStatus::Complete),
+                    token_budget: None,
+                    expected_goal_id: Some(expected_goal_id.clone()),
+                },
+            )
+            .await
+            .map_err(|err| err.to_string())?
+        else {
+            return Ok(());
+        };
+
+        self.inner
+            .metrics
+            .record_terminal_if_status_changed(previous_status, &goal);
+        self.inner.analytics.status_changed(
+            &goal,
+            previous_status,
+            GoalEventAttribution::Turn(turn_id),
+        );
+        self.inner.accounting_state.clear_active_goal();
+        self.inner.event_emitter.thread_goal_updated(
+            format!("{turn_id}:one-shot-complete"),
+            Some(turn_id.to_string()),
+            protocol_goal_from_state(goal),
+        );
+        Ok(())
     }
 
     pub async fn prepare_external_goal_mutation(&self) -> Result<(), String> {

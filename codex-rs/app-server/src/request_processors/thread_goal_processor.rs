@@ -46,6 +46,87 @@ impl ThreadGoalRequestProcessor {
             .map(|()| None)
     }
 
+    pub(crate) async fn thread_goal_set_internal(
+        &self,
+        params: ThreadGoalSetParams,
+    ) -> Result<ThreadGoal, JSONRPCErrorError> {
+        self.thread_goal_set_internal_with_runtime_effects(params, true)
+            .await
+    }
+
+    /// Arms a goal for an immediately following `turn/start` without launching an
+    /// idle goal continuation. The turn-start extension will bind the active goal
+    /// to the accepted turn and retain the standard OOTB accounting lifecycle.
+    pub(crate) async fn thread_goal_arm_for_next_turn_internal(
+        &self,
+        params: ThreadGoalSetParams,
+    ) -> Result<ThreadGoal, JSONRPCErrorError> {
+        let goal = self
+            .thread_goal_set_internal_with_runtime_effects(params, false)
+            .await?;
+        let thread_id = parse_thread_id_for_request(goal.thread_id.as_str())?;
+        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        self.goal_service
+            .arm_current_goal_completion_after_next_turn(&state_db, thread_id)
+            .await
+            .map_err(goal_service_error)?;
+        Ok(goal)
+    }
+
+    async fn thread_goal_set_internal_with_runtime_effects(
+        &self,
+        params: ThreadGoalSetParams,
+        apply_runtime_effects: bool,
+    ) -> Result<ThreadGoal, JSONRPCErrorError> {
+        if !self.config.features.enabled(Feature::Goals) {
+            return Err(invalid_request("goals feature is disabled"));
+        }
+
+        let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let state_db = self.state_db_for_materialized_thread(thread_id).await?;
+        self.reconcile_thread_goal_rollout(thread_id, &state_db)
+            .await?;
+        let listener_command_tx = {
+            let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+            let thread_state = thread_state.lock().await;
+            thread_state.listener_command_tx()
+        };
+        let outcome = self
+            .goal_service
+            .set_thread_goal(
+                &state_db,
+                GoalSetRequest {
+                    thread_id,
+                    objective: params
+                        .objective
+                        .as_deref()
+                        .map(GoalObjectiveUpdate::Set)
+                        .unwrap_or(GoalObjectiveUpdate::Keep),
+                    status: params.status.map(ThreadGoalStatus::to_core),
+                    token_budget: match params.token_budget {
+                        Some(token_budget) => GoalTokenBudgetUpdate::Set(token_budget),
+                        None => GoalTokenBudgetUpdate::Keep,
+                    },
+                },
+            )
+            .await
+            .map_err(goal_service_error)?;
+        let goal = ThreadGoal::from(outcome.goal.clone());
+        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+            && let Err(err) = thread
+                .append_rollout_items(&[outcome.thread_goal_updated_item()])
+                .await
+        {
+            warn!("failed to persist internal goal update for live thread {thread_id}: {err}");
+        }
+        self.emit_thread_goal_updated_ordered(thread_id, goal.clone(), listener_command_tx)
+            .await;
+        if apply_runtime_effects {
+            outcome.apply_runtime_effects(&self.goal_service).await;
+        }
+        Ok(goal)
+    }
+
     pub(crate) async fn thread_goal_get(
         &self,
         params: ThreadGoalGetParams,
@@ -53,6 +134,15 @@ impl ThreadGoalRequestProcessor {
         self.thread_goal_get_inner(params)
             .await
             .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn thread_goal_get_internal(
+        &self,
+        thread_id: String,
+    ) -> Result<Option<ThreadGoal>, JSONRPCErrorError> {
+        self.thread_goal_get_inner(ThreadGoalGetParams { thread_id })
+            .await
+            .map(|response| response.goal)
     }
 
     pub(crate) async fn thread_goal_clear(

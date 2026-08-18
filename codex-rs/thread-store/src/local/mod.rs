@@ -1930,6 +1930,7 @@ mod tests {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            agent_role: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),

@@ -47,6 +47,45 @@ struct AgentRoleOverrides {
     skills: Option<SkillsConfig>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRoleOrigin {
+    BuiltIn,
+    UserConfigured,
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectiveAgentRole<'a> {
+    pub id: &'a str,
+    pub config: &'a AgentRoleConfig,
+    pub origin: AgentRoleOrigin,
+}
+
+/// Returns the exact role catalog used by role application and sub-agent spawning.
+/// User configuration has the same precedence as `resolve_role_config`.
+pub fn effective_role_catalog(config: &Config) -> Vec<EffectiveAgentRole<'_>> {
+    let mut role_ids = built_in::configs()
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    role_ids.extend(config.agent_roles.keys().map(String::as_str));
+    role_ids
+        .into_iter()
+        .filter_map(|id| {
+            let user_configured = config.agent_roles.get(id);
+            let role_config = user_configured.or_else(|| built_in::configs().get(id))?;
+            Some(EffectiveAgentRole {
+                id,
+                config: role_config,
+                origin: if user_configured.is_some() {
+                    AgentRoleOrigin::UserConfigured
+                } else {
+                    AgentRoleOrigin::BuiltIn
+                },
+            })
+        })
+        .collect()
+}
+
 /// Applies typed role overrides to the existing parent-derived configuration.
 pub(crate) async fn apply_role_to_config(
     config: &mut Config,
@@ -361,6 +400,7 @@ mod built_in {
                         description: Some("Default agent.".to_string()),
                         config_file: None,
                         nickname_candidates: None,
+                        planner_capabilities: None,
                     }
                 ),
                 (
@@ -375,6 +415,7 @@ Rules:
 - Reuse existing explorers for related questions."#.to_string()),
                         config_file: Some("explorer.toml".to_string().parse().unwrap_or_default()),
                         nickname_candidates: None,
+                        planner_capabilities: None,
                     }
                 ),
                 (
@@ -390,6 +431,7 @@ Rules:
 - Always tell workers they are **not alone in the codebase**, and they should not revert the edits made by others, and they should adjust their implementation to accommodate the changes made by others. This is important because there may be multiple workers making changes in parallel, and they need to be aware of each other's work to avoid conflicts and ensure a cohesive final product."#.to_string()),
                         config_file: None,
                         nickname_candidates: None,
+                        planner_capabilities: None,
                     }
                 ),
                 // Awaiter is temp removed

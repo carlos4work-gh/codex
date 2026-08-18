@@ -706,6 +706,36 @@ pub struct AgentRoleToml {
 
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+
+    /// Optional declarative hints for clients that assemble multi-agent teams.
+    /// These hints do not change role execution semantics.
+    pub planner_capabilities: Option<AgentRolePlannerCapabilitiesToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentRolePlannerCapabilitiesToml {
+    #[serde(default)]
+    pub work_modes: Vec<String>,
+    #[serde(default)]
+    pub problem_classes: Vec<String>,
+    #[serde(default)]
+    pub authority_scopes: Vec<String>,
+    #[serde(default)]
+    pub participant_kinds: Vec<String>,
+    #[serde(default)]
+    pub required_companions: Vec<String>,
+    #[serde(default)]
+    pub incompatible_roles: Vec<String>,
+    /// Semantic stances this role may adopt when an arena planner composes a team.
+    #[serde(default)]
+    pub allowed_stances: Vec<String>,
+    pub relative_cost: Option<String>,
+    pub relative_tool_use: Option<String>,
+    #[serde(default)]
+    pub supports_multiple_stances: bool,
+    #[serde(default)]
+    pub proposal_bearing: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

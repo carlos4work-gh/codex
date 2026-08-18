@@ -3820,7 +3820,7 @@
           ]
         },
         "agentRole": {
-          "description": "Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.",
+          "description": "Optional named role applied to this thread. Root threads can select it at `thread/start`; spawned agents inherit it from AgentControl.",
           "type": [
             "string",
             "null"

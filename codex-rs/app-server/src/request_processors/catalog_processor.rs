@@ -195,6 +195,45 @@ impl CatalogRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn agent_role_list(
+        &self,
+        _params: AgentRoleListParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let roles = codex_core::effective_role_catalog(&self.config)
+            .into_iter()
+            .map(|role| {
+                let planner_capabilities = role.config.planner_capabilities.as_ref().map(|value| {
+                    AgentRolePlannerCapabilities {
+                        work_modes: value.work_modes.clone(),
+                        problem_classes: value.problem_classes.clone(),
+                        authority_scopes: value.authority_scopes.clone(),
+                        participant_kinds: value.participant_kinds.clone(),
+                        required_companions: value.required_companions.clone(),
+                        incompatible_roles: value.incompatible_roles.clone(),
+                        allowed_stances: value.allowed_stances.clone(),
+                        relative_cost: value.relative_cost.clone(),
+                        relative_tool_use: value.relative_tool_use.clone(),
+                        supports_multiple_stances: value.supports_multiple_stances,
+                        proposal_bearing: value.proposal_bearing,
+                    }
+                });
+                AgentRoleListEntry {
+                    id: role.id.to_string(),
+                    description: role.config.description.clone(),
+                    origin: match role.origin {
+                        codex_core::AgentRoleOrigin::BuiltIn => AgentRoleOrigin::BuiltIn,
+                        codex_core::AgentRoleOrigin::UserConfigured => {
+                            AgentRoleOrigin::UserConfigured
+                        }
+                    },
+                    has_locked_runtime_settings: role.config.config_file.is_some(),
+                    planner_capabilities,
+                }
+            })
+            .collect();
+        Ok(Some(AgentRoleListResponse { roles }.into()))
+    }
+
     pub(crate) async fn collaboration_mode_list(
         &self,
         params: CollaborationModeListParams,
