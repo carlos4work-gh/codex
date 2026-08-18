@@ -6002,7 +6002,9 @@ impl MemythosRequestProcessor {
             .await
             .map_err(|error| invalid_params(format!("failed to resolve quarantine: {error}")))?;
         let live_reenqueue_status = if action == NativeMailboxResolutionAction::Retry {
-            if outcome.existing {
+            if outcome.conflict {
+                "not_enqueued_conflict".to_string()
+            } else if outcome.existing {
                 "already_resolved".to_string()
             } else {
                 match self
@@ -6033,6 +6035,8 @@ impl MemythosRequestProcessor {
             replacement_communication_id: outcome.replacement_communication_id,
             existing: outcome.existing,
             live_reenqueue_status,
+            conflict: outcome.conflict,
+            winner_command_id: outcome.winner_command_id,
         }
         .into())
     }

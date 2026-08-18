@@ -69,6 +69,8 @@ pub struct NativeMailboxResolutionOutcome {
     pub resulting_status: String,
     pub replacement_communication_id: Option<String>,
     pub existing: bool,
+    pub conflict: bool,
+    pub winner_command_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,7 +242,7 @@ ORDER BY id
                 == command.replacement.is_some(),
             "replacement payload is required only for replace"
         );
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(row) = sqlx::query(
             r#"SELECT communication_id, command_id, action, resulting_status,
                       replacement_communication_id
@@ -265,6 +267,8 @@ ORDER BY id
                 resulting_status: row.try_get("resulting_status")?,
                 replacement_communication_id: row.try_get("replacement_communication_id")?,
                 existing: true,
+                conflict: false,
+                winner_command_id: None,
             });
         }
 
@@ -282,10 +286,32 @@ ORDER BY id
         .await?
         .ok_or_else(|| anyhow::anyhow!("communication not found"))?;
         let pre_resolution = native_mailbox_record_from_row(pre_resolution_row)?;
-        anyhow::ensure!(
-            pre_resolution.status == "quarantined",
-            "communication is not quarantined"
-        );
+        if pre_resolution.status != "quarantined" {
+            if let Some(winner) = sqlx::query(
+                r#"SELECT command_id, resulting_status
+                   FROM native_mailbox_resolution_commands
+                   WHERE receiver_thread_id = ? AND communication_id = ?
+                   ORDER BY id DESC LIMIT 1"#,
+            )
+            .bind(&command.receiver_thread_id)
+            .bind(&command.communication_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            {
+                return Ok(NativeMailboxResolutionOutcome {
+                    receiver_thread_id: command.receiver_thread_id.clone(),
+                    communication_id: command.communication_id.clone(),
+                    command_id: command.command_id.clone(),
+                    action: command.action.as_str().to_string(),
+                    resulting_status: winner.try_get("resulting_status")?,
+                    replacement_communication_id: None,
+                    existing: false,
+                    conflict: true,
+                    winner_command_id: Some(winner.try_get("command_id")?),
+                });
+            }
+            anyhow::bail!("communication is not quarantined");
+        }
         let resolution_generation: i64 = sqlx::query_scalar(
             r#"SELECT COUNT(*) + 1 FROM native_mailbox_resolution_commands
                WHERE receiver_thread_id = ? AND communication_id = ?"#,
@@ -383,6 +409,8 @@ ORDER BY id
             resulting_status: resulting_status.to_string(),
             replacement_communication_id: replacement_id,
             existing: false,
+            conflict: false,
+            winner_command_id: None,
         })
     }
 
@@ -958,6 +986,124 @@ mod tests {
             .expect("read second audit page");
         assert_eq!(second_page.len(), 2);
         assert!(second_page[0].id > first_page[1].id);
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_native_mailbox_resolutions_return_one_stable_winner() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-4000-8000-000000000635").expect("valid thread id");
+        let mut builder = ThreadMetadataBuilder::new(
+            thread_id,
+            codex_home.join("sessions").join("receiver.jsonl"),
+            Utc::now(),
+            SessionSource::Cli,
+        );
+        builder.cwd = codex_home.clone();
+        runtime
+            .upsert_thread(&builder.build("test-provider"))
+            .await
+            .expect("persist receiver thread");
+
+        let now = Utc::now().timestamp_millis();
+        let communication_id = "concurrent-resolution";
+        runtime
+            .insert_pending_native_mailbox_communication(&NativeMailboxCommunicationRecord {
+                receiver_thread_id: thread_id.to_string(),
+                communication_id: communication_id.to_string(),
+                source_call_id: Some(communication_id.to_string()),
+                submission_id: Some("concurrent-submission".to_string()),
+                communication_json: r#"{"content":"concurrent"}"#.to_string(),
+                payload_hash: "sha256:concurrent".to_string(),
+                status: "pending".to_string(),
+                attempt_count: 0,
+                failure_fingerprint: None,
+                last_progress_ref: None,
+                quarantine_reason: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+            })
+            .await
+            .expect("insert communication");
+        for attempt in 1..=4 {
+            runtime
+                .claim_native_mailbox_communication_for_recovery(
+                    &thread_id.to_string(),
+                    communication_id,
+                    3,
+                    now + attempt,
+                )
+                .await
+                .expect("advance recovery budget");
+        }
+
+        let command = |command_id: &str, action| NativeMailboxResolutionCommand {
+            receiver_thread_id: thread_id.to_string(),
+            communication_id: communication_id.to_string(),
+            command_id: command_id.to_string(),
+            action,
+            actor: "operator:test".to_string(),
+            reason: "concurrent decision".to_string(),
+            replacement: None,
+            created_at_ms: now + 10,
+        };
+        let skip = command(
+            "command-concurrent-skip",
+            NativeMailboxResolutionAction::Skip,
+        );
+        let abort = command(
+            "command-concurrent-abort",
+            NativeMailboxResolutionAction::Abort,
+        );
+        let (skip_outcome, abort_outcome) = tokio::join!(
+            runtime.resolve_native_mailbox_quarantine(&skip),
+            runtime.resolve_native_mailbox_quarantine(&abort),
+        );
+        let outcomes = [
+            skip_outcome.expect("skip resolution completes"),
+            abort_outcome.expect("abort resolution completes"),
+        ];
+        let winner = outcomes
+            .iter()
+            .find(|outcome| !outcome.conflict)
+            .expect("one command wins");
+        let loser = outcomes
+            .iter()
+            .find(|outcome| outcome.conflict)
+            .expect("one command conflicts");
+        assert_eq!(
+            loser.winner_command_id.as_deref(),
+            Some(winner.command_id.as_str())
+        );
+
+        let repeated_loser = runtime
+            .resolve_native_mailbox_quarantine(if loser.command_id == skip.command_id {
+                &skip
+            } else {
+                &abort
+            })
+            .await
+            .expect("repeat losing command");
+        assert!(repeated_loser.conflict);
+        assert_eq!(repeated_loser.winner_command_id, loser.winner_command_id);
+        assert_eq!(
+            runtime
+                .list_native_mailbox_resolution_audit(
+                    Some(&thread_id.to_string()),
+                    Some(communication_id),
+                    None,
+                    10,
+                )
+                .await
+                .expect("list winning audit")
+                .len(),
+            1
+        );
+
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
 }
