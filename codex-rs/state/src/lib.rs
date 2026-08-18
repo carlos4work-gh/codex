@@ -67,6 +67,7 @@ pub use runtime::GoalStore;
 pub use runtime::GoalUpdate;
 pub use runtime::MemoryStore;
 pub use runtime::NativeMailboxCommunicationRecord;
+pub use runtime::NativeMailboxHealthSnapshot;
 pub use runtime::NativeMailboxInsertOutcome;
 pub use runtime::NativeMailboxRecoveryOutcome;
 pub use runtime::NativeMailboxResolutionAction;

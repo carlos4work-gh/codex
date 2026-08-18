@@ -74,6 +74,19 @@ pub struct NativeMailboxResolutionOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeMailboxHealthSnapshot {
+    pub pending_count: i64,
+    pub quarantined_count: i64,
+    pub consumed_count: i64,
+    pub skipped_count: i64,
+    pub aborted_count: i64,
+    pub max_attempt_count: i64,
+    pub oldest_pending_updated_at_ms: Option<i64>,
+    pub oldest_quarantined_updated_at_ms: Option<i64>,
+    pub resolution_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeMailboxResolutionAuditRecord {
     pub id: i64,
     pub receiver_thread_id: String,
@@ -95,6 +108,48 @@ pub struct NativeMailboxResolutionAuditRecord {
 }
 
 impl StateRuntime {
+    pub async fn native_mailbox_health_snapshot(
+        &self,
+        receiver_thread_id: Option<&str>,
+    ) -> anyhow::Result<NativeMailboxHealthSnapshot> {
+        let row = sqlx::query(
+            r#"SELECT
+                   COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+                   COALESCE(SUM(CASE WHEN status = 'quarantined' THEN 1 ELSE 0 END), 0) AS quarantined_count,
+                   COALESCE(SUM(CASE WHEN status = 'consumed' THEN 1 ELSE 0 END), 0) AS consumed_count,
+                   COALESCE(SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END), 0) AS skipped_count,
+                   COALESCE(SUM(CASE WHEN status = 'aborted' THEN 1 ELSE 0 END), 0) AS aborted_count,
+                   COALESCE(MAX(attempt_count), 0) AS max_attempt_count,
+                   MIN(CASE WHEN status = 'pending' THEN updated_at_ms END) AS oldest_pending_updated_at_ms,
+                   MIN(CASE WHEN status = 'quarantined' THEN updated_at_ms END) AS oldest_quarantined_updated_at_ms
+               FROM native_mailbox_communications
+               WHERE (? IS NULL OR receiver_thread_id = ?)"#,
+        )
+        .bind(receiver_thread_id)
+        .bind(receiver_thread_id)
+        .fetch_one(self.pool.as_ref())
+        .await?;
+        let resolution_count = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM native_mailbox_resolution_commands
+               WHERE (? IS NULL OR receiver_thread_id = ?)"#,
+        )
+        .bind(receiver_thread_id)
+        .bind(receiver_thread_id)
+        .fetch_one(self.pool.as_ref())
+        .await?;
+        Ok(NativeMailboxHealthSnapshot {
+            pending_count: row.try_get("pending_count")?,
+            quarantined_count: row.try_get("quarantined_count")?,
+            consumed_count: row.try_get("consumed_count")?,
+            skipped_count: row.try_get("skipped_count")?,
+            aborted_count: row.try_get("aborted_count")?,
+            max_attempt_count: row.try_get("max_attempt_count")?,
+            oldest_pending_updated_at_ms: row.try_get("oldest_pending_updated_at_ms")?,
+            oldest_quarantined_updated_at_ms: row.try_get("oldest_quarantined_updated_at_ms")?,
+            resolution_count,
+        })
+    }
+
     pub async fn insert_pending_native_mailbox_communication(
         &self,
         record: &NativeMailboxCommunicationRecord,
@@ -986,6 +1041,23 @@ mod tests {
             .expect("read second audit page");
         assert_eq!(second_page.len(), 2);
         assert!(second_page[0].id > first_page[1].id);
+        assert_eq!(
+            runtime
+                .native_mailbox_health_snapshot(Some(&thread_id.to_string()))
+                .await
+                .expect("read mailbox health"),
+            NativeMailboxHealthSnapshot {
+                pending_count: 2,
+                quarantined_count: 0,
+                consumed_count: 0,
+                skipped_count: 1,
+                aborted_count: 2,
+                max_attempt_count: 4,
+                oldest_pending_updated_at_ms: Some(now + 10),
+                oldest_quarantined_updated_at_ms: None,
+                resolution_count: 4,
+            }
+        );
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
 

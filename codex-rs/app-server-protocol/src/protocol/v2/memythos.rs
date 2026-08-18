@@ -1306,6 +1306,31 @@ pub struct MemythosMailboxQuarantineListResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct MemythosMailboxHealthGetParams {
+    #[ts(optional = nullable)]
+    pub receiver_thread_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MemythosMailboxHealthGetResponse {
+    pub pending_count: i64,
+    pub quarantined_count: i64,
+    pub consumed_count: i64,
+    pub skipped_count: i64,
+    pub aborted_count: i64,
+    pub max_attempt_count: i64,
+    #[ts(optional = nullable)]
+    pub oldest_pending_updated_at_ms: Option<i64>,
+    #[ts(optional = nullable)]
+    pub oldest_quarantined_updated_at_ms: Option<i64>,
+    pub resolution_count: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct MemythosMailboxQuarantineGetParams {
     pub receiver_thread_id: String,
     pub communication_id: String,

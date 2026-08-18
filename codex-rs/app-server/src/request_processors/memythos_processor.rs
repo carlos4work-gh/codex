@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+use std::time::Instant;
 
 use chrono::Utc;
 use codex_analytics::AppServerRpcTransport;
@@ -72,6 +73,8 @@ use codex_app_server_protocol::MemythosLayerCreateParams;
 use codex_app_server_protocol::MemythosLayerCreateResponse;
 use codex_app_server_protocol::MemythosLayerListParams;
 use codex_app_server_protocol::MemythosLayerListResponse;
+use codex_app_server_protocol::MemythosMailboxHealthGetParams;
+use codex_app_server_protocol::MemythosMailboxHealthGetResponse;
 use codex_app_server_protocol::MemythosMailboxQuarantineGetParams;
 use codex_app_server_protocol::MemythosMailboxQuarantineGetResponse;
 use codex_app_server_protocol::MemythosMailboxQuarantineListParams;
@@ -5903,6 +5906,33 @@ impl MemythosRequestProcessor {
         Ok(MemythosMailboxQuarantineListResponse { communications }.into())
     }
 
+    pub(crate) async fn mailbox_health_get(
+        &self,
+        params: MemythosMailboxHealthGetParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state_db = self
+            .arena_state_db
+            .as_ref()
+            .ok_or_else(|| internal_error("state DB is unavailable"))?;
+        let snapshot = state_db
+            .native_mailbox_health_snapshot(params.receiver_thread_id.as_deref())
+            .await
+            .map_err(|error| internal_error(format!("failed to read mailbox health: {error}")))?;
+        record_mailbox_health_metrics(&snapshot);
+        Ok(MemythosMailboxHealthGetResponse {
+            pending_count: snapshot.pending_count,
+            quarantined_count: snapshot.quarantined_count,
+            consumed_count: snapshot.consumed_count,
+            skipped_count: snapshot.skipped_count,
+            aborted_count: snapshot.aborted_count,
+            max_attempt_count: snapshot.max_attempt_count,
+            oldest_pending_updated_at_ms: snapshot.oldest_pending_updated_at_ms,
+            oldest_quarantined_updated_at_ms: snapshot.oldest_quarantined_updated_at_ms,
+            resolution_count: snapshot.resolution_count,
+        }
+        .into())
+    }
+
     pub(crate) async fn mailbox_quarantine_get(
         &self,
         params: MemythosMailboxQuarantineGetParams,
@@ -5931,16 +5961,18 @@ impl MemythosRequestProcessor {
             .arena_state_db
             .as_ref()
             .ok_or_else(|| internal_error("state DB is unavailable"))?;
-        let action = match params.action {
+        let (action, action_label) = match params.action {
             MemythosMailboxQuarantineResolutionAction::Retry => {
-                NativeMailboxResolutionAction::Retry
+                (NativeMailboxResolutionAction::Retry, "retry")
             }
-            MemythosMailboxQuarantineResolutionAction::Skip => NativeMailboxResolutionAction::Skip,
+            MemythosMailboxQuarantineResolutionAction::Skip => {
+                (NativeMailboxResolutionAction::Skip, "skip")
+            }
             MemythosMailboxQuarantineResolutionAction::Replace => {
-                NativeMailboxResolutionAction::Replace
+                (NativeMailboxResolutionAction::Replace, "replace")
             }
             MemythosMailboxQuarantineResolutionAction::Abort => {
-                NativeMailboxResolutionAction::Abort
+                (NativeMailboxResolutionAction::Abort, "abort")
             }
         };
         let now = chrono::Utc::now().timestamp_millis();
@@ -5988,7 +6020,8 @@ impl MemythosRequestProcessor {
                 })
             })
             .transpose()?;
-        let outcome = state_db
+        let resolution_started = Instant::now();
+        let outcome = match state_db
             .resolve_native_mailbox_quarantine(&NativeMailboxResolutionCommand {
                 receiver_thread_id: params.receiver_thread_id,
                 communication_id: params.communication_id,
@@ -6000,7 +6033,20 @@ impl MemythosRequestProcessor {
                 created_at_ms: now,
             })
             .await
-            .map_err(|error| invalid_params(format!("failed to resolve quarantine: {error}")))?;
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                record_mailbox_resolution_metrics(
+                    action_label,
+                    "operational_error",
+                    "not_applicable",
+                    resolution_started.elapsed(),
+                );
+                return Err(invalid_params(format!(
+                    "failed to resolve quarantine: {error}"
+                )));
+            }
+        };
         let live_reenqueue_status = if action == NativeMailboxResolutionAction::Retry {
             if outcome.conflict {
                 "not_enqueued_conflict".to_string()
@@ -6026,6 +6072,19 @@ impl MemythosRequestProcessor {
         } else {
             "not_applicable".to_string()
         };
+        let resolution_outcome = if outcome.conflict {
+            "conflict"
+        } else if outcome.existing {
+            "existing"
+        } else {
+            "winner"
+        };
+        record_mailbox_resolution_metrics(
+            action_label,
+            resolution_outcome,
+            &live_reenqueue_status,
+            resolution_started.elapsed(),
+        );
         Ok(MemythosMailboxQuarantineResolveResponse {
             receiver_thread_id: outcome.receiver_thread_id,
             communication_id: outcome.communication_id,
@@ -11836,6 +11895,60 @@ fn validate_thread_contract_assemble_request(
         }
     }
     Ok(())
+}
+
+fn record_mailbox_resolution_metrics(
+    action: &str,
+    outcome: &str,
+    live_reenqueue_status: &str,
+    duration: Duration,
+) {
+    let Some(metrics) = codex_otel::global() else {
+        return;
+    };
+    let tags = [
+        ("action", action),
+        ("outcome", outcome),
+        ("live_reenqueue_status", live_reenqueue_status),
+    ];
+    let _ = metrics.counter("codex.native_mailbox.resolution", 1, &tags);
+    let _ = metrics.record_duration(
+        "codex.native_mailbox.resolution.duration_ms",
+        duration,
+        &tags,
+    );
+}
+
+fn record_mailbox_health_metrics(snapshot: &codex_state::NativeMailboxHealthSnapshot) {
+    let Some(metrics) = codex_otel::global() else {
+        return;
+    };
+    for (status, value) in [
+        ("pending", snapshot.pending_count),
+        ("quarantined", snapshot.quarantined_count),
+        ("consumed", snapshot.consumed_count),
+        ("skipped", snapshot.skipped_count),
+        ("aborted", snapshot.aborted_count),
+    ] {
+        let _ = metrics.gauge("codex.native_mailbox.records", value, &[("status", status)]);
+    }
+    let _ = metrics.gauge(
+        "codex.native_mailbox.max_attempt_count",
+        snapshot.max_attempt_count,
+        &[],
+    );
+    let now_ms = Utc::now().timestamp_millis();
+    for (status, updated_at_ms) in [
+        ("pending", snapshot.oldest_pending_updated_at_ms),
+        ("quarantined", snapshot.oldest_quarantined_updated_at_ms),
+    ] {
+        let age_ms = updated_at_ms.map_or(0, |timestamp| now_ms.saturating_sub(timestamp));
+        let _ = metrics.gauge(
+            "codex.native_mailbox.oldest_age_ms",
+            age_ms,
+            &[("status", status)],
+        );
+    }
 }
 
 #[cfg(test)]

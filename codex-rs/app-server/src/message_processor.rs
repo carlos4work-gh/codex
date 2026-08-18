@@ -1296,6 +1296,11 @@ impl MessageProcessor {
                 .mailbox_quarantine_list(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosMailboxHealthGet { params, .. } => self
+                .memythos_processor
+                .mailbox_health_get(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosMailboxQuarantineGet { params, .. } => self
                 .memythos_processor
                 .mailbox_quarantine_get(params)

@@ -83,6 +83,7 @@ pub use goals::GoalStore;
 pub use goals::GoalUpdate;
 pub use memories::MemoryStore;
 pub use native_mailbox::NativeMailboxCommunicationRecord;
+pub use native_mailbox::NativeMailboxHealthSnapshot;
 pub use native_mailbox::NativeMailboxInsertOutcome;
 pub use native_mailbox::NativeMailboxRecoveryOutcome;
 pub use native_mailbox::NativeMailboxResolutionAction;

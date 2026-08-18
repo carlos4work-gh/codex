@@ -653,6 +653,12 @@ client_request_definitions! {
         serialization: global_shared_read("memythos"),
         response: v2::MemythosMailboxQuarantineListResponse,
     },
+    #[experimental("memythos/mailbox/health/get")]
+    MemythosMailboxHealthGet => "memythos/mailbox/health/get" {
+        params: v2::MemythosMailboxHealthGetParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosMailboxHealthGetResponse,
+    },
     #[experimental("memythos/mailbox/quarantine/get")]
     MemythosMailboxQuarantineGet => "memythos/mailbox/quarantine/get" {
         params: v2::MemythosMailboxQuarantineGetParams,
