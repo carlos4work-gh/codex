@@ -610,6 +610,281 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadQueueStartResponse,
     },
+    #[experimental("memythos/runtime/health")]
+    MemythosRuntimeHealth => "memythos/runtime/health" {
+        params: v2::MemythosRuntimeHealthParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosRuntimeHealthResponse,
+    },
+    #[experimental("memythos/runtime/close")]
+    MemythosRuntimeClose => "memythos/runtime/close" {
+        params: v2::MemythosRuntimeCloseParams,
+        serialization: global("memythos"),
+        response: v2::MemythosRuntimeCloseResponse,
+    },
+    #[experimental("memythos/layer/create")]
+    MemythosLayerCreate => "memythos/layer/create" {
+        params: v2::MemythosLayerCreateParams,
+        serialization: global("memythos"),
+        response: v2::MemythosLayerCreateResponse,
+    },
+    #[experimental("memythos/layer/list")]
+    MemythosLayerList => "memythos/layer/list" {
+        params: v2::MemythosLayerListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosLayerListResponse,
+    },
+    #[experimental("memythos/arena/create")]
+    MemythosArenaCreate => "memythos/arena/create" {
+        params: v2::MemythosArenaCreateParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaCreateResponse,
+    },
+    #[experimental("memythos/arena/list")]
+    MemythosArenaList => "memythos/arena/list" {
+        params: v2::MemythosArenaListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosArenaListResponse,
+    },
+    #[experimental("memythos/arena/composition/provision")]
+    MemythosArenaCompositionProvision => "memythos/arena/composition/provision" {
+        params: v2::MemythosArenaCompositionProvisionParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaCompositionProvisionResponse,
+    },
+    #[experimental("memythos/arena/request")]
+    MemythosArenaRequest => "memythos/arena/request" {
+        params: v2::MemythosArenaRequestParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaRequestResponse,
+    },
+    #[experimental("memythos/thread/attach")]
+    MemythosThreadAttach => "memythos/thread/attach" {
+        params: v2::MemythosThreadAttachParams,
+        serialization: global("memythos"),
+        response: v2::MemythosThreadAttachResponse,
+    },
+    #[experimental("memythos/thread/list")]
+    MemythosThreadList => "memythos/thread/list" {
+        params: v2::MemythosThreadListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosThreadListResponse,
+    },
+    #[experimental("memythos/arena/parent/register")]
+    MemythosArenaParentRegister => "memythos/arena/parent/register" {
+        params: v2::MemythosArenaParentRegisterParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaParentRegisterResponse,
+    },
+    #[experimental("memythos/arena/participant/register")]
+    MemythosArenaParticipantRegister => "memythos/arena/participant/register" {
+        params: v2::MemythosArenaParticipantRegisterParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaParticipantRegisterResponse,
+    },
+    #[experimental("memythos/arena/phase/start")]
+    MemythosArenaPhaseStart => "memythos/arena/phase/start" {
+        params: v2::MemythosArenaPhaseStartParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaPhaseStartResponse,
+    },
+    #[experimental("memythos/arena/parent/continuity/list")]
+    MemythosParentContinuityList => "memythos/arena/parent/continuity/list" {
+        params: v2::MemythosParentContinuityListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosParentContinuityListResponse,
+    },
+    #[experimental("memythos/arena/message")]
+    MemythosArenaMessageSend => "memythos/arena/message" {
+        params: v2::MemythosArenaMessageSendParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaMessageSendResponse,
+    },
+    #[experimental("memythos/arena/message/send")]
+    MemythosArenaMessageSendV2 => "memythos/arena/message/send" {
+        params: v2::MemythosArenaMessageSendV2Params,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaMessageSendV2Response,
+    },
+    #[experimental("memythos/arena/message/list")]
+    MemythosArenaMessageList => "memythos/arena/message/list" {
+        params: v2::MemythosArenaMessageListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosArenaMessageListResponse,
+    },
+    #[experimental("memythos/mailbox/quarantine/list")]
+    MemythosMailboxQuarantineList => "memythos/mailbox/quarantine/list" {
+        params: v2::MemythosMailboxQuarantineListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosMailboxQuarantineListResponse,
+    },
+    #[experimental("memythos/mailbox/health/get")]
+    MemythosMailboxHealthGet => "memythos/mailbox/health/get" {
+        params: v2::MemythosMailboxHealthGetParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosMailboxHealthGetResponse,
+    },
+    #[experimental("memythos/mailbox/quarantine/get")]
+    MemythosMailboxQuarantineGet => "memythos/mailbox/quarantine/get" {
+        params: v2::MemythosMailboxQuarantineGetParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosMailboxQuarantineGetResponse,
+    },
+    #[experimental("memythos/mailbox/quarantine/resolve")]
+    MemythosMailboxQuarantineResolve => "memythos/mailbox/quarantine/resolve" {
+        params: v2::MemythosMailboxQuarantineResolveParams,
+        serialization: global("memythos"),
+        response: v2::MemythosMailboxQuarantineResolveResponse,
+    },
+    #[experimental("memythos/mailbox/quarantine/resolution/list")]
+    MemythosMailboxResolutionList => "memythos/mailbox/quarantine/resolution/list" {
+        params: v2::MemythosMailboxResolutionListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosMailboxResolutionListResponse,
+    },
+    #[experimental("memythos/mailbox/quarantine/resolution/get")]
+    MemythosMailboxResolutionGet => "memythos/mailbox/quarantine/resolution/get" {
+        params: v2::MemythosMailboxResolutionGetParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosMailboxResolutionGetResponse,
+    },
+    #[experimental("memythos/arena/message/observation/list")]
+    MemythosArenaMessageObservationList => "memythos/arena/message/observation/list" {
+        params: v2::MemythosArenaMessageObservationListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosArenaMessageObservationListResponse,
+    },
+    #[experimental("memythos/arena/message/observe")]
+    MemythosArenaMessageObserve => "memythos/arena/message/observe" {
+        params: v2::MemythosArenaMessageObserveParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosArenaMessageObserveResponse,
+    },
+    #[experimental("memythos/arena/state/get")]
+    MemythosArenaStateGet => "memythos/arena/state/get" {
+        params: v2::MemythosArenaStateGetParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosArenaStateGetResponse,
+    },
+    #[experimental("memythos/arena/phase/close")]
+    MemythosArenaPhaseClose => "memythos/arena/phase/close" {
+        params: v2::MemythosArenaPhaseCloseParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaPhaseCloseResponse,
+    },
+    #[experimental("memythos/arena/run")]
+    MemythosArenaRun => "memythos/arena/run" {
+        params: v2::MemythosArenaRunParams,
+        serialization: global("memythos"),
+        response: v2::MemythosArenaRunResponse,
+    },
+    #[experimental("memythos/room/register")]
+    MemythosRoomRegister => "memythos/room/register" {
+        params: v2::MemythosRoomRegisterParams,
+        serialization: global("memythos"),
+        response: v2::MemythosRoomRegisterResponse,
+    },
+    #[experimental("memythos/room/create")]
+    MemythosRoomCreate => "memythos/room/create" {
+        params: v2::MemythosRoomRegisterParams,
+        serialization: global("memythos"),
+        manual_payload_conversion: manual,
+        response: v2::MemythosRoomRegisterResponse,
+    },
+    #[experimental("memythos/room/list")]
+    MemythosRoomList => "memythos/room/list" {
+        params: v2::MemythosRoomListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosRoomListResponse,
+    },
+    #[experimental("memythos/room/activity/list")]
+    MemythosRoomActivityList => "memythos/room/activity/list" {
+        params: v2::MemythosRoomActivityListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosRoomActivityListResponse,
+    },
+    #[experimental("memythos/room/parent-configuration/list")]
+    MemythosRoomParentConfigurationList => "memythos/room/parent-configuration/list" {
+        params: v2::MemythosRoomParentConfigurationListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosRoomParentConfigurationListResponse,
+    },
+    #[experimental("memythos/room/dialogue/list")]
+    MemythosRoomDialogueList => "memythos/room/dialogue/list" {
+        params: v2::MemythosRoomDialogueListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosRoomDialogueListResponse,
+    },
+    #[experimental("memythos/room/timeline/get")]
+    MemythosRoomTimelineGet => "memythos/room/timeline/get" {
+        params: v2::MemythosRoomActivityListParams,
+        serialization: global_shared_read("memythos"),
+        manual_payload_conversion: manual,
+        response: v2::MemythosRoomActivityListResponse,
+    },
+    #[experimental("memythos/room/sendInput")]
+    MemythosRoomSendInput => "memythos/room/sendInput" {
+        params: v2::MemythosRoomSendInputParams,
+        serialization: global("memythos"),
+        response: v2::MemythosRoomSendInputResponse,
+    },
+    #[experimental("memythos/room/send")]
+    MemythosRoomSend => "memythos/room/send" {
+        params: v2::MemythosRoomSendInputParams,
+        serialization: global("memythos"),
+        manual_payload_conversion: manual,
+        response: v2::MemythosRoomSendInputResponse,
+    },
+    #[experimental("memythos/arena/message/read")]
+    MemythosArenaMessageRead => "memythos/arena/message/read" {
+        params: v2::MemythosArenaMessageReadParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosArenaMessageReadResponse,
+    },
+    #[experimental("memythos/thread/consolidate")]
+    MemythosThreadConsolidate => "memythos/thread/consolidate" {
+        params: v2::MemythosThreadConsolidateParams,
+        serialization: global("memythos"),
+        response: v2::MemythosThreadConsolidateResponse,
+    },
+    #[experimental("memythos/thread/contract/assemble")]
+    MemythosThreadContractAssemble => "memythos/thread/contract/assemble" {
+        params: v2::MemythosThreadContractAssembleParams,
+        serialization: global("memythos"),
+        response: v2::MemythosThreadContractAssembleResponse,
+    },
+    #[experimental("memythos/room/contract/emit")]
+    MemythosRoomContractEmit => "memythos/room/contract/emit" {
+        params: v2::MemythosThreadContractAssembleParams,
+        serialization: global("memythos"),
+        manual_payload_conversion: manual,
+        response: v2::MemythosThreadContractAssembleResponse,
+    },
+    #[experimental("memythos/thread/contract/read")]
+    MemythosThreadContractRead => "memythos/thread/contract/read" {
+        params: v2::MemythosThreadContractReadParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosThreadContractReadResponse,
+    },
+    #[experimental("memythos/room/contract/get")]
+    MemythosRoomContractGet => "memythos/room/contract/get" {
+        params: v2::MemythosThreadContractReadParams,
+        serialization: global_shared_read("memythos"),
+        manual_payload_conversion: manual,
+        response: v2::MemythosThreadContractReadResponse,
+    },
+    #[experimental("memythos/thread/contract/list")]
+    MemythosThreadContractList => "memythos/thread/contract/list" {
+        params: v2::MemythosThreadContractListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosThreadContractListResponse,
+    },
+    #[experimental("memythos/telemetry/list")]
+    MemythosTelemetryList => "memythos/telemetry/list" {
+        params: v2::MemythosTelemetryListParams,
+        serialization: global_shared_read("memythos"),
+        response: v2::MemythosTelemetryListResponse,
+    },
     ThreadMetadataUpdate => "thread/metadata/update" {
         params: v2::ThreadMetadataUpdateParams,
         inspect_params: true,
@@ -1036,6 +1311,11 @@ client_request_definitions! {
         params: v2::PermissionProfileListParams,
         serialization: global_shared_read("config"),
         response: v2::PermissionProfileListResponse,
+    },
+    AgentRoleList => "agentRole/list" {
+        params: v2::AgentRoleListParams,
+        serialization: global_shared_read("config"),
+        response: v2::AgentRoleListResponse,
     },
     ExperimentalFeatureEnablementSet => "experimentalFeature/enablement/set" {
         params: v2::ExperimentalFeatureEnablementSetParams,
@@ -2119,6 +2399,22 @@ mod tests {
             })
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn memythos_agent_role_list_is_a_shared_native_rpc() -> Result<()> {
+        let request: ClientRequest = serde_json::from_value(json!({
+            "method": "agentRole/list",
+            "id": 1,
+            "params": {}
+        }))?;
+
+        assert_eq!(
+            request.serialization_scope(),
+            Some(ClientRequestSerializationScope::GlobalSharedRead("config"))
+        );
+        assert!(matches!(request, ClientRequest::AgentRoleList { .. }));
         Ok(())
     }
 
