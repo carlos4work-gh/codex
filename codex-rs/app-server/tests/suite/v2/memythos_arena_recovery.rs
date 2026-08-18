@@ -498,6 +498,7 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
     let resolved = to_response::<MemythosMailboxQuarantineResolveResponse>(resolve_response)?;
     assert_eq!(resolved.resulting_status, "pending");
     assert!(!resolved.existing);
+    assert_eq!(resolved.live_reenqueue_status, "enqueued");
 
     let replay_id = quarantining_process
         .send_memythos_mailbox_quarantine_resolve_request(resolve_params)
@@ -507,25 +508,21 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
         quarantining_process.read_stream_until_response_message(RequestId::Integer(replay_id)),
     )
     .await??;
+    let replayed = to_response::<MemythosMailboxQuarantineResolveResponse>(replay_response)?;
     assert!(
-        to_response::<MemythosMailboxQuarantineResolveResponse>(replay_response)?.existing,
+        replayed.existing,
         "repeating a resolution command must be idempotent"
     );
+    assert_eq!(replayed.live_reenqueue_status, "already_resolved");
 
-    let killed = quarantining_process.sigkill().await?;
-    assert_eq!(killed.signal(), Some(9));
-    drop(quarantining_process);
-    let mut retry_process = TestAppServer::new(codex_home.path()).await?;
-    timeout(RESPONSE_TIMEOUT, retry_process.initialize()).await??;
-    resume_native_thread(&mut retry_process, &bettor.thread_id).await?;
     let mut retry_wake = triggered_proposal_message(
         "message-wake-authorized-retry",
         &concierge.thread_id,
         &bettor.thread_id,
     );
     retry_wake.execution_prompt = Some(RETRY_WAKE_MARKER.to_string());
-    send_arena_message(&mut retry_process, retry_wake).await?;
-    wait_for_turn_completed(&mut retry_process).await?;
+    send_arena_message(&mut quarantining_process, retry_wake).await?;
+    wait_for_turn_completed(&mut quarantining_process).await?;
     let requests = model_server
         .received_requests()
         .await

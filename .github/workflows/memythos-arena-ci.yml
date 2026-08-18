@@ -61,7 +61,7 @@ jobs:
       - name: Native mailbox payload rehydration after SIGKILL
         run: cargo test -p codex-app-server --test all arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once
 
-      - name: Native mailbox crash-loop quarantine
+      - name: Native mailbox crash-loop quarantine and live retry
         run: cargo test -p codex-app-server --test all arena_mailbox_crash_loop_quarantines_poison_payload_and_warns
 
       - name: Native mailbox terminal resolution and replacement
