@@ -220,6 +220,7 @@ impl SessionConfiguration {
         let workspace_roots =
             ThreadEnvironments::primary_workspace_roots_for(&environment_selections);
         ThreadConfigSnapshot {
+            agent_role: self.session_source.get_agent_role(),
             model: self.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
             service_tier: self.service_tier.clone(),
@@ -778,6 +779,7 @@ impl Session {
                             forked_from_id,
                             parent_thread_id,
                             source: session_source,
+                            agent_role: session_configuration.session_source.get_agent_role(),
                             thread_source: session_configuration.thread_source.clone(),
                             originator: session_configuration.originator.clone(),
                             base_instructions: BaseInstructions {
