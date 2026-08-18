@@ -64,7 +64,7 @@ jobs:
       - name: Native mailbox crash-loop quarantine and live retry
         run: cargo test -p codex-app-server --test all arena_mailbox_crash_loop_quarantines_poison_payload_and_warns
 
-      - name: Native mailbox terminal resolution, concurrency, audit, and pagination
+      - name: Native mailbox contention, rollback, audit, and pagination
         run: cargo test -p codex-app-server --test all arena_mailbox_terminal_resolutions_and_replace_survive_restart
 
       - name: Arena turn acknowledgement after SIGKILL
