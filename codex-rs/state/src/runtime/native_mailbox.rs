@@ -71,6 +71,27 @@ pub struct NativeMailboxResolutionOutcome {
     pub existing: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeMailboxResolutionAuditRecord {
+    pub id: i64,
+    pub receiver_thread_id: String,
+    pub communication_id: String,
+    pub command_id: String,
+    pub resolution_generation: i64,
+    pub action: String,
+    pub actor: String,
+    pub reason: String,
+    pub pre_status: String,
+    pub pre_attempt_count: i64,
+    pub pre_failure_fingerprint: Option<String>,
+    pub pre_last_progress_ref: Option<String>,
+    pub pre_quarantine_reason: Option<String>,
+    pub pre_payload_hash: String,
+    pub resulting_status: String,
+    pub replacement_communication_id: Option<String>,
+    pub created_at_ms: i64,
+}
+
 impl StateRuntime {
     pub async fn insert_pending_native_mailbox_communication(
         &self,
@@ -247,6 +268,33 @@ ORDER BY id
             });
         }
 
+        let pre_resolution_row = sqlx::query(
+            r#"SELECT receiver_thread_id, communication_id, source_call_id, submission_id,
+                      communication_json, payload_hash, status, attempt_count,
+                      failure_fingerprint, last_progress_ref, quarantine_reason,
+                      created_at_ms, updated_at_ms
+               FROM native_mailbox_communications
+               WHERE receiver_thread_id = ? AND communication_id = ?"#,
+        )
+        .bind(&command.receiver_thread_id)
+        .bind(&command.communication_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("communication not found"))?;
+        let pre_resolution = native_mailbox_record_from_row(pre_resolution_row)?;
+        anyhow::ensure!(
+            pre_resolution.status == "quarantined",
+            "communication is not quarantined"
+        );
+        let resolution_generation: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) + 1 FROM native_mailbox_resolution_commands
+               WHERE receiver_thread_id = ? AND communication_id = ?"#,
+        )
+        .bind(&command.receiver_thread_id)
+        .bind(&command.communication_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
         let (resulting_status, replacement_id) = match command.action {
             NativeMailboxResolutionAction::Retry => ("pending", None),
             NativeMailboxResolutionAction::Skip => ("skipped", None),
@@ -302,8 +350,11 @@ ORDER BY id
         sqlx::query(
             r#"INSERT INTO native_mailbox_resolution_commands (
                 receiver_thread_id, communication_id, command_id, action, actor, reason,
-                replacement_communication_id, resulting_status, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                replacement_communication_id, resulting_status, created_at_ms,
+                resolution_generation, pre_status, pre_attempt_count,
+                pre_failure_fingerprint, pre_last_progress_ref, pre_quarantine_reason,
+                pre_payload_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&command.receiver_thread_id)
         .bind(&command.communication_id)
@@ -314,6 +365,13 @@ ORDER BY id
         .bind(&replacement_id)
         .bind(resulting_status)
         .bind(command.created_at_ms)
+        .bind(resolution_generation)
+        .bind(&pre_resolution.status)
+        .bind(pre_resolution.attempt_count)
+        .bind(&pre_resolution.failure_fingerprint)
+        .bind(&pre_resolution.last_progress_ref)
+        .bind(&pre_resolution.quarantine_reason)
+        .bind(&pre_resolution.payload_hash)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -326,6 +384,62 @@ ORDER BY id
             replacement_communication_id: replacement_id,
             existing: false,
         })
+    }
+
+    pub async fn list_native_mailbox_resolution_audit(
+        &self,
+        receiver_thread_id: Option<&str>,
+        communication_id: Option<&str>,
+        after_id: Option<i64>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<NativeMailboxResolutionAuditRecord>> {
+        anyhow::ensure!(
+            (1..=100).contains(&limit),
+            "limit must be between 1 and 100"
+        );
+        let rows = sqlx::query(
+            r#"SELECT id, receiver_thread_id, communication_id, command_id,
+                      resolution_generation, action, actor, reason, pre_status,
+                      pre_attempt_count, pre_failure_fingerprint, pre_last_progress_ref,
+                      pre_quarantine_reason, pre_payload_hash, resulting_status,
+                      replacement_communication_id, created_at_ms
+               FROM native_mailbox_resolution_commands
+               WHERE (? IS NULL OR receiver_thread_id = ?)
+                 AND (? IS NULL OR communication_id = ?)
+                 AND id > ?
+               ORDER BY id LIMIT ?"#,
+        )
+        .bind(receiver_thread_id)
+        .bind(receiver_thread_id)
+        .bind(communication_id)
+        .bind(communication_id)
+        .bind(after_id.unwrap_or(0))
+        .bind(limit)
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(NativeMailboxResolutionAuditRecord {
+                    id: row.try_get("id")?,
+                    receiver_thread_id: row.try_get("receiver_thread_id")?,
+                    communication_id: row.try_get("communication_id")?,
+                    command_id: row.try_get("command_id")?,
+                    resolution_generation: row.try_get("resolution_generation")?,
+                    action: row.try_get("action")?,
+                    actor: row.try_get("actor")?,
+                    reason: row.try_get("reason")?,
+                    pre_status: row.try_get("pre_status")?,
+                    pre_attempt_count: row.try_get("pre_attempt_count")?,
+                    pre_failure_fingerprint: row.try_get("pre_failure_fingerprint")?,
+                    pre_last_progress_ref: row.try_get("pre_last_progress_ref")?,
+                    pre_quarantine_reason: row.try_get("pre_quarantine_reason")?,
+                    pre_payload_hash: row.try_get("pre_payload_hash")?,
+                    resulting_status: row.try_get("resulting_status")?,
+                    replacement_communication_id: row.try_get("replacement_communication_id")?,
+                    created_at_ms: row.try_get("created_at_ms")?,
+                })
+            })
+            .collect()
     }
 
     pub async fn mark_native_mailbox_communication_consumed(
@@ -776,6 +890,28 @@ mod tests {
                 .expect("list quarantines after resolution")
                 .is_empty()
         );
+        let first_page = runtime
+            .list_native_mailbox_resolution_audit(Some(&thread_id.to_string()), None, None, 2)
+            .await
+            .expect("read first audit page");
+        assert_eq!(first_page.len(), 2);
+        assert!(first_page.iter().all(|record| {
+            record.pre_status == "quarantined"
+                && record.pre_attempt_count == 4
+                && record.pre_failure_fingerprint.as_deref()
+                    == Some("native_mailbox_recovery_without_progress")
+        }));
+        let second_page = runtime
+            .list_native_mailbox_resolution_audit(
+                Some(&thread_id.to_string()),
+                None,
+                first_page.last().map(|record| record.id),
+                2,
+            )
+            .await
+            .expect("read second audit page");
+        assert_eq!(second_page.len(), 2);
+        assert!(second_page[0].id > first_page[1].id);
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
 }

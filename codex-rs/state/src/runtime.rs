@@ -86,6 +86,7 @@ pub use native_mailbox::NativeMailboxCommunicationRecord;
 pub use native_mailbox::NativeMailboxInsertOutcome;
 pub use native_mailbox::NativeMailboxRecoveryOutcome;
 pub use native_mailbox::NativeMailboxResolutionAction;
+pub use native_mailbox::NativeMailboxResolutionAuditRecord;
 pub use native_mailbox::NativeMailboxResolutionCommand;
 pub use native_mailbox::NativeMailboxResolutionOutcome;
 pub use recovery::RuntimeDbBackup;

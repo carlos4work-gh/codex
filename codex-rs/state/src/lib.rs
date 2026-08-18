@@ -70,6 +70,7 @@ pub use runtime::NativeMailboxCommunicationRecord;
 pub use runtime::NativeMailboxInsertOutcome;
 pub use runtime::NativeMailboxRecoveryOutcome;
 pub use runtime::NativeMailboxResolutionAction;
+pub use runtime::NativeMailboxResolutionAuditRecord;
 pub use runtime::NativeMailboxResolutionCommand;
 pub use runtime::NativeMailboxResolutionOutcome;
 pub use runtime::RemoteControlEnrollmentRecord;
