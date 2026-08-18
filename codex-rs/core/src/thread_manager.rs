@@ -185,6 +185,12 @@ pub struct ThreadManager {
     _test_codex_home_guard: Option<TempCodexHomeGuard>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeMailboxLiveReenqueueOutcome {
+    Enqueued { submission_id: String },
+    Deferred,
+}
+
 pub struct StartThreadOptions {
     pub config: Config,
     /// Named role for a root thread. It does not imply a subagent relationship.
@@ -532,6 +538,58 @@ impl ThreadManager {
         self.agent_control()
             .send_inter_agent_communication(thread_id, communication)
             .await
+    }
+
+    pub async fn reenqueue_native_mailbox_communication(
+        &self,
+        thread_id: ThreadId,
+        communication_id: &str,
+    ) -> CodexResult<NativeMailboxLiveReenqueueOutcome> {
+        let state_db = self.state.state_db.as_ref().ok_or_else(|| {
+            CodexErr::Fatal("state DB is unavailable for native mailbox retry".to_string())
+        })?;
+        let record = state_db
+            .get_native_mailbox_communication(&thread_id.to_string(), communication_id)
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!(
+                    "failed to read native mailbox retry communication: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                CodexErr::Fatal(format!(
+                    "native mailbox retry communication {communication_id} not found"
+                ))
+            })?;
+        if record.status != "pending" {
+            return Err(CodexErr::Fatal(format!(
+                "native mailbox retry communication {communication_id} is not pending"
+            )));
+        }
+        let thread = match self.state.get_thread(thread_id).await {
+            Ok(thread) => thread,
+            Err(CodexErr::ThreadNotFound(_)) => {
+                return Ok(NativeMailboxLiveReenqueueOutcome::Deferred);
+            }
+            Err(error) => return Err(error),
+        };
+        let communication = serde_json::from_str(&record.communication_json).map_err(|error| {
+            CodexErr::Fatal(format!(
+                "failed to decode native mailbox retry communication {communication_id}: {error}"
+            ))
+        })?;
+        let submission_id = record
+            .submission_id
+            .unwrap_or_else(|| Uuid::now_v7().to_string());
+        thread
+            .submit_with_id(Submission {
+                id: submission_id.clone(),
+                op: Op::InterAgentCommunication { communication },
+                client_user_message_id: None,
+                trace: None,
+            })
+            .await?;
+        Ok(NativeMailboxLiveReenqueueOutcome::Enqueued { submission_id })
     }
 
     /// Updates metadata for loaded and cold threads through one entrypoint.

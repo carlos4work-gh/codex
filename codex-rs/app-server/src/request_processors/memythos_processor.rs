@@ -2334,6 +2334,8 @@ pub(crate) struct PeerParentDeliveryAttempt {
 
 pub(crate) type PeerParentDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = PeerParentDeliveryAttempt> + Send + 'a>>;
+pub(crate) type NativeMailboxReenqueueFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>>;
 
 pub(crate) trait PeerParentDeliveryAdapter: Send + Sync {
     fn deliver_peer_parent_message<'a>(
@@ -2342,6 +2344,12 @@ pub(crate) trait PeerParentDeliveryAdapter: Send + Sync {
         reasoning_effort: Option<ReasoningEffort>,
         connection_id: ConnectionId,
     ) -> PeerParentDeliveryFuture<'a>;
+
+    fn reenqueue_native_mailbox_communication<'a>(
+        &'a self,
+        receiver_thread_id: &'a str,
+        communication_id: &'a str,
+    ) -> NativeMailboxReenqueueFuture<'a>;
 }
 
 #[derive(Debug)]
@@ -2379,6 +2387,14 @@ impl PeerParentDeliveryAdapter for RecordOnlyPeerParentDeliveryAdapter {
                 ),
             }
         })
+    }
+
+    fn reenqueue_native_mailbox_communication<'a>(
+        &'a self,
+        _receiver_thread_id: &'a str,
+        _communication_id: &'a str,
+    ) -> NativeMailboxReenqueueFuture<'a> {
+        Box::pin(async { Ok(false) })
     }
 }
 
@@ -2523,6 +2539,27 @@ impl PeerParentDeliveryAdapter for NativeMailboxPeerParentDeliveryAdapter {
                     ),
                 ),
             }
+        })
+    }
+
+    fn reenqueue_native_mailbox_communication<'a>(
+        &'a self,
+        receiver_thread_id: &'a str,
+        communication_id: &'a str,
+    ) -> NativeMailboxReenqueueFuture<'a> {
+        Box::pin(async move {
+            let thread_id = ThreadId::from_string(receiver_thread_id)
+                .map_err(|error| format!("invalid receiver thread id: {error}"))?;
+            self.thread_manager
+                .reenqueue_native_mailbox_communication(thread_id, communication_id)
+                .await
+                .map(|outcome| {
+                    matches!(
+                        outcome,
+                        codex_core::NativeMailboxLiveReenqueueOutcome::Enqueued { .. }
+                    )
+                })
+                .map_err(|error| error.to_string())
         })
     }
 }
@@ -5958,6 +5995,29 @@ impl MemythosRequestProcessor {
             })
             .await
             .map_err(|error| invalid_params(format!("failed to resolve quarantine: {error}")))?;
+        let live_reenqueue_status = if action == NativeMailboxResolutionAction::Retry {
+            if outcome.existing {
+                "already_resolved".to_string()
+            } else {
+                match self
+                    .peer_parent_delivery_adapter
+                    .reenqueue_native_mailbox_communication(
+                        &outcome.receiver_thread_id,
+                        &outcome.communication_id,
+                    )
+                    .await
+                {
+                    Ok(true) => "enqueued".to_string(),
+                    Ok(false) => "deferred_until_resume".to_string(),
+                    Err(error) => {
+                        warn!("live native mailbox retry deferred: {error}");
+                        "deferred_until_resume".to_string()
+                    }
+                }
+            }
+        } else {
+            "not_applicable".to_string()
+        };
         Ok(MemythosMailboxQuarantineResolveResponse {
             receiver_thread_id: outcome.receiver_thread_id,
             communication_id: outcome.communication_id,
@@ -5966,6 +6026,7 @@ impl MemythosRequestProcessor {
             resulting_status: outcome.resulting_status,
             replacement_communication_id: outcome.replacement_communication_id,
             existing: outcome.existing,
+            live_reenqueue_status,
         }
         .into())
     }

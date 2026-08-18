@@ -1354,6 +1354,7 @@ pub struct MemythosMailboxQuarantineResolveResponse {
     #[ts(optional = nullable)]
     pub replacement_communication_id: Option<String>,
     pub existing: bool,
+    pub live_reenqueue_status: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
