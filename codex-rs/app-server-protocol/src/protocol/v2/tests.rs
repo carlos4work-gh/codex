@@ -4170,6 +4170,14 @@ fn memythos_mailbox_quarantine_methods_deserialize() {
                 "reason": "verified"
             }),
         ),
+        (
+            "memythos/mailbox/quarantine/resolution/list",
+            json!({"receiverThreadId": "thread-a", "limit": 20}),
+        ),
+        (
+            "memythos/mailbox/quarantine/resolution/get",
+            json!({"receiverThreadId": "thread-a", "commandId": "command-a"}),
+        ),
     ] {
         let request = serde_json::from_value::<crate::ClientRequest>(json!({
             "method": method,

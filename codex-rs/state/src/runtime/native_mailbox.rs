@@ -394,8 +394,8 @@ ORDER BY id
         limit: i64,
     ) -> anyhow::Result<Vec<NativeMailboxResolutionAuditRecord>> {
         anyhow::ensure!(
-            (1..=100).contains(&limit),
-            "limit must be between 1 and 100"
+            (1..=101).contains(&limit),
+            "limit must be between 1 and 101"
         );
         let rows = sqlx::query(
             r#"SELECT id, receiver_thread_id, communication_id, command_id,
@@ -440,6 +440,28 @@ ORDER BY id
                 })
             })
             .collect()
+    }
+
+    pub async fn get_native_mailbox_resolution_audit(
+        &self,
+        receiver_thread_id: &str,
+        command_id: &str,
+    ) -> anyhow::Result<Option<NativeMailboxResolutionAuditRecord>> {
+        let row = sqlx::query(
+            r#"SELECT id, receiver_thread_id, communication_id, command_id,
+                      resolution_generation, action, actor, reason, pre_status,
+                      pre_attempt_count, pre_failure_fingerprint, pre_last_progress_ref,
+                      pre_quarantine_reason, pre_payload_hash, resulting_status,
+                      replacement_communication_id, created_at_ms
+               FROM native_mailbox_resolution_commands
+               WHERE receiver_thread_id = ? AND command_id = ?"#,
+        )
+        .bind(receiver_thread_id)
+        .bind(command_id)
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+        row.map(native_mailbox_resolution_audit_from_row)
+            .transpose()
     }
 
     pub async fn mark_native_mailbox_communication_consumed(
@@ -539,6 +561,30 @@ fn native_mailbox_record_from_row(
         quarantine_reason: row.try_get("quarantine_reason")?,
         created_at_ms: row.try_get("created_at_ms")?,
         updated_at_ms: row.try_get("updated_at_ms")?,
+    })
+}
+
+fn native_mailbox_resolution_audit_from_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> anyhow::Result<NativeMailboxResolutionAuditRecord> {
+    Ok(NativeMailboxResolutionAuditRecord {
+        id: row.try_get("id")?,
+        receiver_thread_id: row.try_get("receiver_thread_id")?,
+        communication_id: row.try_get("communication_id")?,
+        command_id: row.try_get("command_id")?,
+        resolution_generation: row.try_get("resolution_generation")?,
+        action: row.try_get("action")?,
+        actor: row.try_get("actor")?,
+        reason: row.try_get("reason")?,
+        pre_status: row.try_get("pre_status")?,
+        pre_attempt_count: row.try_get("pre_attempt_count")?,
+        pre_failure_fingerprint: row.try_get("pre_failure_fingerprint")?,
+        pre_last_progress_ref: row.try_get("pre_last_progress_ref")?,
+        pre_quarantine_reason: row.try_get("pre_quarantine_reason")?,
+        pre_payload_hash: row.try_get("pre_payload_hash")?,
+        resulting_status: row.try_get("resulting_status")?,
+        replacement_communication_id: row.try_get("replacement_communication_id")?,
+        created_at_ms: row.try_get("created_at_ms")?,
     })
 }
 

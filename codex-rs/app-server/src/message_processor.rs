@@ -1306,6 +1306,16 @@ impl MessageProcessor {
                 .mailbox_quarantine_resolve(params)
                 .await
                 .map(Some),
+            ClientRequest::MemythosMailboxResolutionList { params, .. } => self
+                .memythos_processor
+                .mailbox_resolution_list(params)
+                .await
+                .map(Some),
+            ClientRequest::MemythosMailboxResolutionGet { params, .. } => self
+                .memythos_processor
+                .mailbox_resolution_get(params)
+                .await
+                .map(Some),
             ClientRequest::MemythosArenaMessageObservationList { params, .. } => self
                 .memythos_processor
                 .arena_message_observation_list(params)

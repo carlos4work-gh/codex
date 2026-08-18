@@ -80,6 +80,11 @@ use codex_app_server_protocol::MemythosMailboxQuarantineRecord;
 use codex_app_server_protocol::MemythosMailboxQuarantineResolutionAction;
 use codex_app_server_protocol::MemythosMailboxQuarantineResolveParams;
 use codex_app_server_protocol::MemythosMailboxQuarantineResolveResponse;
+use codex_app_server_protocol::MemythosMailboxResolutionAuditRecord;
+use codex_app_server_protocol::MemythosMailboxResolutionGetParams;
+use codex_app_server_protocol::MemythosMailboxResolutionGetResponse;
+use codex_app_server_protocol::MemythosMailboxResolutionListParams;
+use codex_app_server_protocol::MemythosMailboxResolutionListResponse;
 use codex_app_server_protocol::MemythosParentConfiguration;
 use codex_app_server_protocol::MemythosParentContinuityListParams;
 use codex_app_server_protocol::MemythosParentContinuityListResponse;
@@ -175,6 +180,7 @@ use codex_rollout::state_db::StateDbHandle;
 use codex_state::ArenaSnapshotRecord;
 use codex_state::NativeMailboxCommunicationRecord;
 use codex_state::NativeMailboxResolutionAction;
+use codex_state::NativeMailboxResolutionAuditRecord;
 use codex_state::NativeMailboxResolutionCommand;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
@@ -6031,6 +6037,64 @@ impl MemythosRequestProcessor {
         .into())
     }
 
+    pub(crate) async fn mailbox_resolution_list(
+        &self,
+        params: MemythosMailboxResolutionListParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state_db = self
+            .arena_state_db
+            .as_ref()
+            .ok_or_else(|| internal_error("state DB is unavailable"))?;
+        let after_id = params
+            .cursor
+            .as_deref()
+            .map(str::parse::<i64>)
+            .transpose()
+            .map_err(|_| invalid_params("invalid resolution cursor"))?;
+        let limit = params.limit.unwrap_or(50).clamp(1, 100) as usize;
+        let mut records = state_db
+            .list_native_mailbox_resolution_audit(
+                params.receiver_thread_id.as_deref(),
+                params.communication_id.as_deref(),
+                after_id,
+                (limit + 1) as i64,
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to list resolution audit: {error}")))?;
+        let has_more = records.len() > limit;
+        records.truncate(limit);
+        let next_cursor = has_more
+            .then(|| records.last().map(|record| record.id.to_string()))
+            .flatten();
+        Ok(MemythosMailboxResolutionListResponse {
+            resolutions: records
+                .into_iter()
+                .map(mailbox_resolution_audit_record)
+                .collect(),
+            next_cursor,
+        }
+        .into())
+    }
+
+    pub(crate) async fn mailbox_resolution_get(
+        &self,
+        params: MemythosMailboxResolutionGetParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        let state_db = self
+            .arena_state_db
+            .as_ref()
+            .ok_or_else(|| internal_error("state DB is unavailable"))?;
+        let resolution = state_db
+            .get_native_mailbox_resolution_audit(&params.receiver_thread_id, &params.command_id)
+            .await
+            .map_err(|error| internal_error(format!("failed to read resolution audit: {error}")))?
+            .ok_or_else(|| invalid_params("unknown mailbox resolution command"))?;
+        Ok(MemythosMailboxResolutionGetResponse {
+            resolution: mailbox_resolution_audit_record(resolution),
+        }
+        .into())
+    }
+
     pub(crate) async fn arena_message_read(
         &self,
         params: MemythosArenaMessageReadParams,
@@ -9078,6 +9142,30 @@ fn mailbox_quarantine_record(
         quarantine_reason: record.quarantine_reason,
         created_at_ms: record.created_at_ms,
         updated_at_ms: record.updated_at_ms,
+    }
+}
+
+fn mailbox_resolution_audit_record(
+    record: NativeMailboxResolutionAuditRecord,
+) -> MemythosMailboxResolutionAuditRecord {
+    MemythosMailboxResolutionAuditRecord {
+        id: record.id,
+        receiver_thread_id: record.receiver_thread_id,
+        communication_id: record.communication_id,
+        command_id: record.command_id,
+        resolution_generation: record.resolution_generation,
+        action: record.action,
+        actor: record.actor,
+        reason: record.reason,
+        pre_status: record.pre_status,
+        pre_attempt_count: record.pre_attempt_count,
+        pre_failure_fingerprint: record.pre_failure_fingerprint,
+        pre_last_progress_ref: record.pre_last_progress_ref,
+        pre_quarantine_reason: record.pre_quarantine_reason,
+        pre_payload_hash: record.pre_payload_hash,
+        resulting_status: record.resulting_status,
+        replacement_communication_id: record.replacement_communication_id,
+        created_at_ms: record.created_at_ms,
     }
 }
 
