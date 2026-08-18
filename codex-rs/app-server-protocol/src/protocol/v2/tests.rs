@@ -4153,6 +4153,10 @@ fn memythos_mailbox_quarantine_methods_deserialize() {
             json!({"receiverThreadId": "thread-a"}),
         ),
         (
+            "memythos/mailbox/health/get",
+            json!({"receiverThreadId": "thread-a"}),
+        ),
+        (
             "memythos/mailbox/quarantine/get",
             json!({
                 "receiverThreadId": "thread-a",

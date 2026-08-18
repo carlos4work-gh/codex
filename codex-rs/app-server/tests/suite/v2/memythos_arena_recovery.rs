@@ -30,6 +30,8 @@ use codex_app_server_protocol::MemythosArenaRunParams;
 use codex_app_server_protocol::MemythosArenaRunResponse;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
 use codex_app_server_protocol::MemythosArenaStateGetResponse;
+use codex_app_server_protocol::MemythosMailboxHealthGetParams;
+use codex_app_server_protocol::MemythosMailboxHealthGetResponse;
 use codex_app_server_protocol::MemythosMailboxQuarantineGetParams;
 use codex_app_server_protocol::MemythosMailboxQuarantineGetResponse;
 use codex_app_server_protocol::MemythosMailboxQuarantineListParams;
@@ -637,6 +639,11 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
 
     let mut process = TestAppServer::new(codex_home.path()).await?;
     timeout(RESPONSE_TIMEOUT, process.initialize()).await??;
+    let quarantined_health = mailbox_health(&mut process, &bettor.thread_id).await?;
+    assert_eq!(quarantined_health.pending_count, 0);
+    assert_eq!(quarantined_health.quarantined_count, 5);
+    assert_eq!(quarantined_health.max_attempt_count, 4);
+    assert_eq!(quarantined_health.resolution_count, 0);
     let skip = resolve_quarantine(
         &mut process,
         MemythosMailboxQuarantineResolveParams {
@@ -875,6 +882,15 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
         Some("message-terminal-replacement")
     );
 
+    let resolved_health = mailbox_health(&mut process, &bettor.thread_id).await?;
+    assert_eq!(resolved_health.pending_count, 2);
+    assert_eq!(resolved_health.quarantined_count, 0);
+    assert_eq!(
+        resolved_health.skipped_count + resolved_health.aborted_count,
+        5
+    );
+    assert_eq!(resolved_health.resolution_count, 5);
+
     resume_native_thread(&mut process, &bettor.thread_id).await?;
     let mut wake = triggered_proposal_message(
         "message-terminal-resolution-wake",
@@ -902,6 +918,10 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
             .count(),
         1
     );
+    let consumed_health = mailbox_health(&mut process, &bettor.thread_id).await?;
+    assert_eq!(consumed_health.pending_count, 0);
+    assert_eq!(consumed_health.consumed_count, 3);
+    assert_eq!(consumed_health.resolution_count, 5);
 
     Ok(())
 }
@@ -1088,6 +1108,23 @@ async fn resolve_quarantine(
 ) -> Result<MemythosMailboxQuarantineResolveResponse> {
     let request_id = server
         .send_memythos_mailbox_quarantine_resolve_request(params)
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        server.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    Ok(to_response(response)?)
+}
+
+async fn mailbox_health(
+    server: &mut TestAppServer,
+    receiver_thread_id: &str,
+) -> Result<MemythosMailboxHealthGetResponse> {
+    let request_id = server
+        .send_memythos_mailbox_health_get_request(MemythosMailboxHealthGetParams {
+            receiver_thread_id: Some(receiver_thread_id.to_string()),
+        })
         .await?;
     let response: JSONRPCResponse = timeout(
         RESPONSE_TIMEOUT,

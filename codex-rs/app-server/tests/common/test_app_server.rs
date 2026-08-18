@@ -60,6 +60,7 @@ use codex_app_server_protocol::MemythosArenaMessageSendParams;
 use codex_app_server_protocol::MemythosArenaPhaseStartParams;
 use codex_app_server_protocol::MemythosArenaRunParams;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
+use codex_app_server_protocol::MemythosMailboxHealthGetParams;
 use codex_app_server_protocol::MemythosMailboxQuarantineGetParams;
 use codex_app_server_protocol::MemythosMailboxQuarantineListParams;
 use codex_app_server_protocol::MemythosMailboxQuarantineResolveParams;
@@ -524,6 +525,17 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         self.send_request(
             "memythos/mailbox/quarantine/list",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_mailbox_health_get_request(
+        &mut self,
+        params: MemythosMailboxHealthGetParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/mailbox/health/get",
             Some(serde_json::to_value(params)?),
         )
         .await
