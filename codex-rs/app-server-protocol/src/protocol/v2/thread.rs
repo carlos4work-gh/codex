@@ -57,6 +57,10 @@ pub enum ThreadStartSource {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadStartParams {
+    /// Named agent role applied to this root thread using the same role configuration
+    /// mechanism used by spawned agents. This does not create a parent-child relationship.
+    #[ts(optional = nullable)]
+    pub agent_role: Option<String>,
     #[ts(optional = nullable)]
     pub model: Option<String>,
     #[ts(optional = nullable)]

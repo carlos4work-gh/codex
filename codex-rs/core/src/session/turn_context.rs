@@ -973,11 +973,20 @@ impl Session {
     }
 
     pub(crate) async fn new_default_turn_with_sub_id(&self, sub_id: String) -> Arc<TurnContext> {
+        self.new_default_turn_with_sub_id_and_schema(sub_id, None)
+            .await
+    }
+
+    pub(crate) async fn new_default_turn_with_sub_id_and_schema(
+        &self,
+        sub_id: String,
+        final_output_json_schema: Option<Value>,
+    ) -> Arc<TurnContext> {
         let session_configuration = self.default_turn_configuration().await;
         self.new_turn_from_configuration(
             sub_id,
             session_configuration,
-            /*final_output_json_schema*/ None,
+            Some(final_output_json_schema),
         )
         .await
     }

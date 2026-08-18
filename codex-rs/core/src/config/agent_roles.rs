@@ -153,6 +153,9 @@ async fn read_declared_role(
         role_name = parsed_file.role_name;
         role.description = parsed_file.description.or(role.description);
         role.nickname_candidates = parsed_file.nickname_candidates.or(role.nickname_candidates);
+        role.planner_capabilities = parsed_file
+            .planner_capabilities
+            .or(role.planner_capabilities);
     }
 
     Ok((role_name, role))
@@ -165,6 +168,10 @@ fn merge_missing_role_fields(role: &mut AgentRoleConfig, fallback: &AgentRoleCon
         .nickname_candidates
         .clone()
         .or(fallback.nickname_candidates.clone());
+    role.planner_capabilities = role
+        .planner_capabilities
+        .clone()
+        .or(fallback.planner_capabilities.clone());
 }
 
 fn agents_toml_from_layer(
@@ -208,6 +215,7 @@ async fn agent_role_config_from_toml(
         description,
         config_file: config_file.map(AbsolutePathBuf::into_path_buf),
         nickname_candidates,
+        planner_capabilities: role.planner_capabilities.clone(),
     })
 }
 
@@ -217,6 +225,7 @@ struct RawAgentRoleFileToml {
     name: Option<String>,
     description: Option<String>,
     nickname_candidates: Option<Vec<String>>,
+    planner_capabilities: Option<codex_config::config_toml::AgentRolePlannerCapabilitiesToml>,
     #[serde(flatten)]
     config: ConfigToml,
 }
@@ -226,6 +235,8 @@ pub(crate) struct ResolvedAgentRoleFile {
     pub(crate) role_name: String,
     pub(crate) description: Option<String>,
     pub(crate) nickname_candidates: Option<Vec<String>>,
+    pub(crate) planner_capabilities:
+        Option<codex_config::config_toml::AgentRolePlannerCapabilitiesToml>,
     pub(crate) config: TomlValue,
 }
 
@@ -302,11 +313,13 @@ pub(crate) fn parse_agent_role_file_contents(
     config_table.remove("name");
     config_table.remove("description");
     config_table.remove("nickname_candidates");
+    config_table.remove("planner_capabilities");
 
     Ok(ResolvedAgentRoleFile {
         role_name,
         description,
         nickname_candidates,
+        planner_capabilities: parsed.planner_capabilities,
         config,
     })
 }
@@ -507,6 +520,7 @@ async fn discover_agent_roles_in_dir(
                 description: parsed_file.description,
                 config_file: Some(agent_file.to_path_buf()),
                 nickname_candidates: parsed_file.nickname_candidates,
+                planner_capabilities: parsed_file.planner_capabilities,
             },
         );
     }

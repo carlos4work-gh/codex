@@ -1,0 +1,136 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AgentRoleListEntry": {
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hasLockedRuntimeSettings": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/definitions/AgentRoleOrigin"
+        },
+        "plannerCapabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentRolePlannerCapabilities"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "hasLockedRuntimeSettings",
+        "id",
+        "origin"
+      ],
+      "type": "object"
+    },
+    "AgentRoleOrigin": {
+      "enum": [
+        "builtIn",
+        "userConfigured"
+      ],
+      "type": "string"
+    },
+    "AgentRolePlannerCapabilities": {
+      "properties": {
+        "allowedStances": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "authorityScopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "incompatibleRoles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "participantKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "problemClasses": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "proposalBearing": {
+          "type": "boolean"
+        },
+        "relativeCost": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relativeToolUse": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requiredCompanions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "supportsMultipleStances": {
+          "type": "boolean"
+        },
+        "workModes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "allowedStances",
+        "authorityScopes",
+        "incompatibleRoles",
+        "participantKinds",
+        "problemClasses",
+        "proposalBearing",
+        "requiredCompanions",
+        "supportsMultipleStances",
+        "workModes"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "roles": {
+      "items": {
+        "$ref": "#/definitions/AgentRoleListEntry"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "roles"
+  ],
+  "title": "AgentRoleListResponse",
+  "type": "object"
+}

@@ -70,6 +70,7 @@ static LIVE_THREADS: Gauge = Gauge::new("core.threads.live");
 
 #[derive(Clone, Debug)]
 pub struct ThreadConfigSnapshot {
+    pub agent_role: Option<String>,
     pub model: String,
     pub model_provider_id: String,
     pub service_tier: Option<String>,

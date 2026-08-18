@@ -2278,6 +2278,8 @@ pub struct AgentRoleConfig {
     pub config_file: Option<PathBuf>,
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+    /// Declarative planning hints. They never alter the applied role layer.
+    pub planner_capabilities: Option<codex_config::config_toml::AgentRolePlannerCapabilitiesToml>,
 }
 
 fn resolve_tool_suggest_config(

@@ -255,7 +255,8 @@ pub struct Thread {
     pub thread_source: Option<ThreadSource>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     pub agent_nickname: Option<String>,
-    /// Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.
+    /// Optional named role applied to this thread. Root threads can select it at
+    /// `thread/start`; spawned agents inherit it from AgentControl.
     pub agent_role: Option<String>,
     /// Optional Git metadata captured when the thread was created.
     pub git_info: Option<GitInfo>,
