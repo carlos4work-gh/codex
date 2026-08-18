@@ -30,13 +30,26 @@ echo "behind_upstream: $right_count"
 echo
 
 watch_paths=(
+  ".codespellignore"
+  ".github/workflows/memythos-arena-ci.yml"
+  "codex-rs/Cargo.lock"
+  "codex-rs/Cargo.toml"
   "codex-rs/app-server"
   "codex-rs/app-server-client"
   "codex-rs/app-server-daemon"
   "codex-rs/app-server-protocol"
   "codex-rs/app-server-transport"
+  "codex-rs/cli"
+  "codex-rs/config"
+  "codex-rs/core"
   "codex-rs/ext/goal"
+  "codex-rs/memories/write"
   "codex-rs/protocol"
+  "codex-rs/rollout"
+  "codex-rs/state"
+  "codex-rs/thread-store"
+  "docs/memythos"
+  "scripts/memythos"
 )
 
 echo "Changed files in Memythos-sensitive surfaces"
@@ -49,7 +62,7 @@ echo
 
 cat <<'EOF'
 Suggested regression gates before integrating upstream:
-- Build app-server/protocol/client crates.
+- Build every crate touched by the fork, not only app-server/protocol.
 - Start daemon in isolated runtime home.
 - Run a live thread that emits human_highlight and technical_detail separately.
 - Verify steering does not treat supervisor observation as human instruction.

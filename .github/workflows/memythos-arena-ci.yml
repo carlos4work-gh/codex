@@ -3,10 +3,22 @@ name: Memythos arena CI
 on:
   pull_request:
     paths:
+      - ".codespellignore"
+      - "codex-rs/Cargo.lock"
+      - "codex-rs/Cargo.toml"
       - "codex-rs/app-server/**"
       - "codex-rs/app-server-protocol/**"
+      - "codex-rs/cli/**"
+      - "codex-rs/config/**"
       - "codex-rs/core/**"
+      - "codex-rs/ext/goal/**"
+      - "codex-rs/memories/write/**"
+      - "codex-rs/protocol/**"
+      - "codex-rs/rollout/**"
       - "codex-rs/state/**"
+      - "codex-rs/thread-store/**"
+      - "docs/memythos/**"
+      - "scripts/memythos/**"
       - ".github/workflows/memythos-arena-ci.yml"
   push:
     branches:
@@ -24,9 +36,32 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+
+      - name: Fetch Codex upstream baseline
+        working-directory: ${{ github.workspace }}
+        run: |
+          git remote add upstream https://github.com/openai/codex.git
+          git fetch --no-tags upstream main
+
+      - name: Report upstream impact on all fork sources
+        working-directory: ${{ github.workspace }}
+        run: scripts/memythos/upstream-impact-check.sh
+
+      - name: Compile extended fork source boundary
+        run: >-
+          cargo check
+          -p codex-cli
+          -p codex-config
+          -p codex-goal-extension
+          -p codex-memories-write
+          -p codex-protocol
+          -p codex-rollout
+          -p codex-thread-store
 
       - name: Judge ranking regression
         run: cargo test -p codex-app-server native_judge_verdict_requires_each_rejected_alternative_exactly_once
