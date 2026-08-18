@@ -37,6 +37,10 @@ use codex_app_server_protocol::MemythosMailboxQuarantineListResponse;
 use codex_app_server_protocol::MemythosMailboxQuarantineResolutionAction;
 use codex_app_server_protocol::MemythosMailboxQuarantineResolveParams;
 use codex_app_server_protocol::MemythosMailboxQuarantineResolveResponse;
+use codex_app_server_protocol::MemythosMailboxResolutionGetParams;
+use codex_app_server_protocol::MemythosMailboxResolutionGetResponse;
+use codex_app_server_protocol::MemythosMailboxResolutionListParams;
+use codex_app_server_protocol::MemythosMailboxResolutionListResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadListParams;
@@ -677,6 +681,62 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
     assert_eq!(replaced.resulting_status, "aborted");
     assert_eq!(
         replaced.replacement_communication_id.as_deref(),
+        Some("message-terminal-replacement")
+    );
+
+    let first_page_id = process
+        .send_memythos_mailbox_resolution_list_request(MemythosMailboxResolutionListParams {
+            receiver_thread_id: Some(bettor.thread_id.clone()),
+            communication_id: None,
+            cursor: None,
+            limit: Some(2),
+        })
+        .await?;
+    let first_page_response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        process.read_stream_until_response_message(RequestId::Integer(first_page_id)),
+    )
+    .await??;
+    let first_page = to_response::<MemythosMailboxResolutionListResponse>(first_page_response)?;
+    assert_eq!(first_page.resolutions.len(), 2);
+    let second_page_id = process
+        .send_memythos_mailbox_resolution_list_request(MemythosMailboxResolutionListParams {
+            receiver_thread_id: Some(bettor.thread_id.clone()),
+            communication_id: None,
+            cursor: first_page.next_cursor,
+            limit: Some(2),
+        })
+        .await?;
+    let second_page_response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        process.read_stream_until_response_message(RequestId::Integer(second_page_id)),
+    )
+    .await??;
+    let second_page = to_response::<MemythosMailboxResolutionListResponse>(second_page_response)?;
+    assert_eq!(second_page.resolutions.len(), 1);
+    assert!(second_page.next_cursor.is_none());
+
+    let audit_get_id = process
+        .send_memythos_mailbox_resolution_get_request(MemythosMailboxResolutionGetParams {
+            receiver_thread_id: bettor.thread_id.clone(),
+            command_id: "command-terminal-replace".to_string(),
+        })
+        .await?;
+    let audit_get_response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        process.read_stream_until_response_message(RequestId::Integer(audit_get_id)),
+    )
+    .await??;
+    let audit = to_response::<MemythosMailboxResolutionGetResponse>(audit_get_response)?.resolution;
+    assert_eq!(audit.pre_status, "quarantined");
+    assert_eq!(audit.pre_attempt_count, 4);
+    assert_eq!(
+        audit.pre_failure_fingerprint.as_deref(),
+        Some("native_mailbox_recovery_without_progress")
+    );
+    assert_eq!(audit.resulting_status, "aborted");
+    assert_eq!(
+        audit.replacement_communication_id.as_deref(),
         Some("message-terminal-replacement")
     );
 
