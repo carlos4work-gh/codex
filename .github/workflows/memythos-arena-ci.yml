@@ -52,6 +52,10 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: scripts/memythos/upstream-impact-check.sh
 
+      - name: Verify fork source connectivity
+        working-directory: ${{ github.workspace }}
+        run: scripts/memythos/fork-source-connectivity.sh
+
       - name: Compile extended fork source boundary
         run: >-
           cargo check
