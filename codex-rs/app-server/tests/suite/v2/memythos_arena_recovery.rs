@@ -558,6 +558,7 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
     const SKIP_MARKER: &str = "QUARANTINED_SKIP_MUST_NOT_RUN";
     const ABORT_MARKER: &str = "QUARANTINED_ABORT_MUST_NOT_RUN";
     const REPLACED_MARKER: &str = "QUARANTINED_REPLACED_ORIGINAL_MUST_NOT_RUN";
+    const RACE_MARKER: &str = "QUARANTINED_CONCURRENT_RESOLUTION_MUST_NOT_RUN";
     const REPLACEMENT_MARKER: &str = "AUTHORIZED_REPLACEMENT_MUST_RUN";
 
     let model_server = create_mock_responses_server_repeating_assistant("resolved").await;
@@ -591,6 +592,7 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
         ("message-terminal-skip", SKIP_MARKER),
         ("message-terminal-abort", ABORT_MARKER),
         ("message-terminal-replace", REPLACED_MARKER),
+        ("message-terminal-race", RACE_MARKER),
     ] {
         let mut message =
             queued_proposal_message(message_id, &concierge.thread_id, &bettor.thread_id);
@@ -615,6 +617,7 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
         "message-terminal-skip",
         "message-terminal-abort",
         "message-terminal-replace",
+        "message-terminal-race",
     ] {
         for attempt in 1..=4 {
             state_db
@@ -684,6 +687,57 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
         Some("message-terminal-replacement")
     );
 
+    let race_skip_id = process
+        .send_memythos_mailbox_quarantine_resolve_request(MemythosMailboxQuarantineResolveParams {
+            receiver_thread_id: bettor.thread_id.clone(),
+            communication_id: "message-terminal-race".to_string(),
+            command_id: "command-terminal-race-skip".to_string(),
+            action: MemythosMailboxQuarantineResolutionAction::Skip,
+            actor: "operator:e2e".to_string(),
+            reason: "concurrent skip".to_string(),
+            replacement_message: None,
+        })
+        .await?;
+    let race_abort_id = process
+        .send_memythos_mailbox_quarantine_resolve_request(MemythosMailboxQuarantineResolveParams {
+            receiver_thread_id: bettor.thread_id.clone(),
+            communication_id: "message-terminal-race".to_string(),
+            command_id: "command-terminal-race-abort".to_string(),
+            action: MemythosMailboxQuarantineResolutionAction::Abort,
+            actor: "operator:e2e".to_string(),
+            reason: "concurrent abort".to_string(),
+            replacement_message: None,
+        })
+        .await?;
+    let race_skip = to_response::<MemythosMailboxQuarantineResolveResponse>(
+        timeout(
+            RESPONSE_TIMEOUT,
+            process.read_stream_until_response_message(RequestId::Integer(race_skip_id)),
+        )
+        .await??,
+    )?;
+    let race_abort = to_response::<MemythosMailboxQuarantineResolveResponse>(
+        timeout(
+            RESPONSE_TIMEOUT,
+            process.read_stream_until_response_message(RequestId::Integer(race_abort_id)),
+        )
+        .await??,
+    )?;
+    let race_outcomes = [&race_skip, &race_abort];
+    let race_winner = race_outcomes
+        .iter()
+        .find(|outcome| !outcome.conflict)
+        .expect("one concurrent command wins");
+    let race_loser = race_outcomes
+        .iter()
+        .find(|outcome| outcome.conflict)
+        .expect("one concurrent command conflicts");
+    assert_eq!(
+        race_loser.winner_command_id.as_deref(),
+        Some(race_winner.command_id.as_str())
+    );
+    assert_eq!(race_loser.live_reenqueue_status, "not_applicable");
+
     let first_page_id = process
         .send_memythos_mailbox_resolution_list_request(MemythosMailboxResolutionListParams {
             receiver_thread_id: Some(bettor.thread_id.clone()),
@@ -713,7 +767,7 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
     )
     .await??;
     let second_page = to_response::<MemythosMailboxResolutionListResponse>(second_page_response)?;
-    assert_eq!(second_page.resolutions.len(), 1);
+    assert_eq!(second_page.resolutions.len(), 2);
     assert!(second_page.next_cursor.is_none());
 
     let audit_get_id = process
@@ -759,6 +813,7 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
     assert!(!body.contains(SKIP_MARKER));
     assert!(!body.contains(ABORT_MARKER));
     assert!(!body.contains(REPLACED_MARKER));
+    assert!(!body.contains(RACE_MARKER));
 
     Ok(())
 }
