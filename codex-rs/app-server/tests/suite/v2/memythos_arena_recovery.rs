@@ -54,10 +54,21 @@ use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WarningNotification;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_utils_absolute_path::test_support::PathExt;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn start_app_server(codex_home: &TempDir) -> Result<TestAppServer> {
+    let sqlite_home = codex_home.path().to_string_lossy();
+    TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("CODEX_SQLITE_HOME", Some(sqlite_home.as_ref()))])
+        .build()
+        .await
+}
 
 #[tokio::test]
 async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents() -> Result<()> {
@@ -75,7 +86,7 @@ async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents()
     write_arena_role_catalog(&codex_home)?;
     let provision_params = competitive_composition_params();
 
-    let mut first_process = TestAppServer::new(codex_home.path()).await?;
+    let mut first_process = start_app_server(&codex_home).await?;
     timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
     let provision_id = first_process
         .send_memythos_arena_composition_provision_request(provision_params.clone())
@@ -91,6 +102,11 @@ async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents()
         .iter()
         .map(|lease| lease.thread_id.clone())
         .collect::<HashSet<_>>();
+    let original_thread_roles = provisioned
+        .leases
+        .iter()
+        .map(|lease| (lease.thread_id.clone(), Some(lease.role.clone())))
+        .collect::<BTreeMap<_, _>>();
     assert_eq!(original_thread_ids.len(), 4);
 
     let phase_id = first_process
@@ -110,7 +126,7 @@ async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents()
     assert_eq!(killed.signal(), Some(9), "app-server must exit by SIGKILL");
     drop(first_process);
 
-    let mut restarted_process = TestAppServer::new(codex_home.path()).await?;
+    let mut restarted_process = start_app_server(&codex_home).await?;
     timeout(RESPONSE_TIMEOUT, restarted_process.initialize()).await??;
     let run_id = restarted_process
         .send_memythos_arena_run_request(MemythosArenaRunParams {
@@ -134,6 +150,10 @@ async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents()
     assert_eq!(
         read_native_thread_ids(&mut restarted_process).await?,
         original_thread_ids
+    );
+    assert_eq!(
+        read_native_thread_roles(&mut restarted_process).await?,
+        original_thread_roles
     );
 
     let duplicate_id = restarted_process
@@ -178,7 +198,7 @@ async fn arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once() -
     )?;
     write_arena_role_catalog(&codex_home)?;
 
-    let mut first_process = TestAppServer::new(codex_home.path()).await?;
+    let mut first_process = start_app_server(&codex_home).await?;
     timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
     let provisioned = provision_arena(&mut first_process).await?;
     start_proposal_phase(&mut first_process).await?;
@@ -205,7 +225,7 @@ async fn arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once() -
 
     {
         let state_db = codex_state::StateRuntime::init(
-            codex_home.path().to_path_buf(),
+            codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
             "mock_provider".to_string(),
         )
         .await?;
@@ -223,7 +243,7 @@ async fn arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once() -
     assert_eq!(killed.signal(), Some(9), "app-server must exit by SIGKILL");
     drop(first_process);
 
-    let mut restarted_process = TestAppServer::new(codex_home.path()).await?;
+    let mut restarted_process = start_app_server(&codex_home).await?;
     timeout(RESPONSE_TIMEOUT, restarted_process.initialize()).await??;
     let restored = read_arena_state(&mut restarted_process).await?;
     assert_eq!(restored.deliveries.len(), 1);
@@ -245,7 +265,7 @@ async fn arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once() -
     resume_native_thread(&mut restarted_process, &bettors[0].thread_id).await?;
     {
         let state_db = codex_state::StateRuntime::init(
-            codex_home.path().to_path_buf(),
+            codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
             "mock_provider".to_string(),
         )
         .await?;
@@ -284,7 +304,7 @@ async fn arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once() -
     );
 
     let state_db = codex_state::StateRuntime::init(
-        codex_home.path().to_path_buf(),
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
         "mock_provider".to_string(),
     )
     .await?;
@@ -344,7 +364,7 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
     )?;
     write_arena_role_catalog(&codex_home)?;
 
-    let mut first_process = TestAppServer::new(codex_home.path()).await?;
+    let mut first_process = start_app_server(&codex_home).await?;
     timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
     let provisioned = provision_arena(&mut first_process).await?;
     start_proposal_phase(&mut first_process).await?;
@@ -372,12 +392,12 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
     drop(first_process);
 
     for expected_attempt in 1..=3 {
-        let mut recovery_process = TestAppServer::new(codex_home.path()).await?;
+        let mut recovery_process = start_app_server(&codex_home).await?;
         timeout(RESPONSE_TIMEOUT, recovery_process.initialize()).await??;
         resume_native_thread(&mut recovery_process, &bettor.thread_id).await?;
 
         let state_db = codex_state::StateRuntime::init(
-            codex_home.path().to_path_buf(),
+            codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
             "mock_provider".to_string(),
         )
         .await?;
@@ -394,7 +414,7 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
         drop(recovery_process);
     }
 
-    let mut quarantining_process = TestAppServer::new(codex_home.path()).await?;
+    let mut quarantining_process = start_app_server(&codex_home).await?;
     timeout(RESPONSE_TIMEOUT, quarantining_process.initialize()).await??;
     resume_native_thread(&mut quarantining_process, &bettor.thread_id).await?;
     let warning_notification = timeout(
@@ -447,7 +467,7 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
     assert_eq!(inspected.communication.attempt_count, 4);
 
     let state_db = codex_state::StateRuntime::init(
-        codex_home.path().to_path_buf(),
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
         "mock_provider".to_string(),
     )
     .await?;
@@ -539,7 +559,7 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
     assert!(retry_body.contains(RETRY_WAKE_MARKER));
 
     let state_db = codex_state::StateRuntime::init(
-        codex_home.path().to_path_buf(),
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
         "mock_provider".to_string(),
     )
     .await?;
@@ -576,7 +596,7 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
         "compact",
     )?;
     write_arena_role_catalog(&codex_home)?;
-    let mut first_process = TestAppServer::new(codex_home.path()).await?;
+    let mut first_process = start_app_server(&codex_home).await?;
     timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
     let provisioned = provision_arena(&mut first_process).await?;
     start_proposal_phase(&mut first_process).await?;
@@ -612,7 +632,7 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
     drop(first_process);
 
     let state_db = codex_state::StateRuntime::init(
-        codex_home.path().to_path_buf(),
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
         "mock_provider".to_string(),
     )
     .await?;
@@ -637,7 +657,7 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
     }
     drop(state_db);
 
-    let mut process = TestAppServer::new(codex_home.path()).await?;
+    let mut process = start_app_server(&codex_home).await?;
     timeout(RESPONSE_TIMEOUT, process.initialize()).await??;
     let quarantined_health = mailbox_health(&mut process, &bettor.thread_id).await?;
     assert_eq!(quarantined_health.pending_count, 0);
@@ -941,7 +961,7 @@ async fn arena_completed_turn_ack_survives_sigkill_without_duplicate_turn() -> R
     )?;
     write_arena_role_catalog(&codex_home)?;
 
-    let mut first_process = TestAppServer::new(codex_home.path()).await?;
+    let mut first_process = start_app_server(&codex_home).await?;
     timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
     let provisioned = provision_arena(&mut first_process).await?;
     start_proposal_phase(&mut first_process).await?;
@@ -989,7 +1009,7 @@ async fn arena_completed_turn_ack_survives_sigkill_without_duplicate_turn() -> R
     assert_eq!(killed.signal(), Some(9), "app-server must exit by SIGKILL");
     drop(first_process);
 
-    let mut restarted_process = TestAppServer::new(codex_home.path()).await?;
+    let mut restarted_process = start_app_server(&codex_home).await?;
     timeout(RESPONSE_TIMEOUT, restarted_process.initialize()).await??;
     let restored = read_arena_state(&mut restarted_process).await?;
     let restored_delivery = restored
@@ -1185,6 +1205,22 @@ async fn read_native_turn_ids(server: &mut TestAppServer, thread_id: &str) -> Re
 }
 
 async fn read_native_thread_ids(server: &mut TestAppServer) -> Result<HashSet<String>> {
+    Ok(read_native_threads(server).await?.keys().cloned().collect())
+}
+
+async fn read_native_thread_roles(
+    server: &mut TestAppServer,
+) -> Result<BTreeMap<String, Option<String>>> {
+    Ok(read_native_threads(server)
+        .await?
+        .into_iter()
+        .map(|(id, thread)| (id, thread.agent_role))
+        .collect())
+}
+
+async fn read_native_threads(
+    server: &mut TestAppServer,
+) -> Result<BTreeMap<String, codex_app_server_protocol::Thread>> {
     let list_id = server
         .send_thread_list_request(ThreadListParams {
             cursor: None,
@@ -1198,6 +1234,9 @@ async fn read_native_thread_ids(server: &mut TestAppServer) -> Result<HashSet<St
             use_state_db_only: true,
             search_term: None,
             parent_thread_id: None,
+            ancestor_thread_id: None,
+            project_id: None,
+            section_id: None,
         })
         .await?;
     let list_response: JSONRPCResponse = timeout(
@@ -1208,7 +1247,7 @@ async fn read_native_thread_ids(server: &mut TestAppServer) -> Result<HashSet<St
     Ok(to_response::<ThreadListResponse>(list_response)?
         .data
         .into_iter()
-        .map(|thread| thread.id)
+        .map(|thread| (thread.id.clone(), thread))
         .collect())
 }
 
