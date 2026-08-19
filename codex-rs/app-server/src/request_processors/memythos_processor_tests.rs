@@ -649,6 +649,14 @@ impl PeerParentDeliveryAdapter for FakeLivePeerParentDeliveryAdapter {
             }
         })
     }
+
+    fn reenqueue_native_mailbox_communication<'a>(
+        &'a self,
+        _receiver_thread_id: &'a str,
+        _communication_id: &'a str,
+    ) -> NativeMailboxReenqueueFuture<'a> {
+        Box::pin(async { Ok(false) })
+    }
 }
 
 #[derive(Debug)]
