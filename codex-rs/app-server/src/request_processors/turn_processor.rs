@@ -100,6 +100,7 @@ pub(crate) struct TurnRequestProcessor {
     thread_list_state_permit: Arc<Semaphore>,
     skills_watcher: Arc<SkillsWatcher>,
     turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+    memythos_processor: Arc<std::sync::Mutex<Option<MemythosRequestProcessor>>>,
 }
 
 fn map_additional_context(
@@ -156,6 +157,7 @@ impl TurnRequestProcessor {
         thread_list_state_permit: Arc<Semaphore>,
         skills_watcher: Arc<SkillsWatcher>,
         turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+        memythos_processor: Arc<std::sync::Mutex<Option<MemythosRequestProcessor>>>,
     ) -> Self {
         let agent_runner = AgentRunner::new(Arc::downgrade(&thread_manager));
         Self {
@@ -173,6 +175,7 @@ impl TurnRequestProcessor {
             thread_list_state_permit,
             skills_watcher,
             turn_cost_worker,
+            memythos_processor,
         }
     }
 
@@ -1511,6 +1514,7 @@ impl TurnRequestProcessor {
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
+            memythos_processor: Arc::clone(&self.memythos_processor),
         }
     }
 

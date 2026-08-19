@@ -91,6 +91,10 @@ impl ThreadGoalRequestProcessor {
             let thread_state = thread_state.lock().await;
             thread_state.listener_command_tx()
         };
+        let max_goal_token_budget = match self.thread_manager.get_thread(thread_id).await {
+            Ok(thread) => thread.config().await.max_goal_token_budget,
+            Err(_) => self.config.max_goal_token_budget,
+        };
         let outcome = self
             .goal_service
             .set_thread_goal(
@@ -107,6 +111,7 @@ impl ThreadGoalRequestProcessor {
                         Some(token_budget) => GoalTokenBudgetUpdate::Set(token_budget),
                         None => GoalTokenBudgetUpdate::Keep,
                     },
+                    max_goal_token_budget,
                 },
             )
             .await

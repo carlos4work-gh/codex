@@ -225,6 +225,27 @@ WHERE receiver_thread_id = ? AND communication_id = ?
         row.map(native_mailbox_record_from_row).transpose()
     }
 
+    pub async fn set_native_mailbox_submission_id(
+        &self,
+        receiver_thread_id: &str,
+        communication_id: &str,
+        submission_id: &str,
+        updated_at_ms: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE native_mailbox_communications
+               SET submission_id = ?, updated_at_ms = ?
+               WHERE receiver_thread_id = ? AND communication_id = ?"#,
+        )
+        .bind(submission_id)
+        .bind(updated_at_ms)
+        .bind(receiver_thread_id)
+        .bind(communication_id)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_pending_native_mailbox_communications(
         &self,
         receiver_thread_id: &str,

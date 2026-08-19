@@ -1,5 +1,7 @@
 use crate::CodexAppsToolsCache;
 use crate::agent::AgentControl;
+use crate::agent_communication::AgentCommunicationContext;
+use crate::agent_communication::AgentCommunicationKind;
 use crate::attestation::AttestationProvider;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
@@ -55,6 +57,7 @@ use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionConfiguredEvent;
@@ -68,6 +71,8 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::state_db::StateDbHandle;
 use codex_skills_extension::HostSkillsService;
+use codex_state::NativeMailboxCommunicationRecord;
+use codex_state::NativeMailboxInsertOutcome;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
@@ -85,6 +90,8 @@ use codex_thread_store::UpdateThreadMetadataParams;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use sha2::Digest;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -222,6 +229,7 @@ pub struct ThreadManager {
 
 pub struct StartThreadOptions {
     pub config: Config,
+    pub agent_role: Option<String>,
     pub allow_provider_model_fallback: bool,
     pub initial_history: InitialHistory,
     pub history_mode: Option<ThreadHistoryMode>,
@@ -241,6 +249,7 @@ impl StartThreadOptions {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            agent_role: None,
             allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
             history_mode: None,
@@ -1319,6 +1328,104 @@ impl ThreadManager {
         )
     }
 
+    pub async fn send_inter_agent_communication(
+        &self,
+        sender_thread_id: ThreadId,
+        receiver_thread_id: ThreadId,
+        communication: InterAgentCommunication,
+    ) -> CodexResult<String> {
+        let communication_id = communication
+            .id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let receiver_thread = self.get_thread(receiver_thread_id).await?;
+        let state_db = receiver_thread.state_db();
+        if let Some(state_db) = state_db.as_ref() {
+            let communication_json = serde_json::to_string(&communication).map_err(|error| {
+                CodexErr::Fatal(format!(
+                    "failed to serialize native mailbox message: {error}"
+                ))
+            })?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let record = NativeMailboxCommunicationRecord {
+                receiver_thread_id: receiver_thread_id.to_string(),
+                communication_id: communication_id.clone(),
+                source_call_id: Some(communication_id.clone()),
+                submission_id: None,
+                payload_hash: format!("sha256:{:x}", Sha256::digest(communication_json.as_bytes())),
+                communication_json,
+                status: "pending".to_string(),
+                attempt_count: 0,
+                failure_fingerprint: None,
+                last_progress_ref: None,
+                quarantine_reason: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+            };
+            if state_db
+                .insert_pending_native_mailbox_communication(&record)
+                .await
+                .map_err(|error| {
+                    CodexErr::Fatal(format!("failed to persist native mailbox message: {error}"))
+                })?
+                == NativeMailboxInsertOutcome::Existing
+            {
+                let existing = state_db
+                    .get_native_mailbox_communication(&record.receiver_thread_id, &communication_id)
+                    .await
+                    .map_err(|error| {
+                        CodexErr::Fatal(format!("failed to read native mailbox message: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        CodexErr::Fatal("native mailbox message disappeared".to_string())
+                    })?;
+                return Ok(existing.submission_id.unwrap_or(communication_id));
+            }
+        }
+        let submission_id = self
+            .agent_control()
+            .send_inter_agent_communication(
+                receiver_thread_id,
+                communication,
+                AgentCommunicationContext::new(AgentCommunicationKind::Message, sender_thread_id),
+                None,
+                None,
+            )
+            .await?;
+        if let Some(state_db) = state_db.as_ref() {
+            state_db
+                .set_native_mailbox_submission_id(
+                    &receiver_thread_id.to_string(),
+                    &communication_id,
+                    &submission_id,
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .await
+                .map_err(|error| {
+                    CodexErr::Fatal(format!("failed to bind native mailbox submission: {error}"))
+                })?;
+        }
+        Ok(submission_id)
+    }
+
+    pub async fn reenqueue_inter_agent_communication(
+        &self,
+        sender_thread_id: ThreadId,
+        receiver_thread_id: ThreadId,
+        communication: InterAgentCommunication,
+    ) -> CodexResult<String> {
+        self.agent_control()
+            .send_inter_agent_communication(
+                receiver_thread_id,
+                communication,
+                AgentCommunicationContext::new(AgentCommunicationKind::Message, sender_thread_id),
+                None,
+                None,
+            )
+            .await
+    }
+
     fn agent_control_for_config(&self, config: &Config) -> AgentControl {
         AgentControl::new(
             Arc::downgrade(&self.state),
@@ -1774,6 +1881,7 @@ impl ThreadManagerState {
         } = request;
         let StartThreadOptions {
             config,
+            agent_role,
             allow_provider_model_fallback,
             initial_history,
             history_mode,
@@ -1857,6 +1965,7 @@ impl ThreadManagerState {
         }
         let (session, io) = Box::pin(Session::spawn(SessionSpawnArgs {
             config,
+            agent_role,
             allow_provider_model_fallback,
             user_instructions,
             installation_id: self.installation_id.clone(),

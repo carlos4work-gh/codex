@@ -43,13 +43,13 @@ zstd = { workspace = true }
 anyhow = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }
+schemars = { workspace = true }
 rmcp = { workspace = true, default-features = false, features = [
     "base64",
     "macros",
     "schemars",
     "server",
 ] }
-schemars = { workspace = true }
 similar = { workspace = true }
 tempfile = { workspace = true }
 ts-rs = { workspace = true }

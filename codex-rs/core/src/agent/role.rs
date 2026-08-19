@@ -105,6 +105,14 @@ pub(crate) async fn apply_role_to_config(
         })
 }
 
+/// Applies a v2 role while preserving caller-owned settings not overridden by the role.
+pub async fn apply_role_to_config_for_multi_agent_v2(
+    config: &mut Config,
+    role_name: Option<&str>,
+) -> Result<(), String> {
+    apply_role_to_config(config, role_name).await
+}
+
 async fn apply_role_to_config_inner(
     config: &mut Config,
     role_name: &str,

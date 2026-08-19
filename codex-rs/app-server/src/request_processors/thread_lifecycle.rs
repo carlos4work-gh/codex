@@ -18,6 +18,7 @@ pub(super) struct ListenerTaskContext {
     pub(super) codex_home: PathBuf,
     pub(super) skills_watcher: Arc<SkillsWatcher>,
     pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+    pub(super) memythos_processor: Arc<std::sync::Mutex<Option<MemythosRequestProcessor>>>,
 }
 
 struct UnloadingState {
@@ -276,6 +277,7 @@ pub(super) async fn ensure_listener_task_running(
         fallback_model_provider,
         codex_home,
         turn_cost_worker,
+        memythos_processor,
         ..
     } = listener_task_context;
     let outgoing_for_task = Arc::clone(&outgoing);
@@ -353,6 +355,7 @@ pub(super) async fn ensure_listener_task_running(
                         thread_watch_manager.clone(),
                         thread_list_state_permit.clone(),
                         fallback_model_provider.clone(),
+                        memythos_processor.clone(),
                     )
                     .await;
                     if matches!(event.msg, EventMsg::ShutdownComplete)

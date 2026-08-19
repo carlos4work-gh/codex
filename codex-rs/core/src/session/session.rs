@@ -114,6 +114,8 @@ pub(crate) struct SessionConfiguration {
     pub(super) trusted_guardian_reviewer: bool,
     /// Source of the session (cli, vscode, exec, mcp, ...)
     pub(super) session_source: SessionSource,
+    /// Effective role may belong to a root thread and is therefore independent of session source.
+    pub(super) agent_role: Option<String>,
     /// Persisted thread history contract selected when this thread was created.
     pub(super) history_mode: ThreadHistoryMode,
     /// Immediate history source copied into this thread, when this thread was forked.
@@ -217,7 +219,7 @@ impl SessionConfiguration {
             .map(|config| config.permission_profile.clone())
             .unwrap_or_else(|| self.permission_profile_state.snapshot());
         ThreadConfigSnapshot {
-            agent_role: self.session_source.get_agent_role(),
+            agent_role: self.agent_role.clone(),
             model: self.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
             service_tier: self.service_tier.clone(),
@@ -834,7 +836,7 @@ impl Session {
                             forked_from_id,
                             parent_thread_id,
                             source: session_source,
-                            agent_role: session_configuration.session_source.get_agent_role(),
+                            agent_role: session_configuration.agent_role.clone(),
                             thread_source: session_configuration.thread_source.clone(),
                             originator: session_configuration.originator.clone(),
                             base_instructions: BaseInstructions {
@@ -988,7 +990,7 @@ impl Session {
                 agent_path: trace_agent_path.to_string(),
                 task_name: trace_task_name,
                 nickname: session_configuration.session_source.get_nickname(),
-                agent_role: session_configuration.session_source.get_agent_role(),
+                agent_role: session_configuration.agent_role.clone(),
                 session_source: session_configuration.session_source.clone(),
                 cwd: session_configuration.cwd().to_path_buf(),
                 rollout_path: rollout_path.clone(),
@@ -1452,6 +1454,14 @@ impl Session {
                 fork_persistence,
                 next_internal_sub_id: AtomicU64::new(0),
             });
+            let native_mailbox_recovery_warnings =
+                sess.restore_native_mailbox_communications().await?;
+            for message in native_mailbox_recovery_warnings {
+                post_session_configured_events.push(Event {
+                    id: INITIAL_SUBMIT_ID.to_owned(),
+                    msg: EventMsg::Warning(WarningEvent { message }),
+                });
+            }
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;
                 *guard = Arc::downgrade(&sess);

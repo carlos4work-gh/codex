@@ -391,6 +391,7 @@ pub(crate) enum ForkPersistence {
 
 pub(crate) struct SessionSpawnArgs {
     pub(crate) config: Config,
+    pub(crate) agent_role: Option<String>,
     pub(crate) allow_provider_model_fallback: bool,
     pub(crate) user_instructions: LoadedUserInstructions,
     pub(crate) installation_id: String,
@@ -455,6 +456,7 @@ pub(crate) fn resolve_multi_agent_version(
 }
 
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";
+const NATIVE_MAILBOX_MAX_RECOVERY_ATTEMPTS: i64 = 3;
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
@@ -488,6 +490,7 @@ impl Session {
     async fn spawn_internal(args: SessionSpawnArgs) -> CodexResult<(Arc<Self>, SessionIo)> {
         let SessionSpawnArgs {
             mut config,
+            agent_role,
             allow_provider_model_fallback,
             user_instructions,
             installation_id,
@@ -709,6 +712,9 @@ impl Session {
             app_server_client_name: None,
             app_server_client_version: None,
             trusted_guardian_reviewer,
+            agent_role: agent_role
+                .or_else(|| conversation_history.get_session_agent_role())
+                .or_else(|| session_source.get_agent_role()),
             session_source,
             history_mode,
             forked_from_thread_id,
@@ -3259,6 +3265,7 @@ impl Session {
         turn_context: &TurnContext,
         communication: InterAgentCommunication,
     ) {
+        let communication_id = communication.id.as_ref().map(ToString::to_string);
         let response_item = communication.to_model_input_item();
         let (items, _) = self.prepare_conversation_items_for_history(
             turn_context,
@@ -3274,14 +3281,78 @@ impl Session {
                 turn_context.model_info.truncation_policy.into(),
             );
         }
-        self.persist_rollout_items(&[
-            RolloutItem::InterAgentCommunicationMetadata {
-                trigger_turn: communication.trigger_turn,
-            },
-            RolloutItem::ResponseItem(response_item.into()),
-        ])
-        .await;
+        let rollout_persisted = self
+            .try_persist_rollout_items(&[
+                RolloutItem::InterAgentCommunicationMetadata {
+                    trigger_turn: communication.trigger_turn,
+                },
+                RolloutItem::ResponseItem(response_item.into()),
+            ])
+            .await;
+        if rollout_persisted
+            && let Some(communication_id) = communication_id
+            && let Some(state_db) = self.state_db()
+            && let Err(error) = state_db
+                .mark_native_mailbox_communication_consumed(
+                    &self.thread_id.to_string(),
+                    &communication_id,
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .await
+        {
+            warn!("failed to mark native mailbox message {communication_id} consumed: {error}");
+        }
         self.send_raw_response_items(turn_context, items).await;
+    }
+
+    pub(crate) async fn restore_native_mailbox_communications(&self) -> CodexResult<Vec<String>> {
+        let Some(state_db) = self.state_db() else {
+            return Ok(Vec::new());
+        };
+        let pending = state_db
+            .list_pending_native_mailbox_communications(&self.thread_id.to_string())
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!("failed to restore native mailbox: {error}"))
+            })?;
+        let mut warnings = Vec::new();
+        for record in pending {
+            let recovery = state_db
+                .claim_native_mailbox_communication_for_recovery(
+                    &record.receiver_thread_id,
+                    &record.communication_id,
+                    NATIVE_MAILBOX_MAX_RECOVERY_ATTEMPTS,
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .await
+                .map_err(|error| {
+                    CodexErr::Fatal(format!("failed to claim native mailbox message: {error}"))
+                })?;
+            let record = match recovery {
+                Some(codex_state::NativeMailboxRecoveryOutcome::Claimed(record)) => record,
+                Some(codex_state::NativeMailboxRecoveryOutcome::Quarantined(record)) => {
+                    let warning = format!(
+                        "Native mailbox communication {} was quarantined after {} recovery attempts without durable progress; automatic recovery stopped.",
+                        record.communication_id, record.attempt_count
+                    );
+                    warn!("{warning}");
+                    warnings.push(warning);
+                    continue;
+                }
+                None => continue,
+            };
+            let communication =
+                serde_json::from_str(&record.communication_json).map_err(|error| {
+                    CodexErr::Fatal(format!(
+                        "failed to decode native mailbox message {}: {error}",
+                        record.communication_id
+                    ))
+                })?;
+            self.input_queue
+                .enqueue_mailbox_communication(communication, None, None)
+                .await;
+        }
+        Ok(warnings)
     }
 
     async fn maybe_warn_on_server_model_mismatch(
@@ -3715,11 +3786,17 @@ impl Session {
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
+        self.try_persist_rollout_items(items).await;
+    }
+
+    async fn try_persist_rollout_items(&self, items: &[RolloutItem]) -> bool {
         if let Some(live_thread) = self.live_thread()
             && let Err(e) = live_thread.append_items(items).await
         {
             error!("failed to record rollout items: {e:#}");
+            return false;
         }
+        true
     }
 
     pub(crate) async fn clone_history(&self) -> ContextManager {

@@ -171,12 +171,11 @@ use codex_app_server_protocol::UserInput;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
-use codex_extension_api::ExtensionDataInit;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
-use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_rollout::state_db::StateDbHandle;
@@ -603,8 +602,7 @@ pub(crate) struct NativeArenaCompositionPlanningAdapter {
 const ARENA_COMPOSITION_PLANNER_ROLE: &str = "arena_composition_planner";
 
 fn arena_composition_output_schema() -> Result<serde_json::Value, JSONRPCErrorError> {
-    let mut schema = serde_json::to_value(schemars::schema_for!(MemythosArenaCompositionContract))
-        .map_err(|err| invalid_params(format!("failed to build composition schema: {err}")))?;
+    let mut schema = protocol_definition_output_schema("MemythosArenaCompositionContract")?;
     normalize_arena_composition_output_schema(&mut schema);
     close_json_schema_objects(&mut schema);
     validate_responses_output_schema(&schema)?;
@@ -612,11 +610,77 @@ fn arena_composition_output_schema() -> Result<serde_json::Value, JSONRPCErrorEr
 }
 
 fn arena_resume_output_schema() -> Result<serde_json::Value, JSONRPCErrorError> {
-    let mut schema = serde_json::to_value(schemars::schema_for!(MemythosArenaResumeAssessment))
-        .map_err(|err| invalid_params(format!("failed to build resume schema: {err}")))?;
+    let mut schema = protocol_definition_output_schema("MemythosArenaResumeAssessment")?;
     close_json_schema_objects(&mut schema);
     validate_responses_output_schema(&schema)?;
     Ok(schema)
+}
+
+fn protocol_definition_output_schema(
+    definition_name: &str,
+) -> Result<serde_json::Value, JSONRPCErrorError> {
+    let bundle: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../app-server-protocol/schema/json/ClientRequest.json"
+    )))
+    .map_err(|err| invalid_params(format!("failed to load protocol schema bundle: {err}")))?;
+    let definitions = bundle
+        .get("definitions")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| invalid_params("protocol schema bundle has no definitions"))?;
+    let mut schema = definitions
+        .get(definition_name)
+        .cloned()
+        .ok_or_else(|| invalid_params(format!("protocol schema has no {definition_name}")))?;
+    let mut pending = Vec::new();
+    collect_protocol_definition_refs(&schema, &mut pending);
+    let mut reachable = serde_json::Map::new();
+    while let Some(name) = pending.pop() {
+        if reachable.contains_key(&name) {
+            continue;
+        }
+        let definition = definitions
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| invalid_params(format!("protocol schema has no {name}")))?;
+        collect_protocol_definition_refs(&definition, &mut pending);
+        reachable.insert(name, definition);
+    }
+    schema
+        .as_object_mut()
+        .ok_or_else(|| {
+            invalid_params(format!(
+                "protocol definition {definition_name} is not an object"
+            ))
+        })?
+        .insert(
+            "definitions".to_string(),
+            serde_json::Value::Object(reachable),
+        );
+    Ok(schema)
+}
+
+fn collect_protocol_definition_refs(value: &serde_json::Value, refs: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(name) = object
+                .get("$ref")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.strip_prefix("#/definitions/"))
+            {
+                refs.push(name.to_string());
+            }
+            for value in object.values() {
+                collect_protocol_definition_refs(value, refs);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_protocol_definition_refs(value, refs);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn native_judge_verdict_output_schema(
@@ -1106,13 +1170,6 @@ impl NativeArenaCompositionPlanningAdapter {
         planner_thread_id: &str,
         planner_turn_id: &str,
     ) -> Result<Option<codex_app_server_protocol::Turn>, JSONRPCErrorError> {
-        if let Some(turn) = self
-            .thread_processor
-            .terminal_turn_snapshot(planner_thread_id, planner_turn_id)
-            .await?
-        {
-            return Ok(Some(turn));
-        }
         let response = self
             .thread_processor
             .thread_turns_list(ThreadTurnsListParams {
@@ -1189,15 +1246,7 @@ impl NativeArenaCompositionPlanningAdapter {
                 invalid_params(format!("arena request cwd must be absolute: {err}"))
             })?;
         }
-        let environments = self
-            .thread_manager
-            .default_environment_selections(&config.cwd);
-        let planner = self
-            .thread_manager
-            .start_thread_with_options(StartThreadOptions {
-                config,
-                agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
-                root_developer_instructions: Some(
+        config.developer_instructions = Some(
                     concat!(
                         "You are the native Memythos material-novelty assessor. Decide whether a closed arena decision must be resumed. ",
                         "Material novelty requires new reality evidence, a new human or upstream definition, a contradiction with the current decision, ",
@@ -1217,25 +1266,30 @@ impl NativeArenaCompositionPlanningAdapter {
                         "OpenImplementationScope contains downstream questions that may be resolved without reopening either business decisions or the whole settlement."
                     )
                     .to_string(),
-                ),
-                initial_history: InitialHistory::New,
-                session_source: None,
-                thread_source: None,
-                dynamic_tools: Vec::new(),
-                metrics_service_name: Some("memythos_arena_novelty_assessor".to_string()),
-                multi_agent_mode: None,
-                parent_trace: None,
-                environments,
-                thread_extension_init: ExtensionDataInit::default(),
-                supports_openai_form_elicitation: false,
-            })
+        );
+        codex_core::apply_role_to_config_for_multi_agent_v2(
+            &mut config,
+            Some(ARENA_COMPOSITION_PLANNER_ROLE),
+        )
+        .await
+        .map_err(invalid_params)?;
+        let environments = self
+            .thread_manager
+            .default_environment_selections(&config.cwd, &config.workspace_roots);
+        let mut start_options = StartThreadOptions::new(config);
+        start_options.dynamic_tools = Vec::new();
+        start_options.metrics_service_name = Some("memythos_arena_novelty_assessor".to_string());
+        start_options.environments = Some(environments);
+        let planner = self
+            .thread_manager
+            .start_thread(start_options)
             .await
             .map_err(|err| {
                 invalid_params(format!("failed to start native novelty assessor: {err}"))
             })?;
         self.thread_processor
-            .attach_thread_listener(planner.thread_id, connection_id)
-            .await?;
+            .try_attach_thread_listener(planner.thread_id, vec![connection_id])
+            .await;
         let planner_thread_id = planner.thread_id.to_string();
         let context = serde_json::to_string_pretty(&serde_json::json!({
             "request": self.planner_context(params, Some(previous)),
@@ -1288,7 +1342,6 @@ impl NativeArenaCompositionPlanningAdapter {
                 },
                 Some("memythos".to_string()),
                 None,
-                false,
             )
             .await?;
         let Some(ClientResponsePayload::TurnStart(turn)) = turn else {
@@ -1382,34 +1435,35 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     invalid_params(format!("arena request cwd must be absolute: {err}"))
                 })?;
             }
-            let environments = self
-                .thread_manager
-                .default_environment_selections(&config.cwd);
-            let planner = self
-                .thread_manager
-                .start_thread_with_options(StartThreadOptions {
-                    config,
-                    agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
-                    root_developer_instructions: Some(
+            config.developer_instructions = Some(
                         "You are the native Memythos arena composition planner. Select parent roles and distinct stances exclusively from the supplied native role catalog. Do not solve the business case. Express domain-specific perspectives through stance and roleObjective; generic native roles are intentionally reusable across domains. For every proposal-bearing bettor, make roleObjective a case-specific differential mandate that states the question this perspective protects, evidence it must seek, risk no other selected perspective represents equally, authority it does not possess, and conditions under which it must yield or request rollup. Do not encode a fixed business-role catalog. Set unresolvedRoleGap to null whenever the catalog can express the required capability through a generic role and stance, and use a non-null gap only when the catalog structurally lacks a necessary coordination or decision capability. If you select competitive_debate, betting_round, or ranked_selection, method integrity requires at least two proposal-bearing bettors with materially different stances plus one room_concierge and one judge. The Room Concierge owns technical coordination, checkpoints, dependencies, exception routing, and communication; it is not a proposer or business authority. coordinatorParticipantId must be null for an ordinary arena. Select an additional coordinator/process steward only for an explicit regulatory, method-conflict, or exceptional-governance requirement and explain that exception in rationale. Native method authorities such as coordinate, delegate, and judge are granted internally by the selected arena method; they do not require matching business authority from availableAuthority. When availableAuthority includes delegate and the arena may promote an approved contract downstream after the judge verdict, assign delegate to the room_concierge; downstream promotion is native arena lifecycle work, not a missing proposal-bearing business role. Proposal-bearing authority must remain inside availableAuthority. Optimize team size only after preserving this invariant. Propose an effort intent and select a native reasoningEffort for every participant. The active arena parent toolset requires reasoningEffort low, medium, high, or xhigh; none and minimal are invalid for this runtime. Within that compatible range, choose effort proportionate to uncertainty and decision impact; routine room coordination and concise phase responses normally need less effort than final judgment of material uncertainty. tokenBudget is a cumulative hard limit over the complete parent objective, including every arena phase and all input/output tokens. Produce a costEnvelope before runtime. Use mode open and null budgets when costContext has neither an explicit numeric cap nor accepted comparable evidence. Use calibrated only from cited accepted comparable evidence, and explicit_cap only from costContext.explicitTokenCap. For calibrated or explicit_cap, assign every participant a positive tokenBudget, make their sum equal totalTokenBudget, and separately report the concierge coordination budget and all other substantive budgets. Funding must preserve the selected method, completion criteria, cross-read, objections, bets, and judge. If the available explicit cap cannot fund method integrity, do not pretend it can: select change_method with an honest compatible method or request_expansion while preserving the competitive composition. A qualitative request for efficiency, a small team, brevity, speed, or lower cost is not an explicit numeric hard limit. Never invent a numeric cap from qualitative cost language. The exhaustion policy is an agentic plan consumed through OOTB goals: exhaustion means wrap-up/replan, justified expansion, or explicit method change, never blind kill. Return only the requested structured contract."
                             .to_string(),
-                    ),
-                    initial_history: InitialHistory::New,
-                    session_source: None,
-                    thread_source: None,
+            );
+            codex_core::apply_role_to_config_for_multi_agent_v2(
+                &mut config,
+                Some(ARENA_COMPOSITION_PLANNER_ROLE),
+            )
+            .await
+            .map_err(invalid_params)?;
+            let environments = self
+                .thread_manager
+                .default_environment_selections(&config.cwd, &config.workspace_roots);
+            let planner = self
+                .thread_manager
+                .start_thread(StartThreadOptions {
+                    agent_role: Some(ARENA_COMPOSITION_PLANNER_ROLE.to_string()),
                     dynamic_tools: Vec::new(),
                     metrics_service_name: Some("memythos_arena_composition_planner".to_string()),
-                    multi_agent_mode: None,
-                    parent_trace: None,
-                    environments,
-                    thread_extension_init: ExtensionDataInit::default(),
-                    supports_openai_form_elicitation: false,
+                    environments: Some(environments),
+                    ..StartThreadOptions::new(config)
                 })
                 .await
-                .map_err(|err| invalid_params(format!("failed to start native arena planner: {err}")))?;
+                .map_err(|err| {
+                    invalid_params(format!("failed to start native arena planner: {err}"))
+                })?;
             self.thread_processor
-                .attach_thread_listener(planner.thread_id, connection_id)
-                .await?;
+                .try_attach_thread_listener(planner.thread_id, vec![connection_id])
+                .await;
             let planner_thread_id = planner.thread_id.to_string();
             let request_id = ConnectionRequestId {
                 connection_id,
@@ -1450,7 +1504,6 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                     },
                     Some("memythos".to_string()),
                     None,
-                    false,
                 )
                 .await?;
             let Some(ClientResponsePayload::TurnStart(turn)) = turn else {
@@ -1547,7 +1600,6 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
                                     },
                                     Some("memythos".to_string()),
                                     None,
-                                    false,
                                 )
                                 .await?;
                             let Some(ClientResponsePayload::TurnStart(repair)) = repair else {
@@ -1685,25 +1737,24 @@ impl ArenaParentProvisioningAdapter for NativeArenaParentProvisioningAdapter {
                 }
                 let root_developer_instructions =
                     native_arena_parent_developer_instructions(params, participant);
+                config.developer_instructions = Some(root_developer_instructions);
+                codex_core::apply_role_to_config_for_multi_agent_v2(
+                    &mut config,
+                    Some(&participant.agent_role),
+                )
+                .await
+                .map_err(invalid_params)?;
                 let environments = self
                     .thread_manager
-                    .default_environment_selections(&config.cwd);
+                    .default_environment_selections(&config.cwd, &config.workspace_roots);
                 let new_thread = self
                     .thread_manager
-                    .start_thread_with_options(StartThreadOptions {
-                        config,
+                    .start_thread(StartThreadOptions {
                         agent_role: Some(participant.agent_role.clone()),
-                        root_developer_instructions: Some(root_developer_instructions),
-                        initial_history: InitialHistory::New,
-                        session_source: None,
-                        thread_source: None,
                         dynamic_tools: with_memythos_room_tools(None),
                         metrics_service_name: Some("memythos_arena_parent".to_string()),
-                        multi_agent_mode: None,
-                        parent_trace: None,
-                        environments,
-                        thread_extension_init: ExtensionDataInit::default(),
-                        supports_openai_form_elicitation: false,
+                        environments: Some(environments),
+                        ..StartThreadOptions::new(config)
                     })
                     .await
                     .map_err(|err| {
@@ -1718,18 +1769,9 @@ impl ArenaParentProvisioningAdapter for NativeArenaParentProvisioningAdapter {
             let parsed_thread_id = ThreadId::from_string(&thread_id).map_err(|_| {
                 invalid_params(format!("invalid provisioned thread id: {thread_id}"))
             })?;
-            if let Err(error) = self
-                .thread_processor
-                .attach_thread_listener(parsed_thread_id, connection_id)
-                .await
-            {
-                if newly_created
-                    && let Ok(thread) = self.thread_manager.get_thread(parsed_thread_id).await
-                {
-                    let _ = thread.submit(Op::Shutdown).await;
-                }
-                return Err(error);
-            }
+            self.thread_processor
+                .try_attach_thread_listener(parsed_thread_id, vec![connection_id])
+                .await;
 
             let goal = self
                 .thread_goal_processor
@@ -2148,7 +2190,9 @@ impl ParentConfigurationAdapter for ThreadManagerParentConfigurationAdapter {
                 agent_role: snapshot.agent_role,
                 proposal_bearing,
                 personality: snapshot.personality.map(|value| value.to_string()),
-                multi_agent_mode: snapshot.multi_agent_mode.map(|value| value.to_string()),
+                multi_agent_mode: Some(
+                    format!("{:?}", thread.multi_agent_version()).to_lowercase(),
+                ),
                 parent_thread_id: snapshot.parent_thread_id.map(|value| value.to_string()),
                 collaboration_mode: format!("{:?}", snapshot.collaboration_mode.mode)
                     .to_lowercase(),
@@ -2411,16 +2455,19 @@ impl PeerParentDeliveryAdapter for RecordOnlyPeerParentDeliveryAdapter {
 pub(crate) struct NativeMailboxPeerParentDeliveryAdapter {
     turn_processor: TurnRequestProcessor,
     thread_manager: Arc<ThreadManager>,
+    state_db: Option<StateDbHandle>,
 }
 
 impl NativeMailboxPeerParentDeliveryAdapter {
     pub(crate) fn new(
         turn_processor: TurnRequestProcessor,
         thread_manager: Arc<ThreadManager>,
+        state_db: Option<StateDbHandle>,
     ) -> Self {
         Self {
             turn_processor,
             thread_manager,
+            state_db,
         }
     }
 }
@@ -2500,13 +2547,7 @@ impl PeerParentDeliveryAdapter for NativeMailboxPeerParentDeliveryAdapter {
 
             match self
                 .turn_processor
-                .turn_start(
-                    request_id,
-                    params,
-                    Some("memythos".to_string()),
-                    None,
-                    false,
-                )
+                .turn_start(request_id, params, Some("memythos".to_string()), None)
                 .await
             {
                 Ok(Some(ClientResponsePayload::TurnStart(response))) => {
@@ -2559,15 +2600,22 @@ impl PeerParentDeliveryAdapter for NativeMailboxPeerParentDeliveryAdapter {
         Box::pin(async move {
             let thread_id = ThreadId::from_string(receiver_thread_id)
                 .map_err(|error| format!("invalid receiver thread id: {error}"))?;
-            self.thread_manager
-                .reenqueue_native_mailbox_communication(thread_id, communication_id)
+            let state_db = self
+                .state_db
+                .as_ref()
+                .ok_or_else(|| "native mailbox recovery requires sqlite state".to_string())?;
+            let record = state_db
+                .get_native_mailbox_communication(receiver_thread_id, communication_id)
                 .await
-                .map(|outcome| {
-                    matches!(
-                        outcome,
-                        codex_core::NativeMailboxLiveReenqueueOutcome::Enqueued { .. }
-                    )
-                })
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "native mailbox communication not found".to_string())?;
+            let communication =
+                serde_json::from_str::<InterAgentCommunication>(&record.communication_json)
+                    .map_err(|error| format!("invalid durable mailbox payload: {error}"))?;
+            self.thread_manager
+                .reenqueue_inter_agent_communication(thread_id, thread_id, communication)
+                .await
+                .map(|_| true)
                 .map_err(|error| error.to_string())
         })
     }
@@ -2601,21 +2649,25 @@ async fn deliver_native_parent_mailbox_message(
         Ok(trigger_turn) => trigger_turn,
         Err(reason) => return failed_native_mailbox_delivery_attempt(message, &reason),
     };
-    let communication = InterAgentCommunication::new(
+    let mut communication = InterAgentCommunication::new(
         AgentPath::root(),
         AgentPath::root(),
         Vec::new(),
         build_peer_parent_envelope(message),
         trigger_turn,
-    )
-    .with_final_output_json_schema(message.output_schema.clone());
-    let mut communication = communication;
-    communication
-        .metadata
-        .get_or_insert_default()
-        .source_call_id = Some(message.message_id.clone());
+    );
+    communication.id = Some(ResponseItemId::from_server(message.message_id.clone()));
+    let sender_thread_id = match ThreadId::from_string(&message.from_parent_thread_id) {
+        Ok(thread_id) => thread_id,
+        Err(error) => {
+            return failed_native_mailbox_delivery_attempt(
+                message,
+                &format!("invalid source parent thread id: {error}"),
+            );
+        }
+    };
     match thread_manager
-        .send_inter_agent_communication(target_thread_id, communication)
+        .send_inter_agent_communication(sender_thread_id, target_thread_id, communication)
         .await
     {
         Ok(submission_id) => {
@@ -3978,13 +4030,7 @@ impl ThreadConsolidationAdapter for TurnStartThreadConsolidationAdapter {
 
             let (consolidation_turn_id, agent_message_ref, structured_output_ref) = match self
                 .turn_processor
-                .turn_start(
-                    request_id,
-                    turn_params,
-                    Some("memythos".to_string()),
-                    None,
-                    false,
-                )
+                .turn_start(request_id, turn_params, Some("memythos".to_string()), None)
                 .await
             {
                 Ok(Some(ClientResponsePayload::TurnStart(response))) => {
@@ -5990,12 +6036,8 @@ impl MemythosRequestProcessor {
                     Vec::new(),
                     build_peer_parent_envelope(&message),
                     message.requires_response,
-                )
-                .with_final_output_json_schema(message.output_schema.clone());
-                communication
-                    .metadata
-                    .get_or_insert_default()
-                    .source_call_id = Some(message.message_id.clone());
+                );
+                communication.id = Some(ResponseItemId::from_server(message.message_id.clone()));
                 let communication_json =
                     serde_json::to_string(&communication).map_err(|error| {
                         internal_error(format!("failed to serialize replacement message: {error}"))

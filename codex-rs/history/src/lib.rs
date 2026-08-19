@@ -355,6 +355,11 @@ impl InitialHistory {
             .filter(|originator| !originator.is_empty())
     }
 
+    pub fn get_session_agent_role(&self) -> Option<String> {
+        self.get_session_meta()
+            .and_then(|meta| meta.agent_role.clone())
+    }
+
     pub fn get_resumed_parent_thread_id(&self) -> Option<ThreadId> {
         self.get_resumed_session_meta()
             .and_then(|meta| meta.parent_thread_id)
