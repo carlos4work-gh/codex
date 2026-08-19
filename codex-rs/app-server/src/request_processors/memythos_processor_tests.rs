@@ -353,6 +353,7 @@ fn native_usage(
         total_tokens,
         input_tokens,
         cached_input_tokens,
+        cache_write_input_tokens: 0,
         output_tokens: total_tokens - input_tokens,
         reasoning_output_tokens: 0,
     };
@@ -648,6 +649,14 @@ impl PeerParentDeliveryAdapter for FakeLivePeerParentDeliveryAdapter {
                 ),
             }
         })
+    }
+
+    fn reenqueue_native_mailbox_communication<'a>(
+        &'a self,
+        _receiver_thread_id: &'a str,
+        _communication_id: &'a str,
+    ) -> NativeMailboxReenqueueFuture<'a> {
+        Box::pin(async { Ok(false) })
     }
 }
 
@@ -2703,7 +2712,10 @@ async fn arena_request_state_survives_the_request_connection_boundary() {
 async fn canonical_arena_restores_from_ootb_state_without_replanning() {
     let codex_home = tempfile::tempdir().expect("temporary Codex home");
     let state_db = codex_state::StateRuntime::init(
-        codex_home.path().to_path_buf(),
+        codex_state::SqliteConfig::new_for_testing(
+            AbsolutePathBuf::try_from(codex_home.path().to_path_buf())
+                .expect("absolute temporary Codex home"),
+        ),
         "test-provider".to_string(),
     )
     .await

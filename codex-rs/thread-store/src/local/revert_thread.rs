@@ -149,6 +149,7 @@ async fn create_replacement_recorder(
         source_meta.dynamic_tools.unwrap_or_default(),
     )
     .with_session_id(source_meta.session_id)
+    .with_agent_role(source_meta.agent_role)
     .with_rollout_id(rollout_id)
     .with_selected_capability_roots(source_meta.selected_capability_roots)
     .with_multi_agent_version(source_meta.multi_agent_version)

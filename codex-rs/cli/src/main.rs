@@ -53,6 +53,7 @@ mod doctor;
 mod exec_server_telemetry;
 mod marketplace_cmd;
 mod mcp_cmd;
+mod memythos_sniff;
 mod migrate_rollouts;
 mod plugin_cmd;
 mod queue_cmd;
@@ -64,6 +65,7 @@ mod state_db_recovery;
 mod wsl_paths;
 
 use crate::mcp_cmd::McpCli;
+use crate::memythos_sniff::MemythosSniffCommand;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
 use crate::queue_cmd::QueueCommand;
@@ -137,6 +139,10 @@ enum Subcommand {
     /// Run Codex non-interactively.
     #[clap(visible_alias = "e")]
     Exec(ExecCli),
+
+    /// [EXPERIMENTAL] Run Codex exec with Memythos event sniffing artifacts.
+    #[clap(name = "memythos-sniff")]
+    MemythosSniff(MemythosSniffCommand),
 
     /// Run a code review non-interactively.
     Review(ReviewCommand),
@@ -1157,6 +1163,14 @@ async fn cli_main(
             );
             codex_exec::run_main(exec_cli, arg0_paths.clone()).await?;
         }
+        Some(Subcommand::MemythosSniff(cmd)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "memythos-sniff",
+            )?;
+            memythos_sniff::run_memythos_sniff(cmd).await?;
+        }
         Some(Subcommand::Review(ReviewCommand {
             strict_config,
             args: review_args,
@@ -1829,6 +1843,7 @@ fn profile_v2_for_subcommand<'a>(
     match subcommand {
         Subcommand::Agents(_)
         | Subcommand::Exec(_)
+        | Subcommand::MemythosSniff(_)
         | Subcommand::Review(_)
         | Subcommand::Resume(_)
         | Subcommand::Queue(_)
@@ -2410,6 +2425,7 @@ fn unsupported_subcommand_name_for_strict_config(
         None
         | Some(Subcommand::Agents(_))
         | Some(Subcommand::Exec(_))
+        | Some(Subcommand::MemythosSniff(_))
         | Some(Subcommand::Review(_))
         | Some(Subcommand::McpServer(_))
         | Some(Subcommand::ExecServer(_))

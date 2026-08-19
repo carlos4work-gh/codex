@@ -91,7 +91,7 @@ pub(crate) async fn apply_role_to_config(
 ///
 /// A role's own top-level developer instructions still take precedence. When its role file omits
 /// that setting, rebuilding the config must not restore inherited instructions from older layers.
-pub(crate) async fn apply_role_to_config_for_multi_agent_v2(
+pub async fn apply_role_to_config_for_multi_agent_v2(
     config: &mut Config,
     role_name: Option<&str>,
 ) -> Result<(), String> {

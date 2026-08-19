@@ -105,6 +105,7 @@ pub enum RolloutRecorderParams {
         forked_from_id: Option<ThreadId>,
         parent_thread_id: Option<ThreadId>,
         source: Box<SessionSource>,
+        agent_role: Option<String>,
         thread_source: Option<ThreadSource>,
         originator: String,
         base_instructions: BaseInstructions,
@@ -200,6 +201,7 @@ impl RolloutRecorderParams {
             rollout_id_override: None,
             forked_from_id,
             parent_thread_id,
+            agent_role: source.get_agent_role(),
             source: Box::new(source),
             thread_source,
             originator,
@@ -217,6 +219,16 @@ impl RolloutRecorderParams {
     pub fn with_session_id(mut self, session_id: SessionId) -> Self {
         if let Self::Create { session_id: id, .. } = &mut self {
             *id = session_id;
+        }
+        self
+    }
+
+    pub fn with_agent_role(mut self, agent_role: Option<String>) -> Self {
+        if let Self::Create {
+            agent_role: role, ..
+        } = &mut self
+        {
+            *role = agent_role;
         }
         self
     }
@@ -832,6 +844,7 @@ impl RolloutRecorder {
                 forked_from_id,
                 parent_thread_id,
                 source,
+                agent_role,
                 thread_source,
                 originator,
                 base_instructions,
@@ -866,7 +879,7 @@ impl RolloutRecorder {
                     originator,
                     cli_version: env!("CARGO_PKG_VERSION").to_string(),
                     agent_nickname: source.get_nickname(),
-                    agent_role: source.get_agent_role(),
+                    agent_role,
                     agent_path: source.get_agent_path().map(Into::into),
                     source: *source,
                     thread_source,

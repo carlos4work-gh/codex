@@ -94,6 +94,32 @@ impl GoalService {
         Self::default()
     }
 
+    pub async fn arm_current_goal_completion_after_next_turn(
+        &self,
+        state_db: &codex_state::StateRuntime,
+        thread_id: ThreadId,
+    ) -> Result<(), GoalServiceError> {
+        let goal = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await
+            .map_err(|err| {
+                GoalServiceError::Internal(format!("failed to read thread goal: {err}"))
+            })?
+            .ok_or_else(|| {
+                GoalServiceError::Internal(format!(
+                    "cannot arm one-shot completion without a persisted goal for {thread_id}"
+                ))
+            })?;
+        let runtime = self.runtime_for_thread(thread_id).ok_or_else(|| {
+            GoalServiceError::Internal(format!(
+                "goal runtime is unavailable for thread {thread_id}"
+            ))
+        })?;
+        runtime.arm_completion_after_next_turn(goal.goal_id);
+        Ok(())
+    }
+
     /// Restores persisted goal state into the registered runtime for `thread_id`.
     pub async fn restore_thread_runtime_after_resume(
         &self,

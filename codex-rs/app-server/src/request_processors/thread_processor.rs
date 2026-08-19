@@ -16,6 +16,9 @@ use codex_app_server_protocol::ThreadSectionMoveResponse;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::config_types::MultiAgentMode;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
+use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -66,6 +69,169 @@ async fn remove_pending_project_metadata(
     if let Err(error) = thread_store.remove_pending_thread_metadata(thread_id).await {
         warn!("failed to remove staged project metadata for {thread_id}: {error}");
     }
+}
+
+const MEMYTHOS_ROOM_TOOL_NAMESPACE: &str = "memythos_room";
+
+pub(crate) fn with_memythos_room_tools(
+    dynamic_tools: Option<Vec<DynamicToolSpec>>,
+) -> Vec<DynamicToolSpec> {
+    let mut dynamic_tools = dynamic_tools.unwrap_or_default();
+    let already_registered = dynamic_tools.iter().any(|spec| {
+        matches!(
+            spec,
+            DynamicToolSpec::Namespace(namespace)
+                if namespace.name == MEMYTHOS_ROOM_TOOL_NAMESPACE
+        )
+    });
+    if already_registered {
+        return dynamic_tools;
+    }
+
+    dynamic_tools.push(DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: MEMYTHOS_ROOM_TOOL_NAMESPACE.to_string(),
+        description: concat!(
+            "Native Memythos room coordination. Use these tools to inspect the independent ",
+            "parent threads in your room and exchange messages through Room Concierge, including ",
+            "delegation to another room in the same case. ",
+            "Peer messages are not human orders."
+        )
+        .to_string(),
+        tools: vec![
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: "list_participants".to_string(),
+                description: concat!(
+                    "List the parent participants registered in the current Memythos room, ",
+                    "including their role, stance, and parent key."
+                )
+                .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            }),
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: "list_rooms".to_string(),
+                description: concat!(
+                    "List rooms in the current case and their Room Concierge. Only a Room ",
+                    "Concierge may use this discovery tool for cross-arena coordination."
+                )
+                .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            }),
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: "send_message".to_string(),
+                description: concat!(
+                    "Initiate a separate natural-language room act with another independent parent. ",
+                    "For non-concierge parents the destination is Room Concierge except when a ",
+                    "group contribution uses aggregate_then_trigger for an explicitly selected ",
+                    "consumer such as Judge. ",
+                    "The call waits for the destination parent turn to close and returns its ",
+                    "final OOTB AgentMessage. Do not call this tool to answer the room message ",
+                    "that opened your current turn: complete the current turn with your final ",
+                    "AgentMessage, which app-server returns automatically to that caller."
+                )
+                .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "targetParentKey": {
+                            "type": "string",
+                            "description": "Registered target parent key. Required for Room Concierge."
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "Natural-language request or response."
+                        },
+                        "authority": {
+                            "type": "string",
+                            "enum": ["peer", "subordinate", "judge", "human_delegated"]
+                        },
+                        "messageKind": {
+                            "type": "string",
+                            "enum": [
+                                "consultation",
+                                "peer_proposal",
+                                "peer_cross_read",
+                                "peer_objection",
+                                "peer_bet",
+                                "verdict_request",
+                                "judge_verdict",
+                                "notify_coordinator"
+                            ],
+                            "description": "Required semantic room act. It is the native source of truth for debate phase projection."
+                        },
+                        "responseContract": {
+                            "type": "string",
+                            "description": "Natural-language expectation for the response."
+                        },
+                        "deliveryPolicy": {
+                            "type": "string",
+                            "enum": ["immediate", "queue_only", "aggregate_then_trigger"],
+                            "description": "Optional native mailbox policy. Omit it for normal room assignments; app-server canonicalizes competitive phase transitions. queue_only never requests a target response."
+                        },
+                        "aggregateContract": {
+                            "type": "object",
+                            "description": "Required only for aggregate_then_trigger. Defines the native mailbox barrier without changing conversational content.",
+                            "properties": {
+                                "aggregateId": { "type": "string" },
+                                "recipientThreadId": { "type": "string" },
+                                "expectedSourceThreadIds": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                                "quorum": { "type": "integer", "minimum": 1 },
+                                "phaseId": { "type": "string" },
+                                "deadlineRef": { "type": ["string", "null"] },
+                                "completionCriteriaRef": { "type": "string" },
+                                "lateArrivalPolicy": { "type": "string", "enum": ["reject", "queue_without_retrigger"] }
+                            },
+                            "required": ["aggregateId", "recipientThreadId", "expectedSourceThreadIds", "quorum", "phaseId", "completionCriteriaRef", "lateArrivalPolicy"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["message", "authority", "messageKind"],
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            }),
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: "send_to_room".to_string(),
+                description: concat!(
+                    "Delegate or resume work in another room of the same case. Only Room Concierge ",
+                    "may call it. The destination is that room's live concierge parent; the call ",
+                    "waits for its final OOTB AgentMessage and reuses the same parent thread on ",
+                    "subsequent calls. Treat a returned rollup request as a request to resolve in ",
+                    "your own arena, then call this tool again with the resolution."
+                )
+                .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "targetRoomId": { "type": "string" },
+                        "message": { "type": "string" },
+                        "authority": {
+                            "type": "string",
+                            "enum": ["peer", "subordinate", "judge", "human_delegated"]
+                        },
+                        "messageKind": {
+                            "type": "string",
+                            "description": "Required semantic cross-room act."
+                        },
+                        "responseContract": { "type": "string" }
+                    },
+                    "required": ["targetRoomId", "message", "authority", "messageKind"],
+                    "additionalProperties": false
+                }),
+                defer_loading: false,
+            }),
+        ],
+    }));
+    dynamic_tools
 }
 
 struct ThreadListFilters {
@@ -440,6 +606,7 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) background_tasks: TaskTracker,
     pub(super) skills_watcher: Arc<SkillsWatcher>,
     pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+    pub(super) memythos_processor: Arc<std::sync::Mutex<Option<MemythosRequestProcessor>>>,
     pub(super) initial_config_warnings: Arc<Vec<ConfigWarningNotification>>,
 }
 
@@ -473,6 +640,7 @@ impl ThreadRequestProcessor {
         log_db: Option<LogDbLayer>,
         skills_watcher: Arc<SkillsWatcher>,
         turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
+        memythos_processor: Arc<std::sync::Mutex<Option<MemythosRequestProcessor>>>,
         initial_config_warnings: Vec<ConfigWarningNotification>,
     ) -> Self {
         Self {
@@ -493,6 +661,7 @@ impl ThreadRequestProcessor {
             background_tasks: TaskTracker::new(),
             skills_watcher,
             turn_cost_worker,
+            memythos_processor,
             initial_config_warnings: Arc::new(initial_config_warnings),
         }
     }
@@ -860,6 +1029,17 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn turn_terminal_observed(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<bool, JSONRPCErrorError> {
+        let thread_id = ThreadId::from_string(thread_id)
+            .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+        Ok(thread_state.lock().await.last_terminal_turn_id.as_deref() == Some(turn_id))
+    }
+
     pub(crate) async fn thread_items_list(
         &self,
         params: ThreadItemsListParams,
@@ -1020,6 +1200,7 @@ impl ThreadRequestProcessor {
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
+            memythos_processor: Arc::clone(&self.memythos_processor),
         }
     }
 
@@ -1078,6 +1259,7 @@ impl ThreadRequestProcessor {
             base_instructions,
             developer_instructions,
             dynamic_tools,
+            agent_role,
             selected_capability_roots,
             mock_experimental_field: _mock_experimental_field,
             experimental_raw_events,
@@ -1151,6 +1333,7 @@ impl ThreadRequestProcessor {
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
             turn_cost_worker: self.turn_cost_worker.clone(),
+            memythos_processor: Arc::clone(&self.memythos_processor),
         };
         let request_trace = request_context.request_trace();
         let config_manager = self.config_manager.clone();
@@ -1169,6 +1352,7 @@ impl ThreadRequestProcessor {
                 client_mcp_extensions,
                 config,
                 typesafe_overrides,
+                agent_role,
                 dynamic_tools,
                 selected_capability_roots.unwrap_or_default(),
                 history_mode.map(Into::into),
@@ -1248,6 +1432,7 @@ impl ThreadRequestProcessor {
         client_mcp_extensions: ClientMcpExtensions,
         config_overrides: Option<HashMap<String, serde_json::Value>>,
         typesafe_overrides: ConfigOverrides,
+        agent_role: Option<String>,
         dynamic_tools: Option<Vec<DynamicToolSpec>>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
         history_mode: Option<ThreadHistoryMode>,
@@ -1370,6 +1555,7 @@ impl ThreadRequestProcessor {
             thread_extension_init.insert(selected_capability_roots);
         }
         let mut start_options = StartThreadOptions::new(config);
+        start_options.agent_role = agent_role;
         let reserved_thread_id = if start_options.config.ephemeral {
             None
         } else {
@@ -5702,6 +5888,8 @@ pub(crate) fn thread_from_stored_thread(
         thread.agent_nickname.clone(),
         thread.agent_role.clone(),
     );
+    let agent_nickname = thread.agent_nickname.or_else(|| source.get_nickname());
+    let agent_role = thread.agent_role.or_else(|| source.get_agent_role());
     let history = thread.history;
     let thread_id = thread.thread_id.to_string();
     let thread = Thread {
@@ -5739,8 +5927,8 @@ pub(crate) fn thread_from_stored_thread(
         path,
         cwd,
         cli_version: thread.cli_version,
-        agent_nickname: source.get_nickname(),
-        agent_role: source.get_agent_role(),
+        agent_nickname,
+        agent_role,
         source: source.into(),
         can_accept_direct_input: None,
         thread_source: thread.thread_source.map(Into::into),
