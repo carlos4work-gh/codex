@@ -23,6 +23,20 @@ require_pattern codex-rs/state/src/runtime.rs "mod arena_snapshots;"
 require_pattern codex-rs/state/src/runtime.rs "mod native_mailbox;"
 require_pattern codex-rs/cli/src/main.rs "mod memythos_sniff;"
 
+rpc_count=0
+while IFS= read -r variant; do
+  [[ -n "$variant" ]] || continue
+  rpc_count=$((rpc_count + 1))
+  require_pattern codex-rs/app-server/src/message_processor.rs "ClientRequest::$variant"
+done < <(
+  sed -nE 's/^[[:space:]]*(Memythos[A-Za-z0-9]+) =>.*/\1/p' codex-rs/app-server-protocol/src/protocol/common.rs | sort -u
+)
+
+if ((rpc_count < 40)); then
+  echo "Memythos RPC inventory unexpectedly small: $rpc_count" >&2
+  exit 1
+fi
+
 duplicate_migrations="$({
   find codex-rs/state/migrations -maxdepth 1 -name '*.sql' -print
 } | sed -E 's#^.*/([0-9]+)_.*#\1#' | sort | uniq -d)"
@@ -31,4 +45,4 @@ if [[ -n "$duplicate_migrations" ]]; then
   exit 1
 fi
 
-echo "Memythos fork sources are connected and migration versions are unique."
+echo "Memythos fork sources, $rpc_count RPC handlers, and migration versions are connected."

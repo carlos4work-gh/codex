@@ -59,12 +59,16 @@ jobs:
       - name: Compile extended fork source boundary
         run: >-
           cargo check
+          -p codex-app-server
+          -p codex-app-server-protocol
           -p codex-cli
           -p codex-config
+          -p codex-core
           -p codex-goal-extension
           -p codex-memories-write
           -p codex-protocol
           -p codex-rollout
+          -p codex-state
           -p codex-thread-store
 
       - name: Judge ranking regression
