@@ -49,6 +49,8 @@ mod mcp_server_elicitation;
 mod mcp_server_status;
 mod mcp_tool;
 mod memory_reset;
+#[cfg(unix)]
+mod memythos_arena_recovery;
 mod misalignment_policy;
 mod model_auto_review;
 mod model_list;

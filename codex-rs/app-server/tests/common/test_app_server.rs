@@ -60,6 +60,17 @@ use codex_app_server_protocol::MarketplaceRemoveParams;
 use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::McpResourceReadParams;
 use codex_app_server_protocol::McpServerToolCallParams;
+use codex_app_server_protocol::MemythosArenaCompositionProvisionParams;
+use codex_app_server_protocol::MemythosArenaMessageSendParams;
+use codex_app_server_protocol::MemythosArenaPhaseStartParams;
+use codex_app_server_protocol::MemythosArenaRunParams;
+use codex_app_server_protocol::MemythosArenaStateGetParams;
+use codex_app_server_protocol::MemythosMailboxHealthGetParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineGetParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineListParams;
+use codex_app_server_protocol::MemythosMailboxQuarantineResolveParams;
+use codex_app_server_protocol::MemythosMailboxResolutionGetParams;
+use codex_app_server_protocol::MemythosMailboxResolutionListParams;
 use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelProviderCapabilitiesReadParams;
@@ -188,6 +199,13 @@ impl TestAppServer {
     }
 
     pub async fn wait_for_exit(&mut self) -> std::io::Result<ExitStatus> {
+        self.process.wait().await
+    }
+
+    #[cfg(unix)]
+    pub async fn sigkill(&mut self) -> std::io::Result<ExitStatus> {
+        drop(self.stdin.take());
+        self.process.start_kill()?;
         self.process.wait().await
     }
 
@@ -474,6 +492,124 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/start", params).await
+    }
+
+    pub async fn send_memythos_arena_composition_provision_request(
+        &mut self,
+        params: MemythosArenaCompositionProvisionParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/arena/composition/provision",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_arena_phase_start_request(
+        &mut self,
+        params: MemythosArenaPhaseStartParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/arena/phase/start",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_arena_message_request(
+        &mut self,
+        params: MemythosArenaMessageSendParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/arena/message",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_arena_run_request(
+        &mut self,
+        params: MemythosArenaRunParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request("memythos/arena/run", Some(serde_json::to_value(params)?))
+            .await
+    }
+
+    pub async fn send_memythos_arena_state_get_request(
+        &mut self,
+        params: MemythosArenaStateGetParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/arena/state/get",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_mailbox_quarantine_list_request(
+        &mut self,
+        params: MemythosMailboxQuarantineListParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/mailbox/quarantine/list",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_mailbox_health_get_request(
+        &mut self,
+        params: MemythosMailboxHealthGetParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/mailbox/health/get",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_mailbox_quarantine_get_request(
+        &mut self,
+        params: MemythosMailboxQuarantineGetParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/mailbox/quarantine/get",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_mailbox_quarantine_resolve_request(
+        &mut self,
+        params: MemythosMailboxQuarantineResolveParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/mailbox/quarantine/resolve",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_mailbox_resolution_list_request(
+        &mut self,
+        params: MemythosMailboxResolutionListParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/mailbox/quarantine/resolution/list",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_mailbox_resolution_get_request(
+        &mut self,
+        params: MemythosMailboxResolutionGetParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/mailbox/quarantine/resolution/get",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
     }
 
     /// Send a `project/import` JSON-RPC request.
