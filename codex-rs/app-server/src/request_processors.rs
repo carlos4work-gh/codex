@@ -548,6 +548,7 @@ mod initialize_processor;
 mod marketplace_processor;
 mod mcp_processor;
 mod memythos_arena_state;
+mod memythos_observability;
 mod memythos_processor;
 mod persisted_resume_settings;
 mod plugins;

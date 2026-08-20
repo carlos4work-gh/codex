@@ -62,6 +62,12 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: scripts/memythos/fork-source-connectivity.sh
 
+      - name: Enforce descending processor boundary
+        working-directory: ${{ github.workspace }}
+        run: |
+          scripts/memythos/processor-boundary-gate.sh
+          scripts/memythos/processor-boundary-gate-test.sh
+
       - name: Compile extended fork source boundary
         run: >-
           cargo check
@@ -97,6 +103,9 @@ jobs:
 
       - name: Durable native mailbox state contract
         run: cargo test -p codex-state native_mailbox_
+
+      - name: Memythos observability contract
+        run: cargo test -p codex-app-server memythos_observability::tests
 
       - name: Independent root role rollout contract
         run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
