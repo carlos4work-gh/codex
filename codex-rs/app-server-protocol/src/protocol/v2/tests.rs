@@ -4939,3 +4939,39 @@ fn tool_request_user_input_params_default_legacy_missing_is_blocking_to_true() {
         }
     );
 }
+
+#[test]
+fn memythos_mailbox_quarantine_methods_deserialize() {
+    for (method, params) in [
+        (
+            "memythos/mailbox/quarantine/list",
+            json!({"receiverThreadId": "thread-a"}),
+        ),
+        (
+            "memythos/mailbox/quarantine/get",
+            json!({
+                "receiverThreadId": "thread-a",
+                "communicationId": "message-a"
+            }),
+        ),
+        (
+            "memythos/mailbox/quarantine/resolve",
+            json!({
+                "receiverThreadId": "thread-a",
+                "communicationId": "message-a",
+                "commandId": "command-a",
+                "action": "retry",
+                "actor": "operator:test",
+                "reason": "verified"
+            }),
+        ),
+    ] {
+        let request = serde_json::from_value::<crate::ClientRequest>(json!({
+            "method": method,
+            "id": 99,
+            "params": params
+        }))
+        .expect("mailbox quarantine method should deserialize");
+        assert_eq!(request.method_name(), method);
+    }
+}
