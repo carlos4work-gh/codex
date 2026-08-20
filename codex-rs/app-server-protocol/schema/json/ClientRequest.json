@@ -2645,6 +2645,15 @@
       ],
       "type": "string"
     },
+    "MemythosMailboxQuarantineResolutionAction": {
+      "enum": [
+        "retry",
+        "skip",
+        "replace",
+        "abort"
+      ],
+      "type": "string"
+    },
     "MemythosRoomParticipant": {
       "properties": {
         "authorityScope": {

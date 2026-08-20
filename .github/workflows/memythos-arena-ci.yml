@@ -52,6 +52,12 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: scripts/memythos/upstream-impact-check.sh
 
+      - name: Enforce upstream manual overlap budget
+        working-directory: ${{ github.workspace }}
+        run: |
+          scripts/memythos/upstream-overlap-gate.sh
+          scripts/memythos/upstream-overlap-gate-test.sh
+
       - name: Verify fork source connectivity
         working-directory: ${{ github.workspace }}
         run: scripts/memythos/fork-source-connectivity.sh
@@ -70,6 +76,9 @@ jobs:
           -p codex-rollout
           -p codex-state
           -p codex-thread-store
+
+      - name: Generated app-server protocol drift
+        run: cargo test -p codex-app-server-protocol schema_fixtures_match_generated
 
       - name: Judge ranking regression
         run: cargo test -p codex-app-server native_judge_verdict_requires_each_rejected_alternative_exactly_once
