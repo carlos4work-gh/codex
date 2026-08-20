@@ -113,6 +113,15 @@ jobs:
           cargo test -p codex-app-server thread_consolidate_
           cargo test -p codex-app-server thread_contract_assemble_
 
+      - name: Memythos resume lifecycle contract
+        run: |
+          cargo test -p codex-app-server memythos_resume::tests
+          cargo test -p codex-app-server arena_intake_
+          cargo test -p codex-app-server partial_resume_
+          cargo test -p codex-app-server arena_request_partially_resumes_
+          cargo test -p codex-app-server arena_request_retains_decision_
+          cargo test -p codex-app-server arena_request_requires_explicit_comparability_
+
       - name: Independent root role rollout contract
         run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
 

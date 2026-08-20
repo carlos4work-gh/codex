@@ -551,6 +551,7 @@ mod memythos_arena_state;
 mod memythos_contracts;
 mod memythos_observability;
 mod memythos_processor;
+mod memythos_resume;
 mod persisted_resume_settings;
 mod plugins;
 mod process_exec_processor;
