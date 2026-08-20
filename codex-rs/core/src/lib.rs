@@ -58,6 +58,7 @@ pub mod connectors;
 pub mod context;
 mod context_manager;
 mod current_time;
+mod durable_inter_agent_mailbox;
 mod elicitation;
 mod environment_selection;
 pub mod exec;

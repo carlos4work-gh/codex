@@ -191,6 +191,7 @@ use crate::config::PermissionProfileState;
 use crate::config::StartedNetworkProxy;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
+use crate::durable_inter_agent_mailbox::DurableInterAgentMailbox;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
@@ -456,7 +457,6 @@ pub(crate) fn resolve_multi_agent_version(
 }
 
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";
-const NATIVE_MAILBOX_MAX_RECOVERY_ATTEMPTS: i64 = 3;
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
@@ -3291,13 +3291,8 @@ impl Session {
             .await;
         if rollout_persisted
             && let Some(communication_id) = communication_id
-            && let Some(state_db) = self.state_db()
-            && let Err(error) = state_db
-                .mark_native_mailbox_communication_consumed(
-                    &self.thread_id.to_string(),
-                    &communication_id,
-                    chrono::Utc::now().timestamp_millis(),
-                )
+            && let Err(error) = DurableInterAgentMailbox::new(self.state_db())
+                .mark_consumed(&self.thread_id.to_string(), &communication_id)
                 .await
         {
             warn!("failed to mark native mailbox message {communication_id} consumed: {error}");
@@ -3306,53 +3301,18 @@ impl Session {
     }
 
     pub(crate) async fn restore_native_mailbox_communications(&self) -> CodexResult<Vec<String>> {
-        let Some(state_db) = self.state_db() else {
-            return Ok(Vec::new());
-        };
-        let pending = state_db
-            .list_pending_native_mailbox_communications(&self.thread_id.to_string())
-            .await
-            .map_err(|error| {
-                CodexErr::Fatal(format!("failed to restore native mailbox: {error}"))
-            })?;
-        let mut warnings = Vec::new();
-        for record in pending {
-            let recovery = state_db
-                .claim_native_mailbox_communication_for_recovery(
-                    &record.receiver_thread_id,
-                    &record.communication_id,
-                    NATIVE_MAILBOX_MAX_RECOVERY_ATTEMPTS,
-                    chrono::Utc::now().timestamp_millis(),
-                )
-                .await
-                .map_err(|error| {
-                    CodexErr::Fatal(format!("failed to claim native mailbox message: {error}"))
-                })?;
-            let record = match recovery {
-                Some(codex_state::NativeMailboxRecoveryOutcome::Claimed(record)) => record,
-                Some(codex_state::NativeMailboxRecoveryOutcome::Quarantined(record)) => {
-                    let warning = format!(
-                        "Native mailbox communication {} was quarantined after {} recovery attempts without durable progress; automatic recovery stopped.",
-                        record.communication_id, record.attempt_count
-                    );
-                    warn!("{warning}");
-                    warnings.push(warning);
-                    continue;
-                }
-                None => continue,
-            };
-            let communication =
-                serde_json::from_str(&record.communication_json).map_err(|error| {
-                    CodexErr::Fatal(format!(
-                        "failed to decode native mailbox message {}: {error}",
-                        record.communication_id
-                    ))
-                })?;
+        let restored = DurableInterAgentMailbox::new(self.state_db())
+            .restore(&self.thread_id.to_string())
+            .await?;
+        for warning in &restored.warnings {
+            warn!("{warning}");
+        }
+        for communication in restored.communications {
             self.input_queue
                 .enqueue_mailbox_communication(communication, None, None)
                 .await;
         }
-        Ok(warnings)
+        Ok(restored.warnings)
     }
 
     async fn maybe_warn_on_server_model_mismatch(
