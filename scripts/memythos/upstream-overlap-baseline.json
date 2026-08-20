@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "base_commit": "22b860e80b06dff3c5e86160e5dc3199b7816693",
+  "observed_fork_head": "712a492832c20254d1dfd1ffaf968dcec48590ff",
+  "observed_upstream_head": "585b97d394aa09d187ac37dc87b40250f5c77944",
+  "maximum_manual_overlap_count": 27,
+  "mechanical_exact": [
+    "codex-rs/Cargo.lock"
+  ],
+  "mechanical_prefixes": [
+    "codex-rs/app-server-protocol/schema/json/",
+    "codex-rs/app-server-protocol/schema/precomputed/",
+    "codex-rs/app-server-protocol/schema/typescript/"
+  ],
+  "manual_overlaps": [
+    "codex-rs/app-server-protocol/src/protocol/common.rs",
+    "codex-rs/app-server-protocol/src/protocol/v2/mod.rs",
+    "codex-rs/app-server/src/bespoke_event_handling.rs",
+    "codex-rs/app-server/src/message_processor.rs",
+    "codex-rs/app-server/src/request_processors.rs",
+    "codex-rs/app-server/src/request_processors/thread_goal_processor.rs",
+    "codex-rs/app-server/src/request_processors/thread_processor.rs",
+    "codex-rs/app-server/src/request_processors/turn_processor.rs",
+    "codex-rs/app-server/tests/suite/v2/mod.rs",
+    "codex-rs/app-server/tests/suite/v2/skills_list.rs",
+    "codex-rs/app-server/tests/suite/v2/thread_read.rs",
+    "codex-rs/cli/src/main.rs",
+    "codex-rs/config/src/config_toml.rs",
+    "codex-rs/core/src/agent/control_tests.rs",
+    "codex-rs/core/src/agent/role.rs",
+    "codex-rs/core/src/agent/role_tests.rs",
+    "codex-rs/core/src/codex_thread.rs",
+    "codex-rs/core/src/config/agent_roles.rs",
+    "codex-rs/core/src/config/config_tests.rs",
+    "codex-rs/core/src/config/mod.rs",
+    "codex-rs/core/src/lib.rs",
+    "codex-rs/core/src/session/mod.rs",
+    "codex-rs/core/src/session/session.rs",
+    "codex-rs/core/src/session/turn_context.rs",
+    "codex-rs/core/src/thread_manager.rs",
+    "codex-rs/core/src/tools/handlers/multi_agents_tests.rs",
+    "codex-rs/thread-store/src/local/mod.rs"
+  ]
+}

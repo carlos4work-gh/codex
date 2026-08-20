@@ -70,7 +70,8 @@ threadSource: ThreadSource | null, /**
  * Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
  */
 agentNickname: string | null, /**
- * Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.
+ * Optional named role applied to this thread. Root threads can select it at
+ * `thread/start`; spawned agents inherit it from AgentControl.
  */
 agentRole: string | null, /**
  * Optional Git metadata captured when the thread was created.
