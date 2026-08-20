@@ -107,6 +107,12 @@ jobs:
       - name: Memythos observability contract
         run: cargo test -p codex-app-server memythos_observability::tests
 
+      - name: Memythos consolidation contract
+        run: |
+          cargo test -p codex-app-server memythos_contracts::tests
+          cargo test -p codex-app-server thread_consolidate_
+          cargo test -p codex-app-server thread_contract_assemble_
+
       - name: Independent root role rollout contract
         run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
 
