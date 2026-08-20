@@ -92,6 +92,9 @@ jobs:
       - name: OOTB Arena snapshot persistence
         run: cargo test -p codex-state arena_snapshot_round_trips_without_semantic_concierge_state
 
+      - name: Legacy Memythos migration upgrade
+        run: cargo test -p codex-state upgrades_legacy_memythos_migrations_without_checksum_conflicts
+
       - name: Durable native mailbox state contract
         run: cargo test -p codex-state native_mailbox_
 

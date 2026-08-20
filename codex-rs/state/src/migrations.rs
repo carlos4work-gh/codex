@@ -3,6 +3,17 @@ use std::borrow::Cow;
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
 
+const LEGACY_MEMYTHOS_MIGRATION_VERSIONS: &[(i64, i64)] = &[
+    (40, 10_000),
+    (41, 10_001),
+    (42, 10_002),
+    (43, 10_003),
+    (50, 10_000),
+    (51, 10_001),
+    (52, 10_002),
+    (53, 10_003),
+];
+
 pub(crate) static STATE_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub(crate) static LOGS_MIGRATOR: Migrator = sqlx::migrate!("./logs_migrations");
 pub(crate) static GOALS_MIGRATOR: Migrator = sqlx::migrate!("./goals_migrations");
@@ -113,6 +124,53 @@ WHERE version = ?
     .bind(recency_migration.version)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Moves released Memythos migrations into a reserved namespace before SQLx validates checksums.
+pub(crate) async fn repair_legacy_memythos_migration_versions(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
+    let migrations_table_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    if !migrations_table_exists {
+        return Ok(());
+    }
+
+    let mut transaction = pool.begin().await?;
+    for &(legacy_version, reserved_version) in LEGACY_MEMYTHOS_MIGRATION_VERSIONS {
+        let migration = migrator
+            .migrations
+            .iter()
+            .find(|migration| migration.version == reserved_version)
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing reserved Memythos migration {reserved_version}")
+            })?;
+        sqlx::query(
+            r#"
+UPDATE _sqlx_migrations
+SET version = ?, description = ?
+WHERE version = ?
+  AND checksum = ?
+  AND NOT EXISTS (
+      SELECT 1 FROM _sqlx_migrations WHERE version = ?
+  )
+            "#,
+        )
+        .bind(reserved_version)
+        .bind(migration.description.as_ref())
+        .bind(legacy_version)
+        .bind(migration.checksum.as_ref())
+        .bind(reserved_version)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
     Ok(())
 }
 

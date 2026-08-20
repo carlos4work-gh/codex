@@ -75,4 +75,13 @@ if [[ -n "$duplicate_migrations" ]]; then
   exit 1
 fi
 
+unreserved_fork_migrations="$({
+  find codex-rs/state/migrations -maxdepth 1 \
+    \( -name '*arena_snapshots.sql' -o -name '*native_mailbox*.sql' \) -print
+} | sed -E 's#^.*/([0-9]+)_.*#\1#' | awk '$1 < 10000')"
+if [[ -n "$unreserved_fork_migrations" ]]; then
+  echo "Memythos state migrations must use the reserved 10000+ namespace" >&2
+  exit 1
+fi
+
 echo "Memythos fork sources, $rpc_count RPC handlers, and migration versions are connected."

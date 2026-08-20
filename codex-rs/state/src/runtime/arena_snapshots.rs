@@ -116,13 +116,17 @@ mod tests {
     use chrono::Utc;
     use codex_protocol::ThreadId;
     use codex_protocol::protocol::SessionSource;
+    use codex_utils_absolute_path::test_support::PathExt;
 
     #[tokio::test]
     async fn arena_snapshot_round_trips_without_semantic_concierge_state() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("initialize runtime");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
         let concierge_thread_id = ThreadId::from_string("00000000-0000-4000-8000-000000000620")
             .expect("valid concierge thread id");
         let mut builder = ThreadMetadataBuilder::new(

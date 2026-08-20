@@ -700,13 +700,17 @@ mod tests {
     use chrono::Utc;
     use codex_protocol::ThreadId;
     use codex_protocol::protocol::SessionSource;
+    use codex_utils_absolute_path::test_support::PathExt;
 
     #[tokio::test]
     async fn native_mailbox_pending_record_is_idempotent_and_consumable() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("initialize runtime");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
         let thread_id =
             ThreadId::from_string("00000000-0000-4000-8000-000000000629").expect("valid thread id");
         let mut builder = ThreadMetadataBuilder::new(
@@ -803,9 +807,12 @@ mod tests {
     #[tokio::test]
     async fn native_mailbox_recovery_budget_quarantines_without_reenqueue() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("initialize runtime");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
         let thread_id =
             ThreadId::from_string("00000000-0000-4000-8000-000000000630").expect("valid thread id");
         let mut builder = ThreadMetadataBuilder::new(
@@ -908,9 +915,12 @@ mod tests {
     #[tokio::test]
     async fn native_mailbox_quarantine_resolutions_are_atomic_and_idempotent() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("initialize runtime");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
         let thread_id =
             ThreadId::from_string("00000000-0000-4000-8000-000000000631").expect("valid thread id");
         let mut builder = ThreadMetadataBuilder::new(
@@ -1085,9 +1095,12 @@ mod tests {
     #[tokio::test]
     async fn native_mailbox_ten_concurrent_replacements_return_one_stable_winner() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("initialize runtime");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
         let thread_id =
             ThreadId::from_string("00000000-0000-4000-8000-000000000635").expect("valid thread id");
         let mut builder = ThreadMetadataBuilder::new(
@@ -1137,9 +1150,12 @@ mod tests {
         let mut runtimes = vec![runtime.clone()];
         for _ in 1..10 {
             runtimes.push(
-                StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-                    .await
-                    .expect("open independent runtime"),
+                StateRuntime::init(
+                    crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+                    "test-provider".to_string(),
+                )
+                .await
+                .expect("open independent runtime"),
             );
         }
         let commands = (0..10)
@@ -1222,9 +1238,12 @@ mod tests {
             .find(|outcome| outcome.conflict)
             .expect("one command conflicts");
         drop(runtime);
-        let reopened = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("reopen runtime after contention");
+        let reopened = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("reopen runtime after contention");
         let losing_command = commands
             .iter()
             .find(|command| command.command_id == loser.command_id)
@@ -1255,9 +1274,12 @@ mod tests {
     #[tokio::test]
     async fn native_mailbox_failed_audit_rolls_back_replacement_and_original_update() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
-            .await
-            .expect("initialize runtime");
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
         let thread_id =
             ThreadId::from_string("00000000-0000-4000-8000-000000000636").expect("valid thread id");
         let mut builder = ThreadMetadataBuilder::new(

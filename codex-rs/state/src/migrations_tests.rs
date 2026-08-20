@@ -8,6 +8,7 @@ use std::borrow::Cow;
 
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
+use super::repair_legacy_memythos_migration_versions;
 use super::repair_legacy_recency_migration_version;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::PINNED_THREAD_SECTION_NAME;
@@ -29,6 +30,71 @@ fn migrator_through(version: i64) -> Migrator {
         table_name: STATE_MIGRATOR.table_name.clone(),
         create_schemas: STATE_MIGRATOR.create_schemas.clone(),
         no_tx: STATE_MIGRATOR.no_tx,
+    }
+}
+
+#[tokio::test]
+async fn upgrades_legacy_memythos_migrations_without_checksum_conflicts() {
+    for (upstream_through, legacy_versions) in [(39, [40, 41, 42, 43]), (49, [50, 51, 52, 53])] {
+        let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+        tokio::fs::create_dir_all(&sqlite_home)
+            .await
+            .expect("sqlite home should be created");
+        let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+            let _ = std::fs::remove_dir_all(sqlite_home);
+        });
+        let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+        let pool = sqlite
+            .open_read_write_pool(&sqlite.state_db_path())
+            .await
+            .expect("sqlite database should open");
+
+        let mut legacy_migrations = STATE_MIGRATOR
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= upstream_through)
+            .cloned()
+            .collect::<Vec<_>>();
+        for (legacy_version, reserved_version) in legacy_versions.into_iter().zip(10_000..=10_003) {
+            let migration = STATE_MIGRATOR
+                .migrations
+                .iter()
+                .find(|migration| migration.version == reserved_version)
+                .expect("reserved Memythos migration should exist");
+            legacy_migrations.push(Migration::new(
+                legacy_version,
+                migration.description.clone(),
+                migration.migration_type,
+                migration.sql.clone(),
+                migration.no_tx,
+            ));
+        }
+        Migrator::with_migrations(legacy_migrations)
+            .run(&pool)
+            .await
+            .expect("legacy Memythos migrations should apply");
+
+        repair_legacy_memythos_migration_versions(&pool, &STATE_MIGRATOR)
+            .await
+            .expect("legacy Memythos history should move to the reserved namespace");
+        STATE_MIGRATOR
+            .run(&pool)
+            .await
+            .expect("upstream and reserved migrations should apply after repair");
+
+        let applied_versions =
+            sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .expect("migration versions should load");
+        let expected_versions = STATE_MIGRATOR
+            .migrations
+            .iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>();
+        assert_eq!(applied_versions, expected_versions);
+
+        pool.close().await;
     }
 }
 
