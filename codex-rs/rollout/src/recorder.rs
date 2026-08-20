@@ -325,6 +325,35 @@ impl RolloutRecorderParams {
     }
 }
 
+#[cfg(test)]
+mod root_role_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_root_agent_role_overrides_source_derived_role() {
+        let params = RolloutRecorderParams::new(
+            ThreadId::new(),
+            /*forked_from_id*/ None,
+            /*parent_thread_id*/ None,
+            SessionSource::Exec,
+            /*thread_source*/ None,
+            "root-role-test".to_string(),
+            BaseInstructions::default(),
+            Vec::new(),
+        )
+        .with_agent_role(Some("independent-reviewer".to_string()));
+
+        let RolloutRecorderParams::Create {
+            source, agent_role, ..
+        } = params
+        else {
+            panic!("new recorder params must create a rollout");
+        };
+        assert_eq!(*source, SessionSource::Exec);
+        assert_eq!(agent_role.as_deref(), Some("independent-reviewer"));
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ThreadListArchiveFilter {
     Active,

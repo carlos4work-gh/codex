@@ -41,6 +41,18 @@ for integration_file in \
   fi
 done
 
+for root_role_file in \
+  codex-rs/core/src/agent/role.rs \
+  codex-rs/history/src/lib.rs \
+  codex-rs/rollout/src/recorder.rs \
+  codex-rs/thread-store/src/local/create_thread.rs \
+  codex-rs/thread-store/src/local/revert_thread.rs; do
+  if rg --quiet 'Memythos' "$root_role_file"; then
+    echo "Root role patch must remain domain-neutral: $root_role_file" >&2
+    exit 1
+  fi
+done
+
 rpc_count=0
 while IFS= read -r variant; do
   [[ -n "$variant" ]] || continue

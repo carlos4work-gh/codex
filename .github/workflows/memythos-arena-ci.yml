@@ -95,6 +95,12 @@ jobs:
       - name: Durable native mailbox state contract
         run: cargo test -p codex-state native_mailbox_
 
+      - name: Independent root role rollout contract
+        run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
+
+      - name: Independent root role resume contract
+        run: cargo test -p codex-history resumed_history_preserves_explicit_root_agent_role
+
       - name: Native mailbox quarantine protocol contract
         run: cargo test -p codex-app-server-protocol memythos_mailbox_quarantine_methods_deserialize
 

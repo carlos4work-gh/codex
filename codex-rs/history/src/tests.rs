@@ -551,3 +551,28 @@ fn multi_agent_version_uses_newest_present_session_meta_value() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn resumed_history_preserves_explicit_root_agent_role() -> Result<()> {
+    let thread_id = ThreadId::from_string("67e55044-10b1-426f-9247-bb680e5fe0c8")?;
+    let history = InitialHistory::Resumed(ResumedHistory {
+        conversation_id: thread_id,
+        history: Arc::new(vec![RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                session_id: thread_id.into(),
+                id: thread_id,
+                source: SessionSource::Exec,
+                agent_role: Some("independent-reviewer".to_string()),
+                ..Default::default()
+            },
+            git: None,
+        })]),
+        rollout_path: None,
+    });
+
+    assert_eq!(
+        history.get_session_agent_role().as_deref(),
+        Some("independent-reviewer")
+    );
+    Ok(())
+}
