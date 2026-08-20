@@ -21,7 +21,25 @@ require_pattern codex-rs/app-server/src/message_processor.rs "MemythosRequestPro
 require_pattern codex-rs/app-server/tests/suite/v2/mod.rs "mod memythos_arena_recovery;"
 require_pattern codex-rs/state/src/runtime.rs "mod arena_snapshots;"
 require_pattern codex-rs/state/src/runtime.rs "mod native_mailbox;"
+require_pattern codex-rs/core/src/lib.rs "mod durable_inter_agent_mailbox;"
 require_pattern codex-rs/cli/src/main.rs "mod memythos_sniff;"
+
+durable_mailbox_service="codex-rs/core/src/durable_inter_agent_mailbox.rs"
+if rg --quiet 'Memythos' "$durable_mailbox_service"; then
+  echo "Durable inter-agent mailbox must remain domain-neutral" >&2
+  exit 1
+fi
+
+for integration_file in \
+  codex-rs/core/src/thread_manager.rs \
+  codex-rs/core/src/session/mod.rs; do
+  if rg --quiet \
+    'insert_pending_native_mailbox_communication|claim_native_mailbox_communication_for_recovery|mark_native_mailbox_communication_consumed' \
+    "$integration_file"; then
+    echo "Durable mailbox repository access escaped into $integration_file" >&2
+    exit 1
+  fi
+done
 
 rpc_count=0
 while IFS= read -r variant; do
