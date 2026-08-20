@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "base_commit": "22b860e80b06dff3c5e86160e5dc3199b7816693",
-  "observed_fork_head": "712a492832c20254d1dfd1ffaf968dcec48590ff",
-  "observed_upstream_head": "585b97d394aa09d187ac37dc87b40250f5c77944",
+  "base_commit": "bf2aee99c58362d3f588d98432dcbc7adc371c73",
+  "observed_fork_head": "fa01be3994ef674fad5c6f17dfbfa54c6e0143c1",
+  "observed_upstream_head": "bf2aee99c58362d3f588d98432dcbc7adc371c73",
   "maximum_manual_overlap_count": 27,
   "mechanical_exact": [
     "codex-rs/Cargo.lock"
