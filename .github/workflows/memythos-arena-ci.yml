@@ -122,6 +122,14 @@ jobs:
           cargo test -p codex-app-server arena_request_retains_decision_
           cargo test -p codex-app-server arena_request_requires_explicit_comparability_
 
+      - name: Memythos judge contract
+        run: |
+          cargo test -p codex-app-server memythos_judge::tests
+          cargo test -p codex-app-server native_judge_
+          cargo test -p codex-app-server judge_verdict_schema_
+          cargo test -p codex-app-server targeted_judge_verdict_
+          cargo test -p codex-app-server arena_terminalizes_after_native_judge_
+
       - name: Independent root role rollout contract
         run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
 

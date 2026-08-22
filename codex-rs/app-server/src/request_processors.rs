@@ -549,6 +549,7 @@ mod marketplace_processor;
 mod mcp_processor;
 mod memythos_arena_state;
 mod memythos_contracts;
+mod memythos_judge;
 mod memythos_observability;
 mod memythos_processor;
 mod memythos_resume;

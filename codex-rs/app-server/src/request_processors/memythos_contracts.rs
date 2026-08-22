@@ -203,6 +203,47 @@ pub(super) fn validate_thread_contract_assemble_request(
     Ok(())
 }
 
+pub(super) fn validate_responses_output_schema(
+    schema: &serde_json::Value,
+) -> Result<(), JSONRPCErrorError> {
+    fn find_unsupported_keyword(
+        value: &serde_json::Value,
+        path: &mut Vec<String>,
+    ) -> Option<String> {
+        match value {
+            serde_json::Value::Object(object) => {
+                if object.contains_key("allOf") {
+                    return Some(path.join("."));
+                }
+                for (key, nested) in object {
+                    path.push(key.clone());
+                    if let Some(found) = find_unsupported_keyword(nested, path) {
+                        return Some(found);
+                    }
+                    path.pop();
+                }
+                None
+            }
+            serde_json::Value::Array(values) => {
+                values.iter().enumerate().find_map(|(index, nested)| {
+                    path.push(index.to_string());
+                    let found = find_unsupported_keyword(nested, path);
+                    path.pop();
+                    found
+                })
+            }
+            _ => None,
+        }
+    }
+
+    if let Some(path) = find_unsupported_keyword(schema, &mut Vec::new()) {
+        return Err(invalid_params(format!(
+            "arena composition output schema contains unsupported allOf at {path}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
