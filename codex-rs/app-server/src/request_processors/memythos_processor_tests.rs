@@ -1,4 +1,6 @@
 use super::*;
+use codex_app_server_protocol::MemythosArenaCompositionContract;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
 #[test]
 fn native_peer_bet_is_an_incremental_commitment_contract() {

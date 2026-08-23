@@ -160,6 +160,14 @@ jobs:
           cargo test -p codex-app-server arena_composition_rolls_back_
           cargo test -p codex-app-server arena_composition_requires_explicit_revision_
 
+      - name: Memythos composition planning boundary
+        run: |
+          cargo test -p codex-app-server arena_composition_schema_
+          cargo test -p codex-app-server native_cross_read_
+          cargo test -p codex-app-server native_bet_
+          cargo test -p codex-app-server native_bettor_turns_
+          cargo test -p codex-app-server arena_request_partially_resumes_
+
       - name: Independent root role rollout contract
         run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
 
