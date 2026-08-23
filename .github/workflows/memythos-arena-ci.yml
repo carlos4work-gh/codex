@@ -142,6 +142,16 @@ jobs:
           cargo test -p codex-app-server budget_limited_parent_requires_native_replan_
           cargo test -p codex-app-server automatic_mailbox_delivery_rearms_
 
+      - name: Memythos composition contract
+        run: |
+          cargo test -p codex-app-server memythos_composition::tests
+          cargo test -p codex-app-server arena_composition_
+          cargo test -p codex-app-server cost_envelope_
+          cargo test -p codex-app-server explicit_cost_cap_
+          cargo test -p codex-app-server native_method_authority_
+          cargo test -p codex-app-server downstream_delegate_
+          cargo test -p codex-app-server ordinary_competitive_arena_
+
       - name: Independent root role rollout contract
         run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
 
