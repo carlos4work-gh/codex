@@ -152,6 +152,14 @@ jobs:
           cargo test -p codex-app-server downstream_delegate_
           cargo test -p codex-app-server ordinary_competitive_arena_
 
+      - name: Memythos native parent provisioning boundary
+        run: |
+          cargo test -p codex-app-server native_parent_setup_
+          cargo test -p codex-app-server reusable_parent_
+          cargo test -p codex-app-server arena_composition_provisions_
+          cargo test -p codex-app-server arena_composition_rolls_back_
+          cargo test -p codex-app-server arena_composition_requires_explicit_revision_
+
       - name: Independent root role rollout contract
         run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
 
