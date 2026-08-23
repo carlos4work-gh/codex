@@ -130,6 +130,18 @@ jobs:
           cargo test -p codex-app-server targeted_judge_verdict_
           cargo test -p codex-app-server arena_terminalizes_after_native_judge_
 
+      - name: Memythos delivery orchestration contract
+        run: |
+          cargo test -p codex-app-server memythos_delivery::tests
+          cargo test -p codex-app-server aggregate_then_trigger_
+          cargo test -p codex-app-server completed_bettor_phase_fans_out_
+          cargo test -p codex-app-server room_tool_aggregates_bets_
+          cargo test -p codex-app-server competitive_concierge_dispatches_
+          cargo test -p codex-app-server canonical_concierge_checkpoint_
+          cargo test -p codex-app-server room_delivery_
+          cargo test -p codex-app-server budget_limited_parent_requires_native_replan_
+          cargo test -p codex-app-server automatic_mailbox_delivery_rearms_
+
       - name: Independent root role rollout contract
         run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
 
