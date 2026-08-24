@@ -81,6 +81,7 @@ use tracing_subscriber::registry::Registry;
 use tracing_subscriber::util::SubscriberInitExt;
 
 const SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY: &str = "Codex rebuilt its local database.";
+const MEMYTHOS_READINESS_FILE_ENV_VAR: &str = "MEMYTHOS_READINESS_FILE";
 
 fn is_unsupported_untrusted_approval_policy_error(err: &std::io::Error) -> bool {
     err.get_ref().is_some_and(
@@ -929,6 +930,11 @@ pub async fn run_main_with_transport_options(
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();
+        if let Ok(path) = std::env::var(MEMYTHOS_READINESS_FILE_ENV_VAR)
+            && let Err(error) = write_memythos_readiness_marker(Path::new(&path))
+        {
+            warn!(%error, %path, "failed to publish app-server readiness marker");
+        }
         let mut connections = HashMap::<ConnectionId, ConnectionState>::new();
         let mut connection_cleanup_tasks = ConnectionCleanupTasks::new();
         let mut remote_control_status_rx = remote_control_handle.status_receiver();
@@ -1381,6 +1387,14 @@ fn analytics_rpc_transport(transport: &AppServerTransport) -> AppServerRpcTransp
     }
 }
 
+fn write_memythos_readiness_marker(path: &Path) -> IoResult<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(ErrorKind::InvalidInput, "readiness marker has no parent")
+    })?;
+    std::fs::create_dir_all(parent)?;
+    std::fs::write(path, format!("{}\n", std::process::id()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::LogFormat;
@@ -1391,6 +1405,7 @@ mod tests {
     #[cfg(debug_assertions)]
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
 
     #[test]
     fn log_format_from_env_value_matches_json_values_case_insensitively() {
@@ -1423,6 +1438,17 @@ mod tests {
         assert_eq!(
             loader_overrides.user_config_path,
             Some(AbsolutePathBuf::from_absolute_path(path).expect("absolute test path"))
+        );
+    }
+
+    #[test]
+    fn memythos_readiness_marker_contains_only_process_identity() {
+        let directory = TempDir::new().expect("temporary readiness directory");
+        let marker = directory.path().join("app-server.ready");
+        super::write_memythos_readiness_marker(&marker).expect("write readiness marker");
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("read readiness marker"),
+            format!("{}\n", std::process::id())
         );
     }
 }
