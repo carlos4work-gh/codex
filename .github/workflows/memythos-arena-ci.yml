@@ -101,6 +101,11 @@ jobs:
       - name: Memythos runtime state projection
         run: cargo test -p codex-app-server memythos_runtime_state::tests
 
+      - name: Memythos runtime coordination boundary
+        run: |
+          cargo test -p codex-app-server memythos_runtime::tests
+          cargo test -p codex-app-server reports_runtime_health_and_clean_close
+
       - name: Legacy Memythos migration upgrade
         run: cargo test -p codex-state upgrades_legacy_memythos_migrations_without_checksum_conflicts
 

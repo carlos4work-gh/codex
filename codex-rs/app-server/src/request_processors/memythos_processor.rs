@@ -61,7 +61,6 @@ use codex_app_server_protocol::MemythosArenaRunResponse;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
 use codex_app_server_protocol::MemythosArenaStateGetResponse;
 use codex_app_server_protocol::MemythosEventChannel;
-use codex_app_server_protocol::MemythosLayer;
 use codex_app_server_protocol::MemythosLayerCreateParams;
 use codex_app_server_protocol::MemythosLayerCreateResponse;
 use codex_app_server_protocol::MemythosLayerListParams;
@@ -119,9 +118,7 @@ use codex_app_server_protocol::MemythosRoomSendInputDelivery;
 use codex_app_server_protocol::MemythosRoomSendInputParams;
 use codex_app_server_protocol::MemythosRoomSendInputResponse;
 use codex_app_server_protocol::MemythosRuntimeCloseParams;
-use codex_app_server_protocol::MemythosRuntimeCloseResponse;
 use codex_app_server_protocol::MemythosRuntimeHealthParams;
-use codex_app_server_protocol::MemythosRuntimeHealthResponse;
 use codex_app_server_protocol::MemythosRuntimeLifecycleState;
 use codex_app_server_protocol::MemythosSemanticAlignment;
 use codex_app_server_protocol::MemythosStructuredContract;
@@ -192,6 +189,7 @@ use crate::request_processors::memythos_parent_provisioning::*;
 use crate::request_processors::memythos_parent_response::*;
 use crate::request_processors::memythos_peer_delivery::*;
 use crate::request_processors::memythos_resume::*;
+use crate::request_processors::memythos_runtime::*;
 use crate::request_processors::memythos_runtime_state::*;
 use crate::request_processors::memythos_thread_consolidation::*;
 
@@ -1680,58 +1678,7 @@ impl MemythosRequestProcessor {
         _params: MemythosRuntimeHealthParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let state = self.state.lock().await;
-
-        Ok(MemythosRuntimeHealthResponse {
-            runtime_id: state.runtime_id.clone(),
-            protocol_version: "memythos.experimental.v1".to_string(),
-            lifecycle_state: state.lifecycle_state,
-            runtime_family: state.runtime_family.clone(),
-            connection_mode: state.connection_mode.clone(),
-            transport_owner: state.transport_owner.clone(),
-            transport_id: state.transport_id.clone(),
-            daemon_runtime_verified: state.daemon_runtime_verified,
-            capabilities: vec![
-                "memythos/runtime/health".to_string(),
-                "memythos/runtime/close".to_string(),
-                "memythos/layer/create".to_string(),
-                "memythos/layer/list".to_string(),
-                "memythos/arena/create".to_string(),
-                "memythos/arena/composition/provision".to_string(),
-                "memythos/arena/list".to_string(),
-                "memythos/thread/attach".to_string(),
-                "memythos/thread/list".to_string(),
-                "memythos/arena/parent/register".to_string(),
-                "memythos/arena/participant/register".to_string(),
-                "memythos/arena/phase/start".to_string(),
-                "memythos/arena/message".to_string(),
-                "memythos/arena/message/send".to_string(),
-                "memythos/arena/message/list".to_string(),
-                "memythos/arena/message/observe".to_string(),
-                "memythos/room/register".to_string(),
-                "memythos/room/create".to_string(),
-                "memythos/room/list".to_string(),
-                "memythos/room/activity/list".to_string(),
-                "memythos/room/timeline/get".to_string(),
-                "memythos/room/sendInput".to_string(),
-                "memythos/room/send".to_string(),
-                "memythos/thread/consolidate".to_string(),
-                "memythos/thread/contract/assemble".to_string(),
-                "memythos/room/contract/emit".to_string(),
-                "memythos/thread/contract/read".to_string(),
-                "memythos/room/contract/get".to_string(),
-                "memythos/thread/contract/list".to_string(),
-                "memythos/arena/state/get".to_string(),
-                "memythos/arena/phase/close".to_string(),
-                "memythos/arena/run".to_string(),
-                "memythos/telemetry/list".to_string(),
-            ],
-            active_layers: state.layers.len(),
-            active_arenas: state.arenas.len(),
-            active_thread_attachments: state.thread_attachments.len(),
-            telemetry_ref_count: state.telemetry_refs.len(),
-            degraded_reasons: state.degraded_reasons.clone(),
-        }
-        .into())
+        Ok(runtime_health_response(&state).into())
     }
 
     pub(crate) async fn runtime_close(
@@ -1739,20 +1686,8 @@ impl MemythosRequestProcessor {
         params: MemythosRuntimeCloseParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let mut state = self.state.lock().await;
-        if params.force {
-            state.lifecycle_state = MemythosRuntimeLifecycleState::ClosedDegraded;
-            state.degraded_reasons.push(
-                params
-                    .reason
-                    .unwrap_or_else(|| "runtime was force closed by request".to_string()),
-            );
-        } else {
-            state.lifecycle_state = MemythosRuntimeLifecycleState::ClosedCleanly;
-        }
-        let runtime_id = state.runtime_id.clone();
-        let lifecycle_state = state.lifecycle_state;
-        let degraded_reasons = state.degraded_reasons.clone();
-        let closed_cleanly = lifecycle_state == MemythosRuntimeLifecycleState::ClosedCleanly;
+        let response = close_runtime(&mut state, params);
+        let lifecycle_state = response.lifecycle_state;
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::RuntimeState,
@@ -1765,14 +1700,7 @@ impl MemythosRequestProcessor {
             MemythosEventChannel::StateTransition,
             format!("Runtime closed with state {lifecycle_state:?}."),
         );
-
-        Ok(MemythosRuntimeCloseResponse {
-            runtime_id,
-            lifecycle_state,
-            closed_cleanly,
-            degraded_reasons,
-        }
-        .into())
+        Ok(response.into())
     }
 
     pub(crate) async fn layer_create(
@@ -1780,23 +1708,8 @@ impl MemythosRequestProcessor {
         params: MemythosLayerCreateParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let mut state = self.state.lock().await;
-        if let Some(parent_layer_id) = params.parent_layer_id.as_deref() {
-            if !state.layers.contains_key(parent_layer_id) {
-                return Err(invalid_params(format!(
-                    "unknown parent layer id: {parent_layer_id}"
-                )));
-            }
-        }
-
         let layer_id = self.next_id("mem_layer", &self.next_layer_id);
-        let layer = MemythosLayer {
-            layer_id: layer_id.clone(),
-            name: params.name,
-            kind: params.kind,
-            parent_layer_id: params.parent_layer_id,
-            objective: params.objective,
-        };
-        state.layers.insert(layer_id, layer.clone());
+        let layer = create_layer(&mut state, params, layer_id)?;
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::LayerState,
@@ -1818,10 +1731,10 @@ impl MemythosRequestProcessor {
         _params: MemythosLayerListParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let state = self.state.lock().await;
-        let mut layers: Vec<_> = state.layers.values().cloned().collect();
-        layers.sort_by(|a, b| a.layer_id.cmp(&b.layer_id));
-
-        Ok(MemythosLayerListResponse { layers }.into())
+        Ok(MemythosLayerListResponse {
+            layers: sorted_layers(&state),
+        }
+        .into())
     }
 
     pub(crate) async fn arena_create(
@@ -1829,30 +1742,8 @@ impl MemythosRequestProcessor {
         params: MemythosArenaCreateParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let mut state = self.state.lock().await;
-        if !state.layers.contains_key(&params.layer_id) {
-            return Err(invalid_params(format!(
-                "unknown layer id: {}",
-                params.layer_id
-            )));
-        }
-
         let arena_id = self.next_id("mem_arena", &self.next_arena_id);
-        let arena = MemythosArena {
-            arena_id: arena_id.clone(),
-            layer_id: params.layer_id,
-            name: params.name,
-            kind: params.kind,
-            lifecycle_state: MemythosArenaLifecycleState::Draft,
-            objective: params.objective,
-            participant_ids: params.participant_ids,
-        };
-        state.arena_lifecycles.insert(
-            arena_id.clone(),
-            NativeArenaState::new(arena_id.clone()).map_err(|error| {
-                invalid_params(format!("failed to initialize native arena state: {error}"))
-            })?,
-        );
-        state.arenas.insert(arena_id, arena.clone());
+        let arena = create_arena(&mut state, params, arena_id)?;
         self.push_telemetry_ref(
             &mut state,
             MemythosTelemetryRefKind::ArenaState,
@@ -1875,20 +1766,10 @@ impl MemythosRequestProcessor {
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         self.ensure_arena_state_restored().await?;
         let state = self.state.lock().await;
-        let mut arenas: Vec<_> = state
-            .arenas
-            .values()
-            .filter(|arena| {
-                params
-                    .layer_id
-                    .as_ref()
-                    .map_or(true, |layer_id| &arena.layer_id == layer_id)
-            })
-            .cloned()
-            .collect();
-        arenas.sort_by(|a, b| a.arena_id.cmp(&b.arena_id));
-
-        Ok(MemythosArenaListResponse { arenas }.into())
+        Ok(MemythosArenaListResponse {
+            arenas: sorted_arenas(&state, params.layer_id.as_deref()),
+        }
+        .into())
     }
 
     pub(crate) async fn arena_request(
