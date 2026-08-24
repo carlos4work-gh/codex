@@ -144,6 +144,12 @@ jobs:
           cargo test -p codex-app-server parent_continuity_tracks_multiple_receiver_turns
           cargo test -p codex-app-server parent_continuity_is_verified_with_goal_snapshot_and_completed_turn
 
+      - name: Memythos aggregate checkpoint boundary
+        run: |
+          cargo test -p codex-app-server aggregate_then_trigger_queues_until_expected_sources_are_complete
+          cargo test -p codex-app-server aggregate_then_trigger_does_not_count_duplicate_messages
+          cargo test -p codex-app-server autonomous_bet_aggregate_applies_the_native_judge_contract
+
       - name: Legacy Memythos migration upgrade
         run: cargo test -p codex-state upgrades_legacy_memythos_migrations_without_checksum_conflicts
 

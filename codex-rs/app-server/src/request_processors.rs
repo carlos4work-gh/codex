@@ -549,6 +549,7 @@ mod marketplace_processor;
 mod mcp_processor;
 mod memythos_activity;
 mod memythos_arena_state;
+mod memythos_checkpoint;
 mod memythos_closure;
 mod memythos_composition;
 mod memythos_composition_planning;
