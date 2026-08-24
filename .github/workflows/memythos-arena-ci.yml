@@ -313,6 +313,7 @@ jobs:
           cargo test -p codex-app-server-protocol arena_snapshot_restore_failure_kinds_use_stable_public_values
           cargo test -p codex-app-server canonical_arena_restores_from_ootb_state_without_replanning
           cargo test -p codex-app-server arena_restore_rejects_a_corrupt_batch_without_partial_state
+          cargo test -p codex-app-server arena_restore_recovers_after_state_db_dependency_returns
 
       - name: Arena SIGKILL recovery boundary
         run: |

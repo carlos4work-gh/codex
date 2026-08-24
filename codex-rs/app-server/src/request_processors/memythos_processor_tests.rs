@@ -3480,6 +3480,132 @@ async fn arena_restore_rejects_a_corrupt_batch_without_partial_state() {
     .await;
 }
 
+#[tokio::test]
+async fn arena_restore_recovers_after_state_db_dependency_returns() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let sqlite = codex_state::SqliteConfig::new_for_testing(
+        AbsolutePathBuf::try_from(codex_home.path().to_path_buf())
+            .expect("absolute temporary Codex home"),
+    );
+    let state_db = codex_state::StateRuntime::init(sqlite.clone(), "test-provider".to_string())
+        .await
+        .expect("initialize OOTB app-server state");
+    let participant_thread_ids = HashMap::from([
+        (
+            "concierge".to_string(),
+            "00000000-0000-4000-8000-000000000690".to_string(),
+        ),
+        (
+            "bettor-growth".to_string(),
+            "00000000-0000-4000-8000-000000000691".to_string(),
+        ),
+        (
+            "bettor-risk".to_string(),
+            "00000000-0000-4000-8000-000000000692".to_string(),
+        ),
+        (
+            "judge".to_string(),
+            "00000000-0000-4000-8000-000000000693".to_string(),
+        ),
+    ]);
+    for thread_id in participant_thread_ids.values() {
+        let thread_id = ThreadId::from_string(thread_id).expect("valid parent thread id");
+        let mut metadata = codex_state::ThreadMetadataBuilder::new(
+            thread_id,
+            codex_home
+                .path()
+                .join("sessions")
+                .join(format!("{thread_id}.jsonl")),
+            Utc::now(),
+            codex_protocol::protocol::SessionSource::Cli,
+        );
+        metadata.cwd = codex_home.path().to_path_buf();
+        state_db
+            .upsert_thread(&metadata.build("test-provider"))
+            .await
+            .expect("persist OOTB parent thread");
+    }
+    let provisioning = Arc::new(FakeArenaParentProvisioningAdapter {
+        thread_ids: participant_thread_ids.clone(),
+        ..Default::default()
+    });
+    let roles_by_thread_id = HashMap::from([
+        (
+            participant_thread_ids["concierge"].clone(),
+            "room_concierge".to_string(),
+        ),
+        (
+            participant_thread_ids["bettor-growth"].clone(),
+            "bettor".to_string(),
+        ),
+        (
+            participant_thread_ids["bettor-risk"].clone(),
+            "bettor".to_string(),
+        ),
+        (participant_thread_ids["judge"].clone(), "judge".to_string()),
+    ]);
+    let make_processor = |state_db: Arc<codex_state::StateRuntime>| {
+        MemythosRequestProcessor::new_for_transport_with_native_adapters_and_state_db(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(MappedParentConfigurationAdapter {
+                roles: roles_by_thread_id.clone(),
+            }),
+            provisioning.clone(),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+            Some(state_db),
+        )
+    };
+
+    let first_process = make_processor(state_db.clone());
+    first_process
+        .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+        .await
+        .expect("persist a valid canonical Arena snapshot");
+    drop(first_process);
+
+    state_db.close().await;
+    let unavailable_process = make_processor(state_db);
+    let unavailable = unavailable_process
+        .restore_arena_coordination_snapshots()
+        .await
+        .expect_err("closed OOTB state DB must pause restore");
+    assert_eq!(
+        unavailable.data,
+        Some(serde_json::json!({
+            "reason": "arenaSnapshotRestore",
+            "kind": "dependencyMissing",
+        }))
+    );
+    let unavailable_state = unavailable_process.state.lock().await;
+    assert!(unavailable_state.arenas.is_empty());
+    assert!(unavailable_state.arena_lifecycles.is_empty());
+    assert!(unavailable_state.restored_coordination_snapshots.is_empty());
+    drop(unavailable_state);
+    drop(unavailable_process);
+
+    let recovered_state_db = codex_state::StateRuntime::init(sqlite, "test-provider".to_string())
+        .await
+        .expect("reopen OOTB app-server state");
+    let recovered_process = make_processor(recovered_state_db);
+    recovered_process
+        .arena_state_get(MemythosArenaStateGetParams {
+            arena_id: "arena-composition".to_string(),
+        })
+        .await
+        .expect("restore the same Arena after the state DB dependency returns");
+    let recovered_state = recovered_process.state.lock().await;
+    assert!(recovered_state.arenas.contains_key("arena-composition"));
+    assert!(
+        recovered_state
+            .restored_coordination_snapshots
+            .contains_key("arena-composition")
+    );
+}
+
 #[test]
 fn arena_intake_makes_app_server_the_only_activation_authority() {
     let params = semantic_arena_request_params();
