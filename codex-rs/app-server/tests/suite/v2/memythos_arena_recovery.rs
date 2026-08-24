@@ -960,6 +960,142 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
 }
 
 #[tokio::test]
+async fn arena_mailbox_quarantine_pauses_only_its_own_room() -> Result<()> {
+    const ISOLATED_ARENA_ID: &str = "arena-isolation-healthy";
+    const ISOLATED_ROOM_ID: &str = "room-isolation-healthy";
+    const HEALTHY_MARKER: &str = "INDEPENDENT_ARENA_MUST_CONTINUE";
+
+    let model_server = create_mock_responses_server_repeating_assistant("isolated recovery").await;
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml(
+        codex_home.path(),
+        &model_server.uri(),
+        &BTreeMap::new(),
+        1024,
+        None,
+        "mock_provider",
+        "compact",
+    )?;
+    write_arena_role_catalog(&codex_home)?;
+
+    let mut first_process = start_app_server(&codex_home).await?;
+    timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
+    let blocked_arena = provision_arena(&mut first_process).await?;
+    start_proposal_phase(&mut first_process).await?;
+
+    let mut isolated_params = competitive_composition_params();
+    isolated_params.case_id = "case-isolation-healthy".to_string();
+    isolated_params.room_id = ISOLATED_ROOM_ID.to_string();
+    isolated_params.contract.arena_id = ISOLATED_ARENA_ID.to_string();
+    let healthy_arena = provision_arena_with_params(&mut first_process, isolated_params).await?;
+    start_proposal_phase_for(&mut first_process, ISOLATED_ARENA_ID).await?;
+
+    let blocked_concierge = blocked_arena
+        .leases
+        .iter()
+        .find(|lease| lease.role == "room_concierge")
+        .expect("blocked Arena has Concierge");
+    let blocked_bettor = blocked_arena
+        .leases
+        .iter()
+        .find(|lease| lease.role == "bettor")
+        .expect("blocked Arena has bettor");
+    let poison = queued_proposal_message(
+        "message-isolated-quarantine",
+        &blocked_concierge.thread_id,
+        &blocked_bettor.thread_id,
+    );
+    assert_eq!(
+        send_arena_message(&mut first_process, poison).await?.status,
+        "queued_in_native_mailbox"
+    );
+    assert_eq!(first_process.sigkill().await?.signal(), Some(9));
+    drop(first_process);
+
+    let state_db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    for attempt in 1..=4 {
+        state_db
+            .claim_native_mailbox_communication_for_recovery(
+                &blocked_bettor.thread_id,
+                "message-isolated-quarantine",
+                3,
+                now + attempt,
+            )
+            .await?;
+    }
+    drop(state_db);
+
+    let mut process = start_app_server(&codex_home).await?;
+    timeout(RESPONSE_TIMEOUT, process.initialize()).await??;
+    let blocked_activity = room_activity(&mut process, &blocked_arena.room.room_id).await?;
+    assert_eq!(blocked_activity.lifecycle.room_state, "recoverable_pause");
+    assert_eq!(blocked_activity.blockers.len(), 1);
+    let healthy_activity = room_activity(&mut process, ISOLATED_ROOM_ID).await?;
+    assert_eq!(healthy_activity.lifecycle.room_state, "running");
+    assert!(healthy_activity.blockers.is_empty());
+
+    let blocked_request = process
+        .send_memythos_arena_message_request(MemythosArenaMessageSendParams {
+            message: triggered_proposal_message(
+                "message-blocked-during-pause",
+                &blocked_concierge.thread_id,
+                &blocked_bettor.thread_id,
+            ),
+        })
+        .await?;
+    let blocked_error = timeout(
+        RESPONSE_TIMEOUT,
+        process.read_stream_until_error_message(RequestId::Integer(blocked_request)),
+    )
+    .await??;
+    assert!(blocked_error.error.message.contains("recoverable_pause"));
+
+    let healthy_concierge = healthy_arena
+        .leases
+        .iter()
+        .find(|lease| lease.role == "room_concierge")
+        .expect("healthy Arena has Concierge");
+    let healthy_bettor = healthy_arena
+        .leases
+        .iter()
+        .find(|lease| lease.role == "bettor")
+        .expect("healthy Arena has bettor");
+    resume_native_thread(&mut process, &healthy_bettor.thread_id).await?;
+    let mut healthy_message = triggered_proposal_message(
+        "message-independent-arena",
+        &healthy_concierge.thread_id,
+        &healthy_bettor.thread_id,
+    );
+    healthy_message.case_id = "case-isolation-healthy".to_string();
+    healthy_message.arena_id = ISOLATED_ARENA_ID.to_string();
+    healthy_message.context_packet_ref =
+        "app-server://arena-isolation-healthy/context/proposal".to_string();
+    healthy_message.execution_prompt = Some(HEALTHY_MARKER.to_string());
+    let delivered = send_arena_message(&mut process, healthy_message).await?;
+    assert_eq!(delivered.status, "delivered_to_native_mailbox_turn");
+    let completed = wait_for_turn_completed(&mut process).await?;
+    assert_eq!(completed.thread_id, healthy_bettor.thread_id);
+    let requests = model_server
+        .received_requests()
+        .await
+        .expect("healthy Arena turn reaches model");
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .body_json::<serde_json::Value>()?
+            .to_string()
+            .contains(HEALTHY_MARKER)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Result<()> {
     const SKIP_MARKER: &str = "QUARANTINED_SKIP_MUST_NOT_RUN";
     const ABORT_MARKER: &str = "QUARANTINED_ABORT_MUST_NOT_RUN";
@@ -1477,8 +1613,15 @@ async fn arena_terminal_turn_reconciles_after_sigkill_without_duplicate_turn() -
 async fn provision_arena(
     server: &mut TestAppServer,
 ) -> Result<MemythosArenaCompositionProvisionResponse> {
+    provision_arena_with_params(server, competitive_composition_params()).await
+}
+
+async fn provision_arena_with_params(
+    server: &mut TestAppServer,
+    params: MemythosArenaCompositionProvisionParams,
+) -> Result<MemythosArenaCompositionProvisionResponse> {
     let provision_id = server
-        .send_memythos_arena_composition_provision_request(competitive_composition_params())
+        .send_memythos_arena_composition_provision_request(params)
         .await?;
     let response: JSONRPCResponse = timeout(
         RESPONSE_TIMEOUT,
@@ -1489,9 +1632,13 @@ async fn provision_arena(
 }
 
 async fn start_proposal_phase(server: &mut TestAppServer) -> Result<()> {
+    start_proposal_phase_for(server, "arena-sigkill").await
+}
+
+async fn start_proposal_phase_for(server: &mut TestAppServer, arena_id: &str) -> Result<()> {
     let phase_id = server
         .send_memythos_arena_phase_start_request(MemythosArenaPhaseStartParams {
-            arena_id: "arena-sigkill".to_string(),
+            arena_id: arena_id.to_string(),
             round_id: "round-1".to_string(),
             phase: "proposal".to_string(),
         })

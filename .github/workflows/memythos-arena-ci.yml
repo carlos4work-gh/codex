@@ -315,7 +315,9 @@ jobs:
           cargo test -p codex-app-server --test all arena_staged_mailbox_effect_materializes_once_with_native_submission_id
 
       - name: Native mailbox quarantine, Concierge pause, resolution, and live retry
-        run: cargo test -p codex-app-server --test all arena_mailbox_crash_loop_quarantines_poison_payload_and_warns
+        run: |
+          cargo test -p codex-app-server --test all arena_mailbox_crash_loop_quarantines_poison_payload_and_warns
+          cargo test -p codex-app-server --test all arena_mailbox_quarantine_pauses_only_its_own_room
 
       - name: Native mailbox multi-blocker pause, contention, audit, and health
         run: |
