@@ -45,6 +45,67 @@ pub(crate) struct PlannedArenaResume {
     pub(super) assessment: MemythosArenaResumeAssessment,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ArenaCompositionPlanningContractError {
+    MissingPlannerRef(&'static str),
+    ArenaMismatch,
+    InvalidResumeAssessment(String),
+}
+
+impl std::fmt::Display for ArenaCompositionPlanningContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingPlannerRef(reference) => {
+                write!(formatter, "planning result is missing {reference}")
+            }
+            Self::ArenaMismatch => {
+                formatter.write_str("planned contract does not belong to requested arena")
+            }
+            Self::InvalidResumeAssessment(message) => {
+                write!(formatter, "resume assessment is invalid: {message}")
+            }
+        }
+    }
+}
+
+fn validate_planner_refs(
+    planner_thread_id: &str,
+    planner_turn_id: &str,
+) -> Result<(), ArenaCompositionPlanningContractError> {
+    if planner_thread_id.trim().is_empty() {
+        return Err(ArenaCompositionPlanningContractError::MissingPlannerRef(
+            "planner thread id",
+        ));
+    }
+    if planner_turn_id.trim().is_empty() {
+        return Err(ArenaCompositionPlanningContractError::MissingPlannerRef(
+            "planner turn id",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_planned_arena_composition(
+    params: &MemythosArenaRequestParams,
+    planned: &PlannedArenaComposition,
+) -> Result<(), ArenaCompositionPlanningContractError> {
+    validate_planner_refs(&planned.planner_thread_id, &planned.planner_turn_id)?;
+    if planned.contract.arena_id != params.arena_id {
+        return Err(ArenaCompositionPlanningContractError::ArenaMismatch);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_planned_arena_resume(
+    previous: &MemythosArenaCompositionProvisionResponse,
+    planned: &PlannedArenaResume,
+) -> Result<(), ArenaCompositionPlanningContractError> {
+    validate_planner_refs(&planned.planner_thread_id, &planned.planner_turn_id)?;
+    validate_native_resume_assessment(&planned.assessment, previous).map_err(|error| {
+        ArenaCompositionPlanningContractError::InvalidResumeAssessment(error.message)
+    })
+}
+
 pub(crate) type ArenaCompositionPlanningFuture<'a> =
     Pin<Box<dyn Future<Output = Result<PlannedArenaComposition, JSONRPCErrorError>> + Send + 'a>>;
 pub(crate) type ArenaResumePlanningFuture<'a> =
@@ -807,5 +868,27 @@ impl ArenaCompositionPlanningAdapter for NativeArenaCompositionPlanningAdapter {
             self.assess_resume_native(params, previous, connection_id)
                 .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn planner_evidence_contract_requires_both_ootb_refs() {
+        assert_eq!(validate_planner_refs("thread-1", "turn-1"), Ok(()));
+        assert_eq!(
+            validate_planner_refs("", "turn-1"),
+            Err(ArenaCompositionPlanningContractError::MissingPlannerRef(
+                "planner thread id"
+            ))
+        );
+        assert_eq!(
+            validate_planner_refs("thread-1", "  "),
+            Err(ArenaCompositionPlanningContractError::MissingPlannerRef(
+                "planner turn id"
+            ))
+        );
     }
 }

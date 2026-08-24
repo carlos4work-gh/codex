@@ -38,11 +38,16 @@ impl MemythosRequestProcessor {
             state.arena_compositions.get(&params.arena_id).cloned()
         };
         let resume = if let Some(previous) = previous.as_ref() {
-            Some(
-                self.arena_composition_planning_adapter
-                    .assess_resume(&params, previous, connection_id)
-                    .await?,
-            )
+            let planned = self
+                .arena_composition_planning_adapter
+                .assess_resume(&params, previous, connection_id)
+                .await?;
+            validate_planned_arena_resume(previous, &planned).map_err(|error| {
+                invalid_params(format!(
+                    "composition planning adapter contract rejected: {error}"
+                ))
+            })?;
+            Some(planned)
         } else {
             None
         };
@@ -82,12 +87,11 @@ impl MemythosRequestProcessor {
                     .arena_composition_planning_adapter
                     .plan(&params, previous.as_ref(), connection_id)
                     .await?;
-                if planned.contract.arena_id != params.arena_id {
-                    return Err(invalid_params(format!(
-                        "native planner returned arena id {} for requested arena {}",
-                        planned.contract.arena_id, params.arena_id
-                    )));
-                }
+                validate_planned_arena_composition(&params, &planned).map_err(|error| {
+                    invalid_params(format!(
+                        "composition planning adapter contract rejected: {error}"
+                    ))
+                })?;
                 validate_planned_arena_cost_context(&params, &planned.contract)?;
                 let mut revision_params = params.clone();
                 if revision_params.composition_change_signal.is_none()

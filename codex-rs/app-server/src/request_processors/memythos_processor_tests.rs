@@ -722,6 +722,10 @@ struct FakeArenaCompositionPlanningAdapter {
     contract: MemythosArenaCompositionContract,
 }
 
+struct MissingPlannerEvidencePlanningAdapter {
+    contract: MemythosArenaCompositionContract,
+}
+
 struct ExpandingArenaCompositionPlanningAdapter {
     initial_contract: MemythosArenaCompositionContract,
     expanded_contract: MemythosArenaCompositionContract,
@@ -835,6 +839,24 @@ impl ArenaCompositionPlanningAdapter for FakeArenaCompositionPlanningAdapter {
                         },
                     }
                 },
+            })
+        })
+    }
+}
+
+impl ArenaCompositionPlanningAdapter for MissingPlannerEvidencePlanningAdapter {
+    fn plan<'a>(
+        &'a self,
+        _params: &'a MemythosArenaRequestParams,
+        _previous: Option<&'a MemythosArenaCompositionProvisionResponse>,
+        _connection_id: ConnectionId,
+    ) -> ArenaCompositionPlanningFuture<'a> {
+        let contract = self.contract.clone();
+        Box::pin(async move {
+            Ok(PlannedArenaComposition {
+                planner_thread_id: String::new(),
+                planner_turn_id: "planner-turn".to_string(),
+                contract,
             })
         })
     }
@@ -2520,6 +2542,32 @@ fn arena_composition_rejects_effort_incompatible_with_active_parent_toolset() {
         assert!(error.message.contains(effort.as_str()));
         assert!(error.message.contains("active arena parent toolset"));
     }
+}
+
+#[tokio::test]
+async fn arena_request_rejects_missing_planner_evidence_before_provisioning() {
+    let contract = competitive_composition_params().contract;
+    let provisioning = Arc::new(FakeArenaParentProvisioningAdapter::default());
+    let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+        AppServerRpcTransport::InProcess,
+        Arc::new(FakeLivePeerParentDeliveryAdapter),
+        Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+        Arc::new(RecordOnlyThreadConsolidationAdapter),
+        Arc::new(RecordOnlyParentTurnResponseAdapter),
+        Arc::new(CompositionParentConfigurationAdapter),
+        provisioning.clone(),
+        Arc::new(MissingPlannerEvidencePlanningAdapter { contract }),
+    );
+
+    let error = processor
+        .arena_request(semantic_arena_request_params(), ConnectionId(7))
+        .await
+        .expect_err("planner output without OOTB evidence must be rejected");
+
+    assert!(error.message.contains("planning adapter contract rejected"));
+    assert!(error.message.contains("planner thread id"));
+    assert!(provisioning.goals.lock().await.is_empty());
+    assert!(processor.state.lock().await.arena_compositions.is_empty());
 }
 
 #[tokio::test]
