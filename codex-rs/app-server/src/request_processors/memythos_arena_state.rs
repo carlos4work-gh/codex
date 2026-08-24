@@ -133,15 +133,19 @@ impl NativeArenaState {
         command: ArenaCommand,
     ) -> Result<ArenaEvent, ArenaDomainError> {
         let (kind, round_id, phase) = self.decide(&command)?;
-        self.apply(kind, round_id.as_deref(), phase.as_deref());
-        self.sequence += 1;
-        Ok(ArenaEvent {
-            sequence: self.sequence,
+        let mut next = self.clone();
+        next.apply(kind, round_id.as_deref(), phase.as_deref());
+        next.sequence += 1;
+        next.validate_invariants()?;
+        let event = ArenaEvent {
+            sequence: next.sequence,
             kind,
-            arena_id: self.arena_id.clone(),
+            arena_id: next.arena_id.clone(),
             round_id,
             phase,
-        })
+        };
+        *self = next;
+        Ok(event)
     }
 
     pub(crate) fn protocol_state(&self) -> MemythosArenaLifecycleState {
@@ -226,14 +230,16 @@ impl NativeArenaState {
             }
         }
 
-        Ok(Self {
+        let restored = Self {
             arena_id: snapshot.arena_id,
             status: snapshot.status,
             active_round_id: snapshot.active_round_id,
             active_phase: snapshot.active_phase,
             completed_phases,
             sequence: snapshot.sequence,
-        })
+        };
+        restored.validate_invariants()?;
+        Ok(restored)
     }
 
     #[cfg(test)]
@@ -321,6 +327,33 @@ impl NativeArenaState {
         }
     }
 
+    fn validate_invariants(&self) -> Result<(), ArenaDomainError> {
+        let has_active_phase = self.active_round_id.is_some() || self.active_phase.is_some();
+        if has_active_phase && !matches!(self.status, NativeArenaStatus::Active) {
+            return Err(ArenaDomainError::new(format!(
+                "arena {} status {:?} cannot retain an active phase",
+                self.arena_id, self.status
+            )));
+        }
+        if self.active_round_id.is_some() != self.active_phase.is_some() {
+            return Err(ArenaDomainError::new(format!(
+                "arena {} requires active round and phase together",
+                self.arena_id
+            )));
+        }
+        if let (Some(round_id), Some(phase)) = (&self.active_round_id, &self.active_phase)
+            && self
+                .completed_phases
+                .contains(&(round_id.clone(), phase.clone()))
+        {
+            return Err(ArenaDomainError::new(format!(
+                "arena {} cannot keep completed phase {round_id}/{phase} active",
+                self.arena_id
+            )));
+        }
+        Ok(())
+    }
+
     fn apply(&mut self, kind: ArenaEventKind, round_id: Option<&str>, phase: Option<&str>) {
         match kind {
             ArenaEventKind::Activated => self.status = NativeArenaStatus::Active,
@@ -339,9 +372,7 @@ impl NativeArenaState {
                 self.active_round_id = None;
                 self.active_phase = None;
             }
-            ArenaEventKind::PhaseCloseRetained => {
-                self.status = NativeArenaStatus::PhaseComplete;
-            }
+            ArenaEventKind::PhaseCloseRetained => {}
             ArenaEventKind::AwaitingParent => {
                 self.status = NativeArenaStatus::AwaitingParent;
                 self.active_round_id = None;
@@ -523,5 +554,94 @@ mod tests {
             state.protocol_state(),
             MemythosArenaLifecycleState::ClosedCleanly
         );
+    }
+
+    #[test]
+    fn accepted_command_sequences_remain_valid_and_rejected_commands_are_atomic() {
+        let commands = vec![
+            ArenaCommand::Activate,
+            ArenaCommand::StartPhase {
+                round_id: "round-1".to_string(),
+                phase: "proposal".to_string(),
+            },
+            ArenaCommand::ClosePhase {
+                round_id: "round-1".to_string(),
+                phase: "proposal".to_string(),
+            },
+            ArenaCommand::StartPhase {
+                round_id: "round-1".to_string(),
+                phase: "bet".to_string(),
+            },
+            ArenaCommand::ClosePhase {
+                round_id: "round-1".to_string(),
+                phase: "bet".to_string(),
+            },
+            ArenaCommand::AwaitParent,
+            ArenaCommand::CloseCleanly,
+        ];
+        let mut frontier = vec![NativeArenaState::new("arena-property").unwrap()];
+
+        for _ in 0..6 {
+            let mut next_frontier = Vec::new();
+            let mut seen_snapshots = HashSet::new();
+            for state in frontier {
+                for command in &commands {
+                    let mut candidate = state.clone();
+                    let before = candidate.clone();
+                    match candidate.transition(command.clone()) {
+                        Ok(event) => {
+                            assert_eq!(event.sequence, before.sequence + 1);
+                            assert_eq!(event.arena_id, "arena-property");
+                            let restored = NativeArenaState::restore_protocol_snapshot(
+                                candidate.protocol_snapshot(),
+                            )
+                            .expect("every accepted state must restore");
+                            assert_eq!(restored, candidate);
+                            let snapshot_key =
+                                serde_json::to_string(&candidate.protocol_snapshot()).unwrap();
+                            if seen_snapshots.insert(snapshot_key) {
+                                next_frontier.push(candidate);
+                            }
+                        }
+                        Err(_) => assert_eq!(candidate, before),
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+    }
+
+    #[test]
+    fn retained_close_does_not_corrupt_a_new_active_phase() {
+        let mut state = NativeArenaState::new("arena-1").unwrap();
+        state
+            .transition(ArenaCommand::StartPhase {
+                round_id: "round-1".to_string(),
+                phase: "proposal".to_string(),
+            })
+            .unwrap();
+        state
+            .transition(ArenaCommand::ClosePhase {
+                round_id: "round-1".to_string(),
+                phase: "proposal".to_string(),
+            })
+            .unwrap();
+        state
+            .transition(ArenaCommand::StartPhase {
+                round_id: "round-1".to_string(),
+                phase: "bet".to_string(),
+            })
+            .unwrap();
+
+        let event = state
+            .transition(ArenaCommand::ClosePhase {
+                round_id: "round-1".to_string(),
+                phase: "proposal".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(event.kind, ArenaEventKind::PhaseCloseRetained);
+        assert_eq!(state.status, NativeArenaStatus::Active);
+        assert_eq!(state.active_phase(), Some("bet"));
     }
 }
