@@ -77,7 +77,8 @@ async fn start_app_server(codex_home: &TempDir) -> Result<TestAppServer> {
 
 #[tokio::test]
 async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents() -> Result<()> {
-    let model_server = create_mock_responses_server_repeating_assistant("unused").await;
+    let model_server =
+        create_mock_responses_server_repeating_assistant("aggregate activation resumed").await;
     let codex_home = TempDir::new()?;
     write_mock_responses_config_toml(
         codex_home.path(),
@@ -188,7 +189,7 @@ async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents()
 }
 
 #[tokio::test]
-async fn arena_planned_mailbox_effect_resumes_after_sigkill_without_caller_retry() -> Result<()> {
+async fn arena_sealed_aggregate_activation_resumes_after_sigkill_once() -> Result<()> {
     const MESSAGE_ID: &str = "pending-effect-before-sigkill";
     const PAYLOAD: &str = "PENDING_EFFECT_PAYLOAD_BEFORE_SIGKILL";
     let model_server = create_mock_responses_server_repeating_assistant("unused").await;
@@ -224,7 +225,7 @@ async fn arena_planned_mailbox_effect_resumes_after_sigkill_without_caller_retry
         AgentPath::root(),
         Vec::new(),
         PAYLOAD.to_string(),
-        false,
+        true,
     );
     communication.id = Some(ResponseItemId::from_server(MESSAGE_ID.to_string()));
     let communication_json = serde_json::to_string(&communication)?;
@@ -287,10 +288,38 @@ async fn arena_planned_mailbox_effect_resumes_after_sigkill_without_caller_retry
         "round_id": "round-1",
         "message_kind": "peer_proposal",
         "to_parent_role": "bettor",
-        "requires_response": false,
-        "delivery_policy": "queue_only",
-        "aggregate_contract": null,
-        "prepared_aggregate_state": null
+        "requires_response": true,
+        "delivery_policy": "aggregate_then_trigger",
+        "aggregate_contract": {
+            "aggregateId": "recovery-aggregate-1",
+            "recipientThreadId": bettor.thread_id,
+            "expectedSourceThreadIds": [concierge.thread_id],
+            "quorum": 1,
+            "phaseId": "proposal",
+            "deadlineRef": null,
+            "completionCriteriaRef": "criteria://recovery-aggregate-1",
+            "lateArrivalPolicy": "reject"
+        },
+        "prepared_aggregate_state": "ready_by_expected_sources"
+    }]);
+    snapshot_json["aggregates"] = serde_json::json!([{
+        "key": "arena-sigkill::round-1::recovery-aggregate-1",
+        "contract": {
+            "aggregateId": "recovery-aggregate-1",
+            "recipientThreadId": bettor.thread_id,
+            "expectedSourceThreadIds": [concierge.thread_id],
+            "quorum": 1,
+            "phaseId": "proposal",
+            "deadlineRef": null,
+            "completionCriteriaRef": "criteria://recovery-aggregate-1",
+            "lateArrivalPolicy": "reject"
+        },
+        "state": "ready_by_expected_sources",
+        "received_source_thread_ids": [concierge.thread_id],
+        "received_message_ids": [MESSAGE_ID],
+        "trigger_message_id": MESSAGE_ID,
+        "checkpoint_state": "checkpoint_sealed",
+        "checkpoint_history": ["phase_open", "checkpoint_ready", "checkpoint_sealed"]
     }]);
     snapshot.snapshot_json = serde_json::to_string(&snapshot_json)?;
     snapshot.last_event_hash = format!("{:x}", Sha256::digest(snapshot.snapshot_json.as_bytes()));
@@ -307,8 +336,16 @@ async fn arena_planned_mailbox_effect_resumes_after_sigkill_without_caller_retry
         .iter()
         .find(|delivery| delivery.message_id == MESSAGE_ID)
         .expect("pending effect must become an Arena delivery without caller retry");
-    assert_eq!(delivery.status, "queued_in_native_mailbox");
+    assert_eq!(delivery.status, "delivered_to_native_mailbox_turn");
     assert_eq!(delivery.delivery_id, "mem_delivery_9001");
+    assert_eq!(
+        delivery.aggregate_state,
+        Some(codex_app_server_protocol::MemythosArenaAggregateState::RecipientTriggered)
+    );
+    assert_eq!(
+        delivery.receiver_turn_id.as_deref(),
+        Some(planned_submission_id.as_str())
+    );
     assert_eq!(
         restored
             .deliveries
@@ -317,11 +354,17 @@ async fn arena_planned_mailbox_effect_resumes_after_sigkill_without_caller_retry
             .count(),
         1
     );
+    let completed = wait_for_turn_completed(&mut restarted_process).await?;
+    assert_eq!(completed.turn.id, planned_submission_id);
+    assert_eq!(
+        read_native_turn_ids(&mut restarted_process, &bettor.thread_id).await?,
+        vec![planned_submission_id.clone()]
+    );
     let active = state_db
         .get_native_mailbox_communication(&bettor.thread_id, MESSAGE_ID)
         .await?
         .expect("restore must adopt the active mailbox record");
-    assert_eq!(active.status, "pending");
+    assert_eq!(active.status, "consumed");
     assert_eq!(
         active.submission_id.as_deref(),
         Some(planned_submission_id.as_str())
