@@ -388,7 +388,8 @@ impl MemythosRequestProcessor {
                     .collect::<HashMap<_, _>>()
             })
             .unwrap_or_default();
-        let mut provisioned_parents = Vec::with_capacity(params.contract.participants.len());
+        let mut provisioned_parents: Vec<ProvisionedArenaParent> =
+            Vec::with_capacity(params.contract.participants.len());
         for participant in &params.contract.participants {
             let reusable_thread_id = reusable_threads
                 .get(&participant.participant_id)
@@ -398,7 +399,31 @@ impl MemythosRequestProcessor {
                 .provision_parent(&params, participant, reusable_thread_id, connection_id)
                 .await
             {
-                Ok(parent) => provisioned_parents.push(parent),
+                Ok(parent) => {
+                    if let Err(contract_error) =
+                        validate_provisioned_arena_parent(participant, reusable_thread_id, &parent)
+                    {
+                        if parent.newly_created && !parent.thread_id.is_empty() {
+                            let _ = self
+                                .arena_parent_provisioning_adapter
+                                .rollback_parent(&parent.thread_id)
+                                .await;
+                        }
+                        for previous in provisioned_parents
+                            .iter()
+                            .filter(|previous| previous.newly_created)
+                        {
+                            let _ = self
+                                .arena_parent_provisioning_adapter
+                                .rollback_parent(&previous.thread_id)
+                                .await;
+                        }
+                        return Err(invalid_params(format!(
+                            "parent provisioning adapter contract rejected: {contract_error}"
+                        )));
+                    }
+                    provisioned_parents.push(parent);
+                }
                 Err(error) => {
                     for parent in provisioned_parents
                         .iter()

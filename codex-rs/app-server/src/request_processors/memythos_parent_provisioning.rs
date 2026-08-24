@@ -35,6 +35,82 @@ pub(crate) struct ProvisionedArenaParent {
     pub(super) newly_created: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ArenaParentProvisioningContractError {
+    ParticipantMismatch,
+    MissingField(&'static str),
+    ThreadMismatch,
+    GoalNotPaused,
+    GoalObjectiveMismatch,
+    ReuseDispositionMismatch,
+    ForeignGoalRef,
+}
+
+impl std::fmt::Display for ArenaParentProvisioningContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ParticipantMismatch => {
+                formatter.write_str("provisioned participant does not match request")
+            }
+            Self::MissingField(field) => write!(formatter, "provisioned parent is missing {field}"),
+            Self::ThreadMismatch => {
+                formatter.write_str("goal thread does not match provisioned thread")
+            }
+            Self::GoalNotPaused => {
+                formatter.write_str("newly provisioned parent goal must be paused")
+            }
+            Self::GoalObjectiveMismatch => formatter
+                .write_str("parent goal objective does not match participant role objective"),
+            Self::ReuseDispositionMismatch => formatter
+                .write_str("create/reuse disposition does not match reusable thread request"),
+            Self::ForeignGoalRef => {
+                formatter.write_str("goal ref does not belong to provisioned thread")
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_provisioned_arena_parent(
+    participant: &codex_app_server_protocol::MemythosArenaCompositionParticipant,
+    reusable_thread_id: Option<&str>,
+    parent: &ProvisionedArenaParent,
+) -> Result<(), ArenaParentProvisioningContractError> {
+    if parent.participant_id != participant.participant_id {
+        return Err(ArenaParentProvisioningContractError::ParticipantMismatch);
+    }
+    for (field, value) in [
+        ("thread id", parent.thread_id.as_str()),
+        ("goal ref", parent.goal_ref.as_str()),
+        ("lease id", parent.lease_id.as_str()),
+        ("lease source", parent.lease_source.as_str()),
+        ("memory scope", parent.memory_scope.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(ArenaParentProvisioningContractError::MissingField(field));
+        }
+    }
+    if parent.goal.thread_id != parent.thread_id {
+        return Err(ArenaParentProvisioningContractError::ThreadMismatch);
+    }
+    if parent.goal.status != ThreadGoalStatus::Paused {
+        return Err(ArenaParentProvisioningContractError::GoalNotPaused);
+    }
+    if parent.goal.objective != participant.role_objective {
+        return Err(ArenaParentProvisioningContractError::GoalObjectiveMismatch);
+    }
+    if parent.newly_created != reusable_thread_id.is_none()
+        || reusable_thread_id.is_some_and(|thread_id| thread_id != parent.thread_id)
+    {
+        return Err(ArenaParentProvisioningContractError::ReuseDispositionMismatch);
+    }
+    let goal_base = format!("app-server://threads/{}/", parent.thread_id);
+    let goal_path = parent.goal_ref.strip_prefix(&goal_base);
+    if !goal_path.is_some_and(|path| path == "goal" || path.starts_with("goals/")) {
+        return Err(ArenaParentProvisioningContractError::ForeignGoalRef);
+    }
+    Ok(())
+}
+
 pub(crate) type ArenaParentProvisionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ProvisionedArenaParent, JSONRPCErrorError>> + Send + 'a>>;
 pub(crate) type ArenaParentGoalTransitionFuture<'a> =
@@ -358,4 +434,87 @@ pub(super) fn validate_reusable_parent_identity(
         native_arena_parent_identity_version(params),
         native_arena_parent_identity_sha256(params, participant),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::openai_models::ReasoningEffort;
+
+    fn participant() -> codex_app_server_protocol::MemythosArenaCompositionParticipant {
+        codex_app_server_protocol::MemythosArenaCompositionParticipant {
+            participant_id: "bettor-risk".to_string(),
+            agent_role: "explorer".to_string(),
+            stance: "risk".to_string(),
+            authority_scope: vec!["analysis".to_string()],
+            role_objective: "assess risk".to_string(),
+            expected_contribution: "risk delta".to_string(),
+            exit_condition: "risk assessed".to_string(),
+            effort_intent: "bounded".to_string(),
+            reasoning_effort: ReasoningEffort::Low,
+            token_budget: Some(1_000),
+        }
+    }
+
+    fn parent(thread_id: &str, newly_created: bool) -> ProvisionedArenaParent {
+        ProvisionedArenaParent {
+            participant_id: "bettor-risk".to_string(),
+            thread_id: thread_id.to_string(),
+            goal_ref: format!("app-server://threads/{thread_id}/goal"),
+            lease_id: format!("lease::{thread_id}"),
+            lease_source: if newly_created { "created" } else { "reused" }.to_string(),
+            memory_scope: "case:1:arena:1".to_string(),
+            goal: ThreadGoal {
+                thread_id: thread_id.to_string(),
+                objective: "assess risk".to_string(),
+                status: ThreadGoalStatus::Paused,
+                token_budget: Some(1_000),
+                tokens_used: 0,
+                time_used_seconds: 0,
+                created_at: 1,
+                updated_at: 1,
+            },
+            newly_created,
+        }
+    }
+
+    #[test]
+    fn contract_accepts_created_and_reused_parent_results() {
+        let participant = participant();
+        let created = parent("thread-created", true);
+        assert_eq!(
+            validate_provisioned_arena_parent(&participant, None, &created),
+            Ok(())
+        );
+
+        let reused = parent("thread-reused", false);
+        assert_eq!(
+            validate_provisioned_arena_parent(&participant, Some("thread-reused"), &reused,),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn contract_rejects_cross_thread_goal_or_reuse_disposition() {
+        let participant = participant();
+        let mut invalid_parent = parent("thread-a", true);
+        invalid_parent.goal.thread_id = "thread-b".to_string();
+        assert_eq!(
+            validate_provisioned_arena_parent(&participant, None, &invalid_parent),
+            Err(ArenaParentProvisioningContractError::ThreadMismatch)
+        );
+
+        let created_parent = parent("thread-a", true);
+        assert_eq!(
+            validate_provisioned_arena_parent(&participant, Some("thread-a"), &created_parent,),
+            Err(ArenaParentProvisioningContractError::ReuseDispositionMismatch)
+        );
+
+        let mut parent = parent("thread-a", true);
+        parent.goal_ref = "app-server://threads/thread-a/goal-malformed".to_string();
+        assert_eq!(
+            validate_provisioned_arena_parent(&participant, None, &parent),
+            Err(ArenaParentProvisioningContractError::ForeignGoalRef)
+        );
+    }
 }

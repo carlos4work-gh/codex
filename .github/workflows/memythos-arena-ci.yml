@@ -234,6 +234,7 @@ jobs:
 
       - name: Memythos native parent provisioning boundary
         run: |
+          cargo test -p codex-app-server memythos_parent_provisioning::tests
           cargo test -p codex-app-server native_parent_setup_
           cargo test -p codex-app-server reusable_parent_
           cargo test -p codex-app-server arena_composition_provisions_
