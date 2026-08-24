@@ -698,24 +698,9 @@ impl MemythosRequestProcessor {
                 params.arena_id
             )));
         }
-        let lifecycle_state = state
-            .arena_lifecycles
-            .get_mut(&params.arena_id)
-            .ok_or_else(|| {
-                invalid_params(format!(
-                    "arena {} has no canonical native lifecycle",
-                    params.arena_id
-                ))
-            })?
-            .transition(ArenaCommand::Activate)
-            .map_err(|error| invalid_params(error.to_string()))
-            .map(|_| {
-                state
-                    .arena_lifecycles
-                    .get(&params.arena_id)
-                    .expect("arena lifecycle exists after activation")
-                    .protocol_state()
-            })?;
+        let (_, lifecycle_state) = state
+            .transition_arena_lifecycle(&params.arena_id, ArenaCommand::Activate)
+            .map_err(|error| invalid_params(error.to_string()))?;
         let arena = state
             .arenas
             .get_mut(&params.arena_id)
@@ -1078,15 +1063,9 @@ impl MemythosRequestProcessor {
                 phase: phase.clone(),
             }
         };
-        let lifecycle = state.arena_lifecycles.get_mut(&arena_id).ok_or_else(|| {
-            invalid_params(format!(
-                "arena {arena_id} has no canonical native lifecycle"
-            ))
-        })?;
-        let event = lifecycle
-            .transition(command)
+        let (event, lifecycle_state) = state
+            .transition_arena_lifecycle(&arena_id, command)
             .map_err(|error| invalid_params(error.to_string()))?;
-        let lifecycle_state = lifecycle.protocol_state();
         let arena = state
             .arenas
             .get_mut(&arena_id)

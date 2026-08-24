@@ -200,24 +200,9 @@ impl MemythosRequestProcessor {
                 resume_assessment.resume_execution_plan.clone(),
             );
             if resume_assessment.disposition == MemythosArenaResumeDisposition::PartialResume {
-                let lifecycle_state = state
-                    .arena_lifecycles
-                    .get_mut(&params.arena_id)
-                    .ok_or_else(|| {
-                        invalid_params(format!(
-                            "arena {} has no canonical native lifecycle",
-                            params.arena_id
-                        ))
-                    })?
-                    .transition(ArenaCommand::Activate)
-                    .map_err(|error| invalid_params(error.to_string()))
-                    .map(|_| {
-                        state
-                            .arena_lifecycles
-                            .get(&params.arena_id)
-                            .expect("arena lifecycle exists after resume activation")
-                            .protocol_state()
-                    })?;
+                let (_, lifecycle_state) = state
+                    .transition_arena_lifecycle(&params.arena_id, ArenaCommand::Activate)
+                    .map_err(|error| invalid_params(error.to_string()))?;
                 if let Some(arena) = state.arenas.get_mut(&params.arena_id) {
                     arena.lifecycle_state = lifecycle_state;
                 }
@@ -611,7 +596,7 @@ impl MemythosRequestProcessor {
 
         // Commit the validated composition as one state mutation. No partial room is observable.
         let mut state = self.state.lock().await;
-        let native_lifecycle = state
+        state
             .arena_lifecycles
             .entry(params.contract.arena_id.clone())
             .or_insert(
@@ -619,10 +604,9 @@ impl MemythosRequestProcessor {
                     invalid_params(format!("failed to initialize native arena state: {error}"))
                 })?,
             );
-        let lifecycle_event = native_lifecycle
-            .transition(ArenaCommand::Activate)
+        let (lifecycle_event, arena_lifecycle_state) = state
+            .transition_arena_lifecycle(&params.contract.arena_id, ArenaCommand::Activate)
             .map_err(|error| invalid_params(error.to_string()))?;
-        let arena_lifecycle_state = native_lifecycle.protocol_state();
         state
             .thread_attachments
             .retain(|_, attachment| attachment.arena_id != params.contract.arena_id);

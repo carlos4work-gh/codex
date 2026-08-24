@@ -10,6 +10,7 @@ use codex_app_server_protocol::MemythosArenaCompositionLease;
 use codex_app_server_protocol::MemythosArenaCompositionLifecycleState;
 use codex_app_server_protocol::MemythosArenaCompositionProvisionResponse;
 use codex_app_server_protocol::MemythosArenaDeliveryPolicy;
+use codex_app_server_protocol::MemythosArenaLifecycleState;
 use codex_app_server_protocol::MemythosArenaMessage;
 use codex_app_server_protocol::MemythosArenaMessageDelivery;
 use codex_app_server_protocol::MemythosArenaParent;
@@ -26,6 +27,9 @@ use codex_app_server_protocol::MemythosTurnUsageAttribution;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::request_processors::memythos_arena_state::ArenaCommand;
+use crate::request_processors::memythos_arena_state::ArenaDomainError;
+use crate::request_processors::memythos_arena_state::ArenaEvent;
 use crate::request_processors::memythos_arena_state::NativeArenaProtocolSnapshot;
 use crate::request_processors::memythos_arena_state::NativeArenaState;
 use crate::request_processors::memythos_parent_response::ParentTurnResponse;
@@ -58,6 +62,22 @@ pub(super) struct MemythosRuntimeState {
     pub(super) native_thread_usage_totals: HashMap<String, MemythosTokenUsageBreakdown>,
     pub(super) native_turn_usage: HashMap<String, MemythosTurnUsageAttribution>,
     pub(super) telemetry_refs: Vec<MemythosTelemetryRef>,
+}
+
+impl MemythosRuntimeState {
+    pub(super) fn transition_arena_lifecycle(
+        &mut self,
+        arena_id: &str,
+        command: ArenaCommand,
+    ) -> Result<(ArenaEvent, MemythosArenaLifecycleState), ArenaDomainError> {
+        let lifecycle = self.arena_lifecycles.get_mut(arena_id).ok_or_else(|| {
+            ArenaDomainError::new(format!(
+                "arena {arena_id} has no canonical native lifecycle"
+            ))
+        })?;
+        let event = lifecycle.transition(command)?;
+        Ok((event, lifecycle.protocol_state()))
+    }
 }
 
 pub(super) const ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;

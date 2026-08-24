@@ -291,7 +291,9 @@ jobs:
         run: cargo test -p codex-app-server-protocol memythos_mailbox_quarantine_methods_deserialize
 
       - name: Canonical Rust state reducer
-        run: cargo test -p codex-app-server memythos_arena_state::tests
+        run: |
+          cargo test -p codex-app-server memythos_arena_state::tests
+          bash scripts/memythos/arena-transition-authority-gate.sh
 
       - name: Requester disconnect regression
         run: cargo test -p codex-app-server arena_request_state_survives_the_request_connection_boundary

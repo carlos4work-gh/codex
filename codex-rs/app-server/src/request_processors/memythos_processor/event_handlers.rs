@@ -415,12 +415,10 @@ impl MemythosRequestProcessor {
                 ),
             ),
         };
-        let native_lifecycle = state
-            .arena_lifecycles
-            .get_mut(&candidate.arena_id)
-            .expect("terminal arena candidate requires canonical native lifecycle");
-        let lifecycle_event = match native_lifecycle.transition(command) {
-            Ok(event) => event,
+        let (lifecycle_event, arena_state) = match state
+            .transition_arena_lifecycle(&candidate.arena_id, command)
+        {
+            Ok(result) => result,
             Err(error) => {
                 warn!(
                     arena_id = candidate.arena_id,
@@ -430,7 +428,6 @@ impl MemythosRequestProcessor {
                 return;
             }
         };
-        let arena_state = native_lifecycle.protocol_state();
         if let Some(arena) = state.arenas.get_mut(&candidate.arena_id) {
             arena.lifecycle_state = arena_state;
         }
