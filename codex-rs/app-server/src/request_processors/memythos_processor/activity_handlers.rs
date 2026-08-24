@@ -5,9 +5,11 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosRoomActivityListParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let (
             room,
             arena_lifecycle_state,
+            recovery_blockers,
             mut deliveries,
             room_activity_events,
             token_usage_refs,
@@ -65,9 +67,15 @@ impl MemythosRequestProcessor {
                 .arenas
                 .get(&room.arena_id)
                 .map(|arena| arena.lifecycle_state);
+            let recovery_blockers = state
+                .arena_recovery_blockers
+                .get(&room.arena_id)
+                .cloned()
+                .unwrap_or_default();
             (
                 room,
                 arena_lifecycle_state,
+                recovery_blockers,
                 deliveries,
                 room_activity_events,
                 token_usage_refs,
@@ -82,6 +90,11 @@ impl MemythosRequestProcessor {
             deliveries.truncate(limit);
         }
         let mut blockers = Vec::new();
+        blockers.extend(
+            recovery_blockers
+                .iter()
+                .map(|blocker| blocker.event_ref.clone()),
+        );
         let requested_cursor = params
             .after_cursor
             .clone()
@@ -324,7 +337,9 @@ impl MemythosRequestProcessor {
             participants,
             turns,
             lifecycle: MemythosRoomActivityLifecycle {
-                room_state: if clean_close {
+                room_state: if !recovery_blockers.is_empty() {
+                    "recoverable_pause".to_string()
+                } else if clean_close {
                     "round_closed".to_string()
                 } else if awaiting_parent {
                     "awaiting_parent".to_string()

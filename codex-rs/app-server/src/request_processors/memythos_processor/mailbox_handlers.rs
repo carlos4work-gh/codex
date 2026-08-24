@@ -70,6 +70,7 @@ impl MemythosRequestProcessor {
         &self,
         params: MemythosMailboxQuarantineResolveParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
+        self.ensure_arena_state_restored().await?;
         let state_db = self
             .arena_state_db
             .as_ref()
@@ -194,6 +195,7 @@ impl MemythosRequestProcessor {
             &live_reenqueue_status,
             resolution_started.elapsed(),
         );
+        self.reconcile_mailbox_recovery_blockers().await?;
         Ok(MemythosMailboxQuarantineResolveResponse {
             receiver_thread_id: outcome.receiver_thread_id,
             communication_id: outcome.communication_id,

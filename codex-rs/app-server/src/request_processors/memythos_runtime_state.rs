@@ -52,6 +52,7 @@ pub(super) struct MemythosRuntimeState {
     pub(super) arena_parents: HashMap<String, MemythosArenaParent>,
     pub(super) arena_compositions: HashMap<String, MemythosArenaCompositionProvisionResponse>,
     pub(super) restored_coordination_snapshots: HashMap<String, PersistedArenaCoordinationSnapshot>,
+    pub(super) arena_recovery_blockers: HashMap<String, Vec<PersistedArenaRecoveryBlocker>>,
     pub(super) arena_pending_effects: HashMap<String, PersistedArenaPendingEffect>,
     pub(super) arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
     pub(super) arena_messages: HashMap<String, MemythosArenaMessage>,
@@ -98,7 +99,8 @@ impl MemythosRuntimeState {
 }
 
 pub(super) const LEGACY_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
-pub(super) const ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub(super) const PREVIOUS_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub(super) const ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,8 +116,18 @@ pub(super) struct PersistedArenaCoordinationSnapshot {
     pub(super) leases: Vec<MemythosArenaCompositionLease>,
     #[serde(default)]
     pub(super) pending_effects: Vec<PersistedArenaPendingEffect>,
+    #[serde(default)]
+    pub(super) recovery_blockers: Vec<PersistedArenaRecoveryBlocker>,
     pub(super) deliveries: Vec<PersistedArenaDeliveryCheckpoint>,
     pub(super) aggregates: Vec<PersistedArenaAggregateCheckpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PersistedArenaRecoveryBlocker {
+    pub(super) event_ref: String,
+    pub(super) communication_id: String,
+    pub(super) receiver_thread_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

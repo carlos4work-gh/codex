@@ -3078,7 +3078,7 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
             .snapshot_json
             .contains("next_action")
     );
-    assert_eq!(persisted_before_restart.schema_version, 2);
+    assert_eq!(persisted_before_restart.schema_version, 3);
     let mut legacy_snapshot: serde_json::Value =
         serde_json::from_str(&persisted_before_restart.snapshot_json)
             .expect("decode current coordination snapshot");
@@ -3087,6 +3087,10 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
         .as_object_mut()
         .expect("coordination snapshot object")
         .remove("pending_effects");
+    legacy_snapshot
+        .as_object_mut()
+        .expect("coordination snapshot object")
+        .remove("recovery_blockers");
     persisted_before_restart.schema_version = 1;
     persisted_before_restart.snapshot_json =
         serde_json::to_string(&legacy_snapshot).expect("encode legacy coordination snapshot");
@@ -3165,7 +3169,7 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
         .await
         .expect("read advanced Arena")
         .expect("advanced Arena snapshot exists");
-    assert_eq!(persisted_after_restart.schema_version, 2);
+    assert_eq!(persisted_after_restart.schema_version, 3);
     assert!(
         persisted_after_restart
             .snapshot_json

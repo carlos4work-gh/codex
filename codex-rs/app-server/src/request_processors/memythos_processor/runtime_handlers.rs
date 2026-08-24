@@ -19,7 +19,8 @@ impl MemythosRequestProcessor {
                     .map_err(|error| error.message)
             })
             .await;
-        terminal_result.clone().map_err(invalid_params)
+        terminal_result.clone().map_err(invalid_params)?;
+        self.reconcile_mailbox_recovery_blockers().await
     }
 
     async fn reconcile_native_terminal_turns(&self) -> Result<(), JSONRPCErrorError> {
@@ -83,6 +84,7 @@ impl MemythosRequestProcessor {
                 u32::try_from(record.schema_version).ok(),
                 Some(
                     LEGACY_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
+                        | PREVIOUS_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
                         | ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
                 )
             ) {
@@ -207,9 +209,32 @@ impl MemythosRequestProcessor {
             validated_snapshots.push((record, snapshot, lifecycle, arena));
         }
 
+        let quarantined = state_db
+            .list_quarantined_native_mailbox_communications(None)
+            .await
+            .map_err(|error| {
+                invalid_params(format!(
+                    "failed to reconcile Arena mailbox quarantine: {error}"
+                ))
+            })?;
+        let quarantined_keys = quarantined
+            .iter()
+            .map(|record| {
+                (
+                    record.receiver_thread_id.clone(),
+                    record.communication_id.clone(),
+                )
+            })
+            .collect::<HashSet<_>>();
         let mut reconciled_effects = Vec::new();
         for (_, snapshot, _, _) in &validated_snapshots {
             for pending in &snapshot.pending_effects {
+                if quarantined_keys.contains(&(
+                    pending.receiver_thread_id.clone(),
+                    pending.communication_id.clone(),
+                )) {
+                    continue;
+                }
                 let message = pending_effect_message(pending);
                 let effect = PeerParentStagedEffect {
                     communication_id: pending.communication_id.clone(),
@@ -247,7 +272,9 @@ impl MemythosRequestProcessor {
                 self.next_delivery_id
                     .fetch_max(max_delivery_id, std::sync::atomic::Ordering::Relaxed);
             }
-            state.arenas.insert(record.arena_id.clone(), arena);
+            let arena_id = record.arena_id.clone();
+            let recovery_blockers = snapshot.recovery_blockers.clone();
+            state.arenas.insert(arena_id.clone(), arena);
             state
                 .arena_lifecycles
                 .insert(record.arena_id.clone(), lifecycle);
@@ -286,7 +313,10 @@ impl MemythosRequestProcessor {
             }
             state
                 .restored_coordination_snapshots
-                .insert(record.arena_id, snapshot);
+                .insert(arena_id.clone(), snapshot);
+            state
+                .arena_recovery_blockers
+                .insert(arena_id, recovery_blockers);
         }
         let mut reconciled_arena_ids = HashSet::new();
         for (pending, message, attempt) in reconciled_effects {
@@ -336,6 +366,154 @@ impl MemythosRequestProcessor {
         }
         drop(state);
         for arena_id in reconciled_arena_ids {
+            self.persist_arena_coordination_snapshot(&arena_id).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn reconcile_mailbox_recovery_blockers(
+        &self,
+    ) -> Result<(), JSONRPCErrorError> {
+        let Some(state_db) = self.arena_state_db.as_ref() else {
+            return Ok(());
+        };
+        let quarantined = state_db
+            .list_quarantined_native_mailbox_communications(None)
+            .await
+            .map_err(|error| {
+                invalid_params(format!(
+                    "failed to reconcile Arena mailbox quarantine: {error}"
+                ))
+            })?;
+        let mut changed_arena_ids = Vec::new();
+        let mut state = self.state.lock().await;
+        let rooms = state.rooms.values().cloned().collect::<Vec<_>>();
+        for room in rooms {
+            let message_refs = state
+                .arena_pending_effects
+                .values()
+                .filter(|effect| effect.arena_id == room.arena_id)
+                .map(|effect| {
+                    (
+                        effect.receiver_thread_id.clone(),
+                        effect.communication_id.clone(),
+                    )
+                })
+                .chain(
+                    state
+                        .arena_message_deliveries
+                        .iter()
+                        .filter(|delivery| delivery.arena_id == room.arena_id)
+                        .map(|delivery| {
+                            (
+                                delivery.receiver_thread_id.clone(),
+                                delivery.message_id.clone(),
+                            )
+                        }),
+                )
+                .collect::<HashSet<_>>();
+            let mut current = quarantined
+                .iter()
+                .filter(|record| {
+                    message_refs.contains(&(
+                        record.receiver_thread_id.clone(),
+                        record.communication_id.clone(),
+                    ))
+                })
+                .map(|record| PersistedArenaRecoveryBlocker {
+                    event_ref: mailbox_quarantine_event_ref(
+                        &record.receiver_thread_id,
+                        &record.communication_id,
+                    ),
+                    communication_id: record.communication_id.clone(),
+                    receiver_thread_id: record.receiver_thread_id.clone(),
+                })
+                .collect::<Vec<_>>();
+            current.sort_by(|left, right| left.event_ref.cmp(&right.event_ref));
+            let previous = state
+                .arena_recovery_blockers
+                .get(&room.arena_id)
+                .cloned()
+                .unwrap_or_default();
+            if previous != current {
+                state
+                    .arena_recovery_blockers
+                    .insert(room.arena_id.clone(), current.clone());
+                changed_arena_ids.push(room.arena_id.clone());
+            }
+            let concierge = room
+                .participants
+                .iter()
+                .find(|participant| participant.parent_role == "room_concierge")
+                .cloned();
+            for blocker in &current {
+                let already_projected =
+                    state
+                        .room_activity_events
+                        .get(&room.room_id)
+                        .is_some_and(|events| {
+                            events
+                                .iter()
+                                .any(|event| event.source_ref.as_ref() == Some(&blocker.event_ref))
+                        });
+                if already_projected {
+                    continue;
+                }
+                let record = quarantined.iter().find(|record| {
+                    record.receiver_thread_id == blocker.receiver_thread_id
+                        && record.communication_id == blocker.communication_id
+                });
+                let reason = record
+                    .and_then(|record| record.quarantine_reason.as_deref())
+                    .unwrap_or("automatic recovery budget exhausted");
+                let attempts = record.map_or(0, |record| record.attempt_count);
+                let (thread_id, recipient) = concierge.as_ref().map_or_else(
+                    || {
+                        (
+                            "room_concierge".to_string(),
+                            runtime_room_concierge_actor_ref(),
+                        )
+                    },
+                    |participant| {
+                        (
+                            participant.thread_id.clone(),
+                            room_actor_ref_for_participant(participant),
+                        )
+                    },
+                );
+                self.push_room_activity_event(
+                    &mut state,
+                    room.room_id.clone(),
+                    room.arena_id.clone(),
+                    thread_id,
+                    None,
+                    None,
+                    None,
+                    "room_concierge".to_string(),
+                    app_server_actor_ref(),
+                    recipient,
+                    "mailbox_recovery_incident".to_string(),
+                    MemythosPromptOrigin::AppServerProtocol,
+                    vec![MemythosPromptLineagePart {
+                        origin: MemythosPromptOrigin::AppServerProtocol,
+                        summary: "durable native mailbox quarantine projection".to_string(),
+                        source_ref: Some(blocker.event_ref.clone()),
+                    }],
+                    "technical_detail",
+                    "mailbox_quarantined",
+                    "blocked",
+                    format!(
+                        "Room paused: {} to {}. Actions: retry, skip, replace, abort. Attempts: {}. Reason: {reason}.",
+                        blocker.communication_id, blocker.receiver_thread_id, attempts,
+                    ),
+                    Some(blocker.event_ref.clone()),
+                );
+            }
+        }
+        drop(state);
+        changed_arena_ids.sort();
+        changed_arena_ids.dedup();
+        for arena_id in changed_arena_ids {
             self.persist_arena_coordination_snapshot(&arena_id).await?;
         }
         Ok(())
@@ -393,6 +571,11 @@ impl MemythosRequestProcessor {
                     composition_lifecycle_state: composition.lifecycle_state,
                     leases: composition.leases.clone(),
                     pending_effects,
+                    recovery_blockers: state
+                        .arena_recovery_blockers
+                        .get(arena_id)
+                        .cloned()
+                        .unwrap_or_default(),
                     deliveries,
                     aggregates,
                 }
@@ -409,6 +592,11 @@ impl MemythosRequestProcessor {
                 restored.protocol = protocol;
                 restored.schema_version = ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION;
                 restored.pending_effects = pending_effects;
+                restored.recovery_blockers = state
+                    .arena_recovery_blockers
+                    .get(arena_id)
+                    .cloned()
+                    .unwrap_or_default();
                 restored.deliveries = deliveries;
                 restored.aggregates = aggregates;
                 restored
@@ -606,6 +794,10 @@ impl MemythosRequestProcessor {
         );
         Ok(response.into())
     }
+}
+
+fn mailbox_quarantine_event_ref(receiver_thread_id: &str, communication_id: &str) -> String {
+    format!("app-server://native-mailbox/{receiver_thread_id}/{communication_id}/quarantine")
 }
 
 fn pending_effect_message(pending: &PersistedArenaPendingEffect) -> MemythosArenaMessage {

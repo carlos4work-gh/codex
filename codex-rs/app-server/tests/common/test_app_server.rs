@@ -71,6 +71,7 @@ use codex_app_server_protocol::MemythosMailboxQuarantineListParams;
 use codex_app_server_protocol::MemythosMailboxQuarantineResolveParams;
 use codex_app_server_protocol::MemythosMailboxResolutionGetParams;
 use codex_app_server_protocol::MemythosMailboxResolutionListParams;
+use codex_app_server_protocol::MemythosRoomActivityListParams;
 use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelProviderCapabilitiesReadParams;
@@ -607,6 +608,17 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         self.send_request(
             "memythos/mailbox/quarantine/resolution/get",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
+    pub async fn send_memythos_room_activity_list_request(
+        &mut self,
+        params: MemythosRoomActivityListParams,
+    ) -> anyhow::Result<i64> {
+        self.send_request(
+            "memythos/room/activity/list",
             Some(serde_json::to_value(params)?),
         )
         .await

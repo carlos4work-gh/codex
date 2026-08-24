@@ -589,6 +589,7 @@ impl MemythosRequestProcessor {
                 arena_parents: HashMap::new(),
                 arena_compositions: HashMap::new(),
                 restored_coordination_snapshots: HashMap::new(),
+                arena_recovery_blockers: HashMap::new(),
                 arena_pending_effects: HashMap::new(),
                 arena_message_deliveries: Vec::new(),
                 arena_messages: HashMap::new(),
@@ -878,6 +879,16 @@ impl MemythosRequestProcessor {
                     delivery: delivery.clone(),
                 }
                 .into());
+            }
+            if !state
+                .arena_recovery_blockers
+                .get(&message.arena_id)
+                .map_or(true, Vec::is_empty)
+            {
+                return Err(invalid_params(format!(
+                    "Arena {} is in recoverable_pause until its durable mailbox blockers are resolved",
+                    message.arena_id
+                )));
             }
         }
         let (layer_id, aggregate_state, target_reasoning_effort) = {
