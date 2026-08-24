@@ -323,7 +323,7 @@ jobs:
           cargo test -p codex-app-server --test all arena_mailbox_terminal_resolutions_and_replace_survive_restart
 
       - name: Arena turn acknowledgement after SIGKILL
-        run: cargo test -p codex-app-server --test all arena_completed_turn_ack_survives_sigkill_without_duplicate_turn
+        run: cargo test -p codex-app-server --test all arena_terminal_turn_reconciles_after_sigkill_without_duplicate_turn
 
       - name: Full Memythos Arena recovery regression
         run: cargo test -p codex-app-server --test all v2::memythos_arena_recovery

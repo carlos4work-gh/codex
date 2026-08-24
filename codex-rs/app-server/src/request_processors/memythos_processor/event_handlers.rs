@@ -44,6 +44,28 @@ impl MemythosRequestProcessor {
             warn!(error = %error.message, "failed to restore Arena state before turn completion");
             return false;
         }
+        self.record_native_turn_completed_restored(
+            thread_id,
+            turn_id,
+            status,
+            completed_at,
+            duration_ms,
+            failure_reason,
+            last_agent_message,
+        )
+        .await
+    }
+
+    pub(super) async fn record_native_turn_completed_restored(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        status: &str,
+        completed_at: Option<i64>,
+        duration_ms: Option<i64>,
+        failure_reason: Option<String>,
+        last_agent_message: Option<String>,
+    ) -> bool {
         let (matched_delivery, arena_id, loopbacks, completed_delivery_message_ids) = {
             let mut state = self.state.lock().await;
             let Some((layer_id, arena_id)) = find_attachment_context(&state, thread_id) else {
@@ -231,7 +253,7 @@ impl MemythosRequestProcessor {
 
         for loopback_message in loopbacks {
             if let Err(error) = self
-                .arena_message_send(MemythosArenaMessageSendParams {
+                .arena_message_send_restored(MemythosArenaMessageSendParams {
                     message: loopback_message,
                 })
                 .await

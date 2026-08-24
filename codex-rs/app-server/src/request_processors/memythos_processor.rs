@@ -453,6 +453,7 @@ pub(crate) struct MemythosRequestProcessor {
     state: Arc<Mutex<MemythosRuntimeState>>,
     arena_state_db: Option<StateDbHandle>,
     arena_restore_result: Arc<OnceCell<Result<(), String>>>,
+    arena_terminal_recovery_result: Arc<OnceCell<Result<(), String>>>,
     peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
     parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
     thread_consolidation_adapter: Arc<dyn ThreadConsolidationAdapter>,
@@ -603,6 +604,7 @@ impl MemythosRequestProcessor {
             })),
             arena_state_db,
             arena_restore_result: Arc::new(OnceCell::new()),
+            arena_terminal_recovery_result: Arc::new(OnceCell::new()),
             peer_parent_delivery_adapter,
             parent_goal_snapshot_adapter,
             thread_consolidation_adapter,
@@ -859,6 +861,13 @@ impl MemythosRequestProcessor {
         params: MemythosArenaMessageSendParams,
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         self.ensure_arena_state_restored().await?;
+        self.arena_message_send_restored(params).await
+    }
+
+    async fn arena_message_send_restored(
+        &self,
+        params: MemythosArenaMessageSendParams,
+    ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         let mut message = params.message;
         {
             let state = self.state.lock().await;

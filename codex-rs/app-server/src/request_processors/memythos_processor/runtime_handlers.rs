@@ -10,7 +10,59 @@ impl MemythosRequestProcessor {
                     .map_err(|error| error.message)
             })
             .await;
-        result.clone().map_err(invalid_params)
+        result.clone().map_err(invalid_params)?;
+        let terminal_result = self
+            .arena_terminal_recovery_result
+            .get_or_init(|| async {
+                self.reconcile_native_terminal_turns()
+                    .await
+                    .map_err(|error| error.message)
+            })
+            .await;
+        terminal_result.clone().map_err(invalid_params)
+    }
+
+    async fn reconcile_native_terminal_turns(&self) -> Result<(), JSONRPCErrorError> {
+        let turns = {
+            let state = self.state.lock().await;
+            state
+                .arena_message_deliveries
+                .iter()
+                .filter(|delivery| !delivery.status.starts_with("receiver_turn_"))
+                .filter_map(|delivery| {
+                    delivery
+                        .receiver_turn_id
+                        .as_ref()
+                        .map(|turn_id| (delivery.receiver_thread_id.clone(), turn_id.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        let responses = self
+            .parent_turn_response_adapter
+            .read_responses(turns)
+            .await;
+        for ((thread_id, turn_id), response) in responses {
+            let Some(status) = response.status else {
+                continue;
+            };
+            let status = match status {
+                TurnStatus::Completed => "completed",
+                TurnStatus::Failed => "failed",
+                TurnStatus::Interrupted => "interrupted",
+                TurnStatus::InProgress => continue,
+            };
+            self.record_native_turn_completed_restored(
+                &thread_id,
+                &turn_id,
+                status,
+                None,
+                None,
+                None,
+                response.text,
+            )
+            .await;
+        }
+        Ok(())
     }
 
     pub(super) async fn restore_arena_coordination_snapshots(

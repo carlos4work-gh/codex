@@ -1274,7 +1274,7 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
 }
 
 #[tokio::test]
-async fn arena_completed_turn_ack_survives_sigkill_without_duplicate_turn() -> Result<()> {
+async fn arena_terminal_turn_reconciles_after_sigkill_without_duplicate_turn() -> Result<()> {
     let model_server = create_mock_responses_server_repeating_assistant("proposal complete").await;
     let codex_home = TempDir::new()?;
     write_mock_responses_config_toml(
@@ -1332,6 +1332,28 @@ async fn arena_completed_turn_ack_survives_sigkill_without_duplicate_turn() -> R
         vec![receiver_turn_id.clone()]
     );
 
+    let state_db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let mut snapshot = state_db
+        .get_arena_snapshot("arena-sigkill")
+        .await?
+        .expect("acknowledged Arena snapshot");
+    let mut snapshot_json: serde_json::Value = serde_json::from_str(&snapshot.snapshot_json)?;
+    let checkpoint = snapshot_json["deliveries"]
+        .as_array_mut()
+        .expect("delivery checkpoints")
+        .iter_mut()
+        .find(|delivery| delivery["message_id"] == message.message_id)
+        .expect("completed delivery checkpoint");
+    checkpoint["status"] = serde_json::json!("delivered_to_native_mailbox_turn");
+    checkpoint["receiver_response_event_ref"] = serde_json::Value::Null;
+    snapshot.snapshot_json = serde_json::to_string(&snapshot_json)?;
+    snapshot.last_event_hash = format!("{:x}", Sha256::digest(snapshot.snapshot_json.as_bytes()));
+    state_db.upsert_arena_snapshot(&snapshot).await?;
+
     let killed = first_process.sigkill().await?;
     assert_eq!(killed.signal(), Some(9), "app-server must exit by SIGKILL");
     drop(first_process);
@@ -1343,7 +1365,7 @@ async fn arena_completed_turn_ack_survives_sigkill_without_duplicate_turn() -> R
         .deliveries
         .iter()
         .find(|delivery| delivery.message_id == message.message_id)
-        .expect("completed delivery checkpoint must be restored");
+        .expect("terminal OOTB turn must repair the stale Arena checkpoint");
     assert_eq!(restored_delivery.status, "receiver_turn_completed");
     assert_eq!(
         restored_delivery.receiver_turn_id.as_deref(),
