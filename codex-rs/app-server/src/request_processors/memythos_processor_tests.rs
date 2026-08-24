@@ -7733,8 +7733,8 @@ async fn canonical_arena_lifecycle_is_owned_by_rust_across_rpc_calls() {
         panic!("expected MemythosArenaPhaseStart response");
     };
     assert!(
-        retained_start.event_refs[0].contains("start-retained?sequence=2"),
-        "repeating the RPC must retain the canonical phase"
+        retained_start.event_refs[0].contains("started?sequence=1"),
+        "repeating the RPC must return the originally confirmed transition"
     );
 
     let concurrent = processor
@@ -7773,8 +7773,8 @@ async fn canonical_arena_lifecycle_is_owned_by_rust_across_rpc_calls() {
         panic!("expected MemythosArenaPhaseClose response");
     };
     assert!(
-        retained_close.event_refs[0].contains("close-retained?sequence=4"),
-        "repeating close must not duplicate the transition"
+        retained_close.event_refs[0].contains("closed?sequence=2"),
+        "repeating close must return the originally confirmed transition"
     );
 
     processor

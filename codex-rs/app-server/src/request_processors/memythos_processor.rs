@@ -178,6 +178,7 @@ use crate::outgoing_message::ConnectionId;
 use crate::request_processors::memythos_activity::*;
 use crate::request_processors::memythos_arena_state::ArenaCommand;
 use crate::request_processors::memythos_arena_state::ArenaEventKind;
+use crate::request_processors::memythos_arena_state::ArenaOperationIdentity;
 use crate::request_processors::memythos_arena_state::NativeArenaState;
 use crate::request_processors::memythos_checkpoint::*;
 use crate::request_processors::memythos_closure::*;
@@ -1063,8 +1064,24 @@ impl MemythosRequestProcessor {
                 phase: phase.clone(),
             }
         };
+        let composition_version = state
+            .arena_compositions
+            .get(&arena_id)
+            .map(|composition| composition.composition_version)
+            .unwrap_or(0);
+        let action = if start { "start" } else { "close" };
+        let operation_id =
+            format!("arena-phase:{arena_id}:{composition_version}:{round_id}:{phase}:{action}");
         let (event, lifecycle_state) = state
-            .transition_arena_lifecycle(&arena_id, command)
+            .transition_arena_lifecycle_with_operation(
+                &arena_id,
+                ArenaOperationIdentity {
+                    operation_id,
+                    causation_id: None,
+                    composition_version,
+                },
+                command,
+            )
             .map_err(|error| invalid_params(error.to_string()))?;
         let arena = state
             .arenas

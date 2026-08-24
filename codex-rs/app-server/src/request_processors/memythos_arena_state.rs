@@ -1,11 +1,15 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 
 use codex_app_server_protocol::MemythosArenaLifecycleState;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 
-pub(crate) const ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+const LEGACY_ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +31,23 @@ pub(crate) struct NativeArenaProtocolSnapshot {
     pub(crate) active_phase: Option<String>,
     pub(crate) completed_phases: Vec<NativeArenaCompletedPhaseSnapshot>,
     pub(crate) sequence: u64,
+    #[serde(default)]
+    pub(crate) operations: Vec<NativeArenaOperationSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeArenaOperationSnapshot {
+    pub(crate) operation_id: String,
+    pub(crate) causation_id: Option<String>,
+    pub(crate) composition_version: u32,
+    pub(crate) command_kind: String,
+    pub(crate) round_id: Option<String>,
+    pub(crate) intent_sha256: String,
+    pub(crate) event_sequence: u64,
+    pub(crate) event_kind: ArenaEventKind,
+    pub(crate) event_round_id: Option<String>,
+    pub(crate) event_phase: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -44,6 +65,14 @@ pub(crate) struct NativeArenaState {
     active_phase: Option<String>,
     completed_phases: HashSet<(String, String)>,
     sequence: u64,
+    operations: HashMap<String, NativeArenaOperationSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArenaOperationIdentity {
+    pub(crate) operation_id: String,
+    pub(crate) causation_id: Option<String>,
+    pub(crate) composition_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +84,8 @@ pub(crate) enum ArenaCommand {
     CloseCleanly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ArenaEventKind {
     Activated,
     ActivationRetained,
@@ -125,7 +155,54 @@ impl NativeArenaState {
             active_phase: None,
             completed_phases: HashSet::new(),
             sequence: 0,
+            operations: HashMap::new(),
         })
+    }
+
+    pub(crate) fn transition_with_operation(
+        &mut self,
+        identity: ArenaOperationIdentity,
+        command: ArenaCommand,
+    ) -> Result<ArenaEvent, ArenaDomainError> {
+        validate_operation_identity(&identity)?;
+        let intent_sha256 = command_intent_sha256(&self.arena_id, &identity, &command);
+        if let Some(recorded) = self.operations.get(&identity.operation_id) {
+            if recorded.intent_sha256 != intent_sha256 {
+                return Err(ArenaDomainError::new(format!(
+                    "operation {} conflicts with its recorded arena command intent",
+                    identity.operation_id
+                )));
+            }
+            return Ok(ArenaEvent {
+                sequence: recorded.event_sequence,
+                kind: recorded.event_kind,
+                arena_id: self.arena_id.clone(),
+                round_id: recorded.event_round_id.clone(),
+                phase: recorded.event_phase.clone(),
+            });
+        }
+
+        let mut next = self.clone();
+        let event = next.transition(command.clone())?;
+        let (command_kind, round_id) = command_identity(&command);
+        next.operations.insert(
+            identity.operation_id.clone(),
+            NativeArenaOperationSnapshot {
+                operation_id: identity.operation_id,
+                causation_id: identity.causation_id,
+                composition_version: identity.composition_version,
+                command_kind: command_kind.to_string(),
+                round_id,
+                intent_sha256,
+                event_sequence: event.sequence,
+                event_kind: event.kind,
+                event_round_id: event.round_id.clone(),
+                event_phase: event.phase.clone(),
+            },
+        );
+        next.validate_invariants()?;
+        *self = next;
+        Ok(event)
     }
 
     pub(crate) fn transition(
@@ -168,6 +245,8 @@ impl NativeArenaState {
             })
             .collect::<Vec<_>>();
         completed_phases.sort();
+        let mut operations = self.operations.values().cloned().collect::<Vec<_>>();
+        operations.sort();
         NativeArenaProtocolSnapshot {
             schema_version: ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION,
             arena_id: self.arena_id.clone(),
@@ -176,13 +255,17 @@ impl NativeArenaState {
             active_phase: self.active_phase.clone(),
             completed_phases,
             sequence: self.sequence,
+            operations,
         }
     }
 
     pub(crate) fn restore_protocol_snapshot(
         snapshot: NativeArenaProtocolSnapshot,
     ) -> Result<Self, ArenaDomainError> {
-        if snapshot.schema_version != ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION {
+        if !matches!(
+            snapshot.schema_version,
+            LEGACY_ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION | ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION
+        ) {
             return Err(ArenaDomainError::new(format!(
                 "unsupported arena protocol snapshot schema {}; expected {}",
                 snapshot.schema_version, ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION
@@ -230,6 +313,19 @@ impl NativeArenaState {
             }
         }
 
+        let mut operations = HashMap::new();
+        for operation in snapshot.operations {
+            validate_operation_snapshot(&operation, snapshot.sequence)?;
+            if operations
+                .insert(operation.operation_id.clone(), operation)
+                .is_some()
+            {
+                return Err(ArenaDomainError::new(
+                    "arena protocol snapshot contains a duplicate operation id",
+                ));
+            }
+        }
+
         let restored = Self {
             arena_id: snapshot.arena_id,
             status: snapshot.status,
@@ -237,6 +333,7 @@ impl NativeArenaState {
             active_phase: snapshot.active_phase,
             completed_phases,
             sequence: snapshot.sequence,
+            operations,
         };
         restored.validate_invariants()?;
         Ok(restored)
@@ -387,6 +484,86 @@ impl NativeArenaState {
     }
 }
 
+fn validate_operation_identity(identity: &ArenaOperationIdentity) -> Result<(), ArenaDomainError> {
+    if identity.operation_id.trim().is_empty() {
+        return Err(ArenaDomainError::new(
+            "arena operation identity requires operation_id",
+        ));
+    }
+    if identity
+        .causation_id
+        .as_ref()
+        .is_some_and(|causation_id| causation_id.trim().is_empty())
+    {
+        return Err(ArenaDomainError::new(
+            "arena operation identity rejects an empty causation_id",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_operation_snapshot(
+    operation: &NativeArenaOperationSnapshot,
+    sequence: u64,
+) -> Result<(), ArenaDomainError> {
+    validate_operation_identity(&ArenaOperationIdentity {
+        operation_id: operation.operation_id.clone(),
+        causation_id: operation.causation_id.clone(),
+        composition_version: operation.composition_version,
+    })?;
+    if operation.command_kind.trim().is_empty()
+        || operation.intent_sha256.len() != 64
+        || !operation
+            .intent_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ArenaDomainError::new(format!(
+            "arena operation {} has an invalid command identity",
+            operation.operation_id
+        )));
+    }
+    if operation.event_sequence == 0 || operation.event_sequence > sequence {
+        return Err(ArenaDomainError::new(format!(
+            "arena operation {} references an invalid event sequence",
+            operation.operation_id
+        )));
+    }
+    Ok(())
+}
+
+fn command_identity(command: &ArenaCommand) -> (&'static str, Option<String>) {
+    match command {
+        ArenaCommand::Activate => ("activate", None),
+        ArenaCommand::StartPhase { round_id, .. } => ("start_phase", Some(round_id.clone())),
+        ArenaCommand::ClosePhase { round_id, .. } => ("close_phase", Some(round_id.clone())),
+        ArenaCommand::AwaitParent => ("await_parent", None),
+        ArenaCommand::CloseCleanly => ("close_cleanly", None),
+    }
+}
+
+fn command_intent_sha256(
+    arena_id: &str,
+    identity: &ArenaOperationIdentity,
+    command: &ArenaCommand,
+) -> String {
+    let (command_kind, round_id) = command_identity(command);
+    let phase = match command {
+        ArenaCommand::StartPhase { phase, .. } | ArenaCommand::ClosePhase { phase, .. } => {
+            Some(phase.as_str())
+        }
+        _ => None,
+    };
+    let canonical = format!(
+        "arena_id={arena_id}\ncomposition_version={}\ncommand_kind={command_kind}\nround_id={}\nphase={}\ncausation_id={}",
+        identity.composition_version,
+        round_id.as_deref().unwrap_or(""),
+        phase.unwrap_or(""),
+        identity.causation_id.as_deref().unwrap_or("")
+    );
+    format!("{:x}", Sha256::digest(canonical.as_bytes()))
+}
+
 fn validate_round_and_phase(round_id: &str, phase: &str) -> Result<(), ArenaDomainError> {
     if round_id.trim().is_empty() || phase.trim().is_empty() {
         return Err(ArenaDomainError::new(
@@ -399,6 +576,84 @@ fn validate_round_and_phase(round_id: &str, phase: &str) -> Result<(), ArenaDoma
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn operation(operation_id: &str) -> ArenaOperationIdentity {
+        ArenaOperationIdentity {
+            operation_id: operation_id.to_string(),
+            causation_id: Some("request-1".to_string()),
+            composition_version: 3,
+        }
+    }
+
+    #[test]
+    fn operation_retry_returns_the_confirmed_event_without_mutation() {
+        let mut state = NativeArenaState::new("arena-616").unwrap();
+        let command = ArenaCommand::StartPhase {
+            round_id: "round-1".to_string(),
+            phase: "proposal".to_string(),
+        };
+
+        let first = state
+            .transition_with_operation(operation("op-start-proposal"), command.clone())
+            .unwrap();
+        let snapshot_after_first = state.protocol_snapshot();
+        let retry = state
+            .transition_with_operation(operation("op-start-proposal"), command)
+            .unwrap();
+
+        assert_eq!(retry, first);
+        assert_eq!(state.protocol_snapshot(), snapshot_after_first);
+        assert_eq!(state.sequence, 1);
+        assert_eq!(state.operations.len(), 1);
+    }
+
+    #[test]
+    fn operation_id_reuse_with_a_different_intent_is_an_atomic_conflict() {
+        let mut state = NativeArenaState::new("arena-616").unwrap();
+        state
+            .transition_with_operation(
+                operation("op-phase"),
+                ArenaCommand::StartPhase {
+                    round_id: "round-1".to_string(),
+                    phase: "proposal".to_string(),
+                },
+            )
+            .unwrap();
+        let before = state.clone();
+
+        let error = state
+            .transition_with_operation(
+                operation("op-phase"),
+                ArenaCommand::ClosePhase {
+                    round_id: "round-1".to_string(),
+                    phase: "proposal".to_string(),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("conflicts"));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn operation_outcome_survives_snapshot_restore() {
+        let mut state = NativeArenaState::new("arena-616").unwrap();
+        let command = ArenaCommand::Activate;
+        let first = state
+            .transition_with_operation(operation("op-activate"), command.clone())
+            .unwrap();
+        let serialized = serde_json::to_string(&state.protocol_snapshot()).unwrap();
+        assert!(!serialized.contains("request payload"));
+
+        let snapshot = serde_json::from_str(&serialized).unwrap();
+        let mut restored = NativeArenaState::restore_protocol_snapshot(snapshot).unwrap();
+        let retry = restored
+            .transition_with_operation(operation("op-activate"), command)
+            .unwrap();
+
+        assert_eq!(retry, first);
+        assert_eq!(restored, state);
+    }
 
     #[test]
     fn canonical_state_rejects_concurrent_phases() {
@@ -484,6 +739,21 @@ mod tests {
                 .to_string()
                 .contains("active round and phase together")
         );
+    }
+
+    #[test]
+    fn legacy_protocol_snapshot_restores_with_an_empty_operation_ledger() {
+        let state = NativeArenaState::new("arena-legacy").unwrap();
+        let current_json = serde_json::to_value(state.protocol_snapshot()).unwrap();
+        let mut legacy_json = current_json;
+        legacy_json["schema_version"] = serde_json::json!(1);
+        legacy_json.as_object_mut().unwrap().remove("operations");
+
+        let legacy_snapshot = serde_json::from_value(legacy_json).unwrap();
+        let restored = NativeArenaState::restore_protocol_snapshot(legacy_snapshot).unwrap();
+
+        assert!(restored.operations.is_empty());
+        assert_eq!(restored.protocol_snapshot().schema_version, 2);
     }
 
     #[test]

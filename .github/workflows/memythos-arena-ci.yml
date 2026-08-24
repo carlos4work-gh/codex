@@ -293,6 +293,7 @@ jobs:
       - name: Canonical Rust state reducer
         run: |
           cargo test -p codex-app-server memythos_arena_state::tests
+          cargo test -p codex-app-server canonical_arena_lifecycle_is_owned_by_rust_across_rpc_calls
           bash scripts/memythos/arena-transition-authority-gate.sh
 
       - name: Requester disconnect regression

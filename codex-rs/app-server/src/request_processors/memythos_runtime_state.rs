@@ -30,6 +30,7 @@ use serde::Serialize;
 use crate::request_processors::memythos_arena_state::ArenaCommand;
 use crate::request_processors::memythos_arena_state::ArenaDomainError;
 use crate::request_processors::memythos_arena_state::ArenaEvent;
+use crate::request_processors::memythos_arena_state::ArenaOperationIdentity;
 use crate::request_processors::memythos_arena_state::NativeArenaProtocolSnapshot;
 use crate::request_processors::memythos_arena_state::NativeArenaState;
 use crate::request_processors::memythos_parent_response::ParentTurnResponse;
@@ -76,6 +77,21 @@ impl MemythosRuntimeState {
             ))
         })?;
         let event = lifecycle.transition(command)?;
+        Ok((event, lifecycle.protocol_state()))
+    }
+
+    pub(super) fn transition_arena_lifecycle_with_operation(
+        &mut self,
+        arena_id: &str,
+        identity: ArenaOperationIdentity,
+        command: ArenaCommand,
+    ) -> Result<(ArenaEvent, MemythosArenaLifecycleState), ArenaDomainError> {
+        let lifecycle = self.arena_lifecycles.get_mut(arena_id).ok_or_else(|| {
+            ArenaDomainError::new(format!(
+                "arena {arena_id} has no canonical native lifecycle"
+            ))
+        })?;
+        let event = lifecycle.transition_with_operation(identity, command)?;
         Ok((event, lifecycle.protocol_state()))
     }
 }
