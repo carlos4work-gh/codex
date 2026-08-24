@@ -564,6 +564,7 @@ mod memythos_processor;
 mod memythos_resume;
 mod memythos_runtime;
 mod memythos_runtime_state;
+mod memythos_round;
 mod memythos_thread_consolidation;
 mod persisted_resume_settings;
 mod plugins;

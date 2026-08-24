@@ -111,6 +111,11 @@ jobs:
           cargo test -p codex-app-server arena_terminalizes_after_native_judge_returns_a_structured_verdict
           cargo test -p codex-app-server partial_resume_closes_after_affected_reassessment_and_canonical_judge_verdict
 
+      - name: Memythos round task boundary
+        run: |
+          cargo test -p codex-app-server arena_composition_requires_explicit_revision_and_reuses_only_kept_identity
+          cargo test -p codex-app-server completed_bettor_phase_fans_out_through_native_aggregate_mailboxes
+
       - name: Legacy Memythos migration upgrade
         run: cargo test -p codex-state upgrades_legacy_memythos_migrations_without_checksum_conflicts
 
