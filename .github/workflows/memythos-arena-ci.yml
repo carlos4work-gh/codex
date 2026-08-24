@@ -300,7 +300,9 @@ jobs:
         run: cargo test -p codex-app-server arena_request_state_survives_the_request_connection_boundary
 
       - name: OOTB Arena restart recovery
-        run: cargo test -p codex-app-server canonical_arena_restores_from_ootb_state_without_replanning
+        run: |
+          cargo test -p codex-app-server canonical_arena_restores_from_ootb_state_without_replanning
+          cargo test -p codex-app-server arena_restore_rejects_a_corrupt_batch_without_partial_state
 
       - name: Arena SIGKILL recovery boundary
         run: cargo test -p codex-app-server --test all arena_provision_checkpoint_survives_sigkill_without_duplicate_parents

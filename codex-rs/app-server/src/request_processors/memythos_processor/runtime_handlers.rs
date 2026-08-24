@@ -24,6 +24,7 @@ impl MemythosRequestProcessor {
                 "failed to load Arena snapshots from app-server state: {error}"
             ))
         })?;
+        let mut validated_snapshots = Vec::with_capacity(records.len());
         for record in records {
             if record.schema_version != i64::from(ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION) {
                 return Err(invalid_params(format!(
@@ -114,8 +115,12 @@ impl MemythosRequestProcessor {
                     .map(|participant| participant.thread_id.clone())
                     .collect(),
             };
+            validated_snapshots.push((record, snapshot, lifecycle, arena));
+        }
 
-            let mut state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        for (record, snapshot, lifecycle, arena) in validated_snapshots {
+            let lifecycle_state = lifecycle.protocol_state();
             if let Some(max_delivery_id) = snapshot
                 .deliveries
                 .iter()

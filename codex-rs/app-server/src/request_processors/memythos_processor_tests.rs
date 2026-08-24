@@ -3116,6 +3116,122 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
     assert!(missing_reference.message.contains("OOTB goal missing"));
 }
 
+#[tokio::test]
+async fn arena_restore_rejects_a_corrupt_batch_without_partial_state() {
+    let codex_home = tempfile::tempdir().expect("temporary Codex home");
+    let state_db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(
+            AbsolutePathBuf::try_from(codex_home.path().to_path_buf())
+                .expect("absolute temporary Codex home"),
+        ),
+        "test-provider".to_string(),
+    )
+    .await
+    .expect("initialize OOTB app-server state");
+    let participant_thread_ids = HashMap::from([
+        (
+            "concierge".to_string(),
+            "00000000-0000-4000-8000-000000000680".to_string(),
+        ),
+        (
+            "bettor-growth".to_string(),
+            "00000000-0000-4000-8000-000000000681".to_string(),
+        ),
+        (
+            "bettor-risk".to_string(),
+            "00000000-0000-4000-8000-000000000682".to_string(),
+        ),
+        (
+            "judge".to_string(),
+            "00000000-0000-4000-8000-000000000683".to_string(),
+        ),
+    ]);
+    for thread_id in participant_thread_ids.values() {
+        let thread_id = ThreadId::from_string(thread_id).expect("valid parent thread id");
+        let mut metadata = codex_state::ThreadMetadataBuilder::new(
+            thread_id,
+            codex_home
+                .path()
+                .join("sessions")
+                .join(format!("{thread_id}.jsonl")),
+            Utc::now(),
+            codex_protocol::protocol::SessionSource::Cli,
+        );
+        metadata.cwd = codex_home.path().to_path_buf();
+        state_db
+            .upsert_thread(&metadata.build("test-provider"))
+            .await
+            .expect("persist OOTB parent thread");
+    }
+    let provisioning = Arc::new(FakeArenaParentProvisioningAdapter {
+        thread_ids: participant_thread_ids.clone(),
+        ..Default::default()
+    });
+    let roles_by_thread_id = HashMap::from([
+        (
+            participant_thread_ids["concierge"].clone(),
+            "room_concierge".to_string(),
+        ),
+        (
+            participant_thread_ids["bettor-growth"].clone(),
+            "bettor".to_string(),
+        ),
+        (
+            participant_thread_ids["bettor-risk"].clone(),
+            "bettor".to_string(),
+        ),
+        (participant_thread_ids["judge"].clone(), "judge".to_string()),
+    ]);
+    let make_processor = || {
+        MemythosRequestProcessor::new_for_transport_with_native_adapters_and_state_db(
+            AppServerRpcTransport::InProcess,
+            Arc::new(FakeLivePeerParentDeliveryAdapter),
+            Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+            Arc::new(RecordOnlyThreadConsolidationAdapter),
+            Arc::new(RecordOnlyParentTurnResponseAdapter),
+            Arc::new(MappedParentConfigurationAdapter {
+                roles: roles_by_thread_id.clone(),
+            }),
+            provisioning.clone(),
+            Arc::new(RecordOnlyArenaCompositionPlanningAdapter),
+            Some(state_db.clone()),
+        )
+    };
+
+    let first_process = make_processor();
+    first_process
+        .arena_composition_provision(competitive_composition_params(), ConnectionId(0))
+        .await
+        .expect("persist a valid canonical Arena snapshot");
+    let valid = state_db
+        .get_arena_snapshot("arena-composition")
+        .await
+        .unwrap()
+        .unwrap();
+    state_db
+        .upsert_arena_snapshot(&ArenaSnapshotRecord {
+            arena_id: "arena-corrupt".to_string(),
+            concierge_thread_id: participant_thread_ids["judge"].clone(),
+            last_event_hash: "corrupt".to_string(),
+            snapshot_json: valid.snapshot_json,
+            ..valid
+        })
+        .await
+        .expect("persist corrupt trailing snapshot");
+    drop(first_process);
+
+    let restored_process = make_processor();
+    let error = restored_process
+        .restore_arena_coordination_snapshots()
+        .await
+        .expect_err("one corrupt record must reject the complete restore batch");
+    assert!(error.message.contains("hash mismatch"));
+    let state = restored_process.state.lock().await;
+    assert!(state.arenas.is_empty());
+    assert!(state.arena_lifecycles.is_empty());
+    assert!(state.restored_coordination_snapshots.is_empty());
+}
+
 #[test]
 fn arena_intake_makes_app_server_the_only_activation_authority() {
     let params = semantic_arena_request_params();
