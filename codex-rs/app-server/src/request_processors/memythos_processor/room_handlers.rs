@@ -776,6 +776,13 @@ impl MemythosRequestProcessor {
                 .parent_turn_response_adapter
                 .read_response(target_thread_id, target_turn_id)
                 .await;
+            validate_parent_turn_response(target_thread_id, target_turn_id, &response).map_err(
+                |error| {
+                    invalid_params(format!(
+                        "parent response adapter contract rejected: {error}"
+                    ))
+                },
+            )?;
             match response.status {
                 Some(TurnStatus::Completed) => {
                     let completed_ref = format!(

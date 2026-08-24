@@ -257,6 +257,11 @@ impl MemythosRequestProcessor {
             .parent_turn_response_adapter
             .read_responses(requested_turns)
             .await;
+        validate_parent_turn_responses(&native_turn_responses).map_err(|error| {
+            invalid_params(format!(
+                "parent response adapter contract rejected: {error}"
+            ))
+        })?;
         let recorded_native_turn_responses = {
             let state = self.state.lock().await;
             state.native_parent_turn_responses.clone()
@@ -461,6 +466,11 @@ impl MemythosRequestProcessor {
             .parent_turn_response_adapter
             .read_responses(requested_turns)
             .await;
+        validate_parent_turn_responses(&native_responses).map_err(|error| {
+            invalid_params(format!(
+                "parent response adapter contract rejected: {error}"
+            ))
+        })?;
         let participant_by_thread = room
             .participants
             .iter()

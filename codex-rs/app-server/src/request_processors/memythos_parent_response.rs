@@ -22,6 +22,69 @@ pub(crate) struct ParentTurnResponse {
     pub(crate) text: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParentTurnResponseContractError {
+    PartialRequest,
+    PartialResponse,
+    ForeignItemRef(String),
+}
+
+impl std::fmt::Display for ParentTurnResponseContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PartialRequest => {
+                formatter.write_str("request ref and text must be present together")
+            }
+            Self::PartialResponse => {
+                formatter.write_str("response ref and text must be present together")
+            }
+            Self::ForeignItemRef(item_ref) => {
+                write!(
+                    formatter,
+                    "item ref does not belong to requested turn: {item_ref}"
+                )
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_parent_turn_response(
+    thread_id: &str,
+    turn_id: &str,
+    response: &ParentTurnResponse,
+) -> Result<(), ParentTurnResponseContractError> {
+    if response.request_item_ref.is_some() != response.request_text.is_some() {
+        return Err(ParentTurnResponseContractError::PartialRequest);
+    }
+    if response.item_ref.is_some() != response.text.is_some() {
+        return Err(ParentTurnResponseContractError::PartialResponse);
+    }
+    let prefix = format!("app-server://threads/{thread_id}/turns/{turn_id}/items/");
+    for item_ref in [
+        response.request_item_ref.as_ref(),
+        response.item_ref.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !item_ref.starts_with(&prefix) {
+            return Err(ParentTurnResponseContractError::ForeignItemRef(
+                item_ref.clone(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_parent_turn_responses(
+    responses: &HashMap<(String, String), ParentTurnResponse>,
+) -> Result<(), ParentTurnResponseContractError> {
+    for ((thread_id, turn_id), response) in responses {
+        validate_parent_turn_response(thread_id, turn_id, response)?;
+    }
+    Ok(())
+}
+
 fn parent_turn_response(
     thread_id: &str,
     turn: &codex_app_server_protocol::Turn,
@@ -218,7 +281,9 @@ mod tests {
             Box::pin(async move {
                 ParentTurnResponse {
                     status: None,
-                    request_item_ref: None,
+                    request_item_ref: Some(format!(
+                        "app-server://threads/{thread_id}/turns/{turn_id}/items/request"
+                    )),
                     request_text: Some(format!("{thread_id}:{turn_id}")),
                     item_ref: None,
                     text: None,
@@ -239,5 +304,31 @@ mod tests {
                 .and_then(|response| response.request_text.as_deref()),
             Some("thread-a:turn-1")
         );
+        assert_eq!(validate_parent_turn_responses(&responses), Ok(()));
+    }
+
+    #[test]
+    fn contract_rejects_partial_or_foreign_response_evidence() {
+        let partial = ParentTurnResponse {
+            status: Some(TurnStatus::Completed),
+            request_item_ref: None,
+            request_text: None,
+            item_ref: None,
+            text: Some("answer".to_string()),
+        };
+        assert_eq!(
+            validate_parent_turn_response("thread-a", "turn-1", &partial),
+            Err(ParentTurnResponseContractError::PartialResponse)
+        );
+
+        let foreign = ParentTurnResponse {
+            item_ref: Some("app-server://threads/thread-b/turns/turn-2/items/answer".to_string()),
+            text: Some("answer".to_string()),
+            ..partial
+        };
+        assert!(matches!(
+            validate_parent_turn_response("thread-a", "turn-1", &foreign),
+            Err(ParentTurnResponseContractError::ForeignItemRef(_))
+        ));
     }
 }
