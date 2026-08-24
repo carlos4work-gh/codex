@@ -857,12 +857,12 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
         "mock_provider".to_string(),
     )
     .await?;
-    let paused_snapshot = state_db
+    let mut paused_snapshot = state_db
         .get_arena_snapshot("arena-sigkill")
         .await?
         .expect("paused Arena snapshot must remain durable");
     assert_eq!(paused_snapshot.schema_version, 3);
-    let paused_snapshot_json: serde_json::Value =
+    let mut paused_snapshot_json: serde_json::Value =
         serde_json::from_str(&paused_snapshot.snapshot_json)?;
     let blockers = paused_snapshot_json["recovery_blockers"]
         .as_array()
@@ -876,7 +876,32 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
     );
     assert!(!paused_snapshot.snapshot_json.contains("attempt_count"));
     assert!(!paused_snapshot.snapshot_json.contains("quarantine_reason"));
+    paused_snapshot_json["recovery_blockers"] = serde_json::json!([]);
+    paused_snapshot.snapshot_json = serde_json::to_string(&paused_snapshot_json)?;
+    paused_snapshot.last_event_hash = format!(
+        "{:x}",
+        Sha256::digest(paused_snapshot.snapshot_json.as_bytes())
+    );
+    state_db.upsert_arena_snapshot(&paused_snapshot).await?;
     drop(state_db);
+
+    assert_eq!(quarantining_process.sigkill().await?.signal(), Some(9));
+    drop(quarantining_process);
+    let mut quarantining_process = start_app_server(&codex_home).await?;
+    timeout(RESPONSE_TIMEOUT, quarantining_process.initialize()).await??;
+    resume_native_thread(&mut quarantining_process, &bettor.thread_id).await?;
+    let recovered_pause =
+        room_activity(&mut quarantining_process, &provisioned.room.room_id).await?;
+    assert_eq!(recovered_pause.lifecycle.room_state, "recoverable_pause");
+    assert_eq!(recovered_pause.blockers.len(), 1);
+    assert_eq!(
+        recovered_pause
+            .events
+            .iter()
+            .filter(|event| event.event_kind == "mailbox_quarantined")
+            .count(),
+        1
+    );
 
     let resolve_params = MemythosMailboxQuarantineResolveParams {
         receiver_thread_id: bettor.thread_id.clone(),
