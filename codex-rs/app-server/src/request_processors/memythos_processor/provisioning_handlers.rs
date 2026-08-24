@@ -41,12 +41,12 @@ impl MemythosRequestProcessor {
             let planned = self
                 .arena_composition_planning_adapter
                 .assess_resume(&params, previous, connection_id)
-                .await?;
-            validate_planned_arena_resume(previous, &planned).map_err(|error| {
-                invalid_params(format!(
-                    "composition planning adapter contract rejected: {error}"
-                ))
-            })?;
+                .await
+                .map_err(ArenaPortError::classify_planning_failure)
+                .map_err(|error| error.into_jsonrpc("composition_planning"))?;
+            validate_planned_arena_resume(previous, &planned)
+                .map_err(|error| ArenaPortError::contract_rejected(error.to_string()))
+                .map_err(|error| error.into_jsonrpc("composition_planning"))?;
             Some(planned)
         } else {
             None
@@ -86,12 +86,12 @@ impl MemythosRequestProcessor {
                 let planned = self
                     .arena_composition_planning_adapter
                     .plan(&params, previous.as_ref(), connection_id)
-                    .await?;
-                validate_planned_arena_composition(&params, &planned).map_err(|error| {
-                    invalid_params(format!(
-                        "composition planning adapter contract rejected: {error}"
-                    ))
-                })?;
+                    .await
+                    .map_err(ArenaPortError::classify_planning_failure)
+                    .map_err(|error| error.into_jsonrpc("composition_planning"))?;
+                validate_planned_arena_composition(&params, &planned)
+                    .map_err(|error| ArenaPortError::contract_rejected(error.to_string()))
+                    .map_err(|error| error.into_jsonrpc("composition_planning"))?;
                 validate_planned_arena_cost_context(&params, &planned.contract)?;
                 let mut revision_params = params.clone();
                 if revision_params.composition_change_signal.is_none()

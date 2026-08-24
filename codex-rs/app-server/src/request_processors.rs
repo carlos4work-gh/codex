@@ -563,6 +563,7 @@ mod memythos_parent_goal;
 mod memythos_parent_provisioning;
 mod memythos_parent_response;
 mod memythos_peer_delivery;
+mod memythos_port_error;
 mod memythos_processor;
 mod memythos_resume;
 mod memythos_room;

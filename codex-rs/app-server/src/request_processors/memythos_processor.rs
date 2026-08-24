@@ -193,6 +193,7 @@ use crate::request_processors::memythos_parent_goal::*;
 use crate::request_processors::memythos_parent_provisioning::*;
 use crate::request_processors::memythos_parent_response::*;
 use crate::request_processors::memythos_peer_delivery::*;
+use crate::request_processors::memythos_port_error::ArenaPortError;
 use crate::request_processors::memythos_resume::*;
 use crate::request_processors::memythos_room::*;
 use crate::request_processors::memythos_room_routing::*;

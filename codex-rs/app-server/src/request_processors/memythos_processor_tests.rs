@@ -2564,7 +2564,7 @@ async fn arena_request_rejects_missing_planner_evidence_before_provisioning() {
         .await
         .expect_err("planner output without OOTB evidence must be rejected");
 
-    assert!(error.message.contains("planning adapter contract rejected"));
+    assert!(error.message.contains("contract_rejected"));
     assert!(error.message.contains("planner thread id"));
     assert!(provisioning.goals.lock().await.is_empty());
     assert!(processor.state.lock().await.arena_compositions.is_empty());

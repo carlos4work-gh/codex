@@ -245,6 +245,7 @@ jobs:
 
       - name: Memythos composition planning boundary
         run: |
+          cargo test -p codex-app-server memythos_port_error::tests
           cargo test -p codex-app-server memythos_composition_planning::tests
           cargo test -p codex-app-server memythos_resume::tests
           cargo test -p codex-app-server arena_composition_schema_
