@@ -364,6 +364,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memythos_global_serialization_excludes_requests_from_different_connections() {
+        let queues = RequestSerializationQueues::default();
+        let (first_key, first_access) = RequestSerializationQueueKey::from_scope(
+            ConnectionId(41),
+            ClientRequestSerializationScope::Global("memythos"),
+        );
+        let (second_key, second_access) = RequestSerializationQueueKey::from_scope(
+            ConnectionId(42),
+            ClientRequestSerializationScope::Global("memythos"),
+        );
+        assert_eq!(first_key, second_key);
+
+        let (first_started_tx, first_started_rx) = oneshot::channel();
+        let (first_release_tx, first_release_rx) = oneshot::channel();
+        queues
+            .enqueue(
+                first_key,
+                first_access,
+                QueuedInitializedRequest::new(gate(), async move {
+                    first_started_tx.send(()).expect("receiver should be open");
+                    let _ = first_release_rx.await;
+                }),
+            )
+            .await;
+        timeout(queue_drain_timeout(), first_started_rx)
+            .await
+            .expect("first connection should enter the Memythos gate")
+            .expect("sender should be open");
+
+        let (second_started_tx, second_started_rx) = oneshot::channel();
+        queues
+            .enqueue(
+                second_key,
+                second_access,
+                QueuedInitializedRequest::new(gate(), async move {
+                    second_started_tx.send(()).expect("receiver should be open");
+                }),
+            )
+            .await;
+        let mut second_started_rx = Box::pin(second_started_rx);
+        timeout(shutdown_wait_timeout(), &mut second_started_rx)
+            .await
+            .expect_err("second connection must wait behind the first");
+
+        first_release_tx
+            .send(())
+            .expect("first request should still be waiting");
+        timeout(queue_drain_timeout(), &mut second_started_rx)
+            .await
+            .expect("second connection should enter after the first exits")
+            .expect("sender should be open");
+    }
+
+    #[tokio::test]
     async fn different_keys_run_concurrently() {
         let queues = RequestSerializationQueues::default();
         let (blocked_tx, blocked_rx) = oneshot::channel::<()>();
