@@ -2571,6 +2571,157 @@ async fn arena_request_rejects_missing_planner_evidence_before_provisioning() {
 }
 
 #[tokio::test]
+async fn fake_runtime_executes_a_complete_competitive_round() {
+    let contract = competitive_composition_params().contract;
+    let provisioning = Arc::new(FakeArenaParentProvisioningAdapter::default());
+    let processor = MemythosRequestProcessor::new_for_transport_with_native_adapters(
+        AppServerRpcTransport::InProcess,
+        Arc::new(FakeLivePeerParentDeliveryAdapter),
+        Arc::new(RecordOnlyParentGoalSnapshotAdapter),
+        Arc::new(RecordOnlyThreadConsolidationAdapter),
+        Arc::new(RecordOnlyParentTurnResponseAdapter),
+        Arc::new(CompositionParentConfigurationAdapter),
+        provisioning.clone(),
+        Arc::new(FakeArenaCompositionPlanningAdapter { contract }),
+    );
+    let response = processor
+        .arena_request(semantic_arena_request_params(), ConnectionId(77))
+        .await
+        .expect("fake runtime should plan, provision, and activate intake");
+    let ClientResponsePayload::MemythosArenaRequest(response) = response else {
+        panic!("expected semantic arena request response");
+    };
+    let intake = response.initial_delivery.expect("initial intake delivery");
+    assert!(
+        processor
+            .record_native_turn_completed(
+                &intake.thread_id,
+                intake.turn_id.as_deref().expect("intake turn"),
+                "completed",
+                Some(1),
+                Some(10),
+                None,
+                Some("The competitive round is framed.".to_string()),
+            )
+            .await
+    );
+
+    for (phase, response_text) in [
+        ("proposal", "Independent bounded proposal."),
+        (
+            "peer_review_and_objection",
+            r#"{"mechanism_state":"distinct"}"#,
+        ),
+        ("bet", r#"{"mechanism_state":"conditioned"}"#),
+    ] {
+        let turns = {
+            let state = processor.state.lock().await;
+            state
+                .arena_message_deliveries
+                .iter()
+                .filter(|delivery| delivery.phase.as_deref() == Some(phase))
+                .filter_map(|delivery| {
+                    delivery
+                        .receiver_turn_id
+                        .as_ref()
+                        .map(|turn_id| (delivery.receiver_thread_id.clone(), turn_id.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(turns.len(), 2, "phase {phase} must fan out to both bettors");
+        for (index, (thread_id, turn_id)) in turns.into_iter().enumerate() {
+            assert!(
+                processor
+                    .record_native_turn_completed(
+                        &thread_id,
+                        &turn_id,
+                        "completed",
+                        Some(10 + i64::try_from(index).expect("small phase index")),
+                        Some(10),
+                        None,
+                        Some(format!("{response_text} participant={thread_id}")),
+                    )
+                    .await,
+                "phase {phase} completion must match its delivery"
+            );
+        }
+    }
+
+    let judge_turn = {
+        let state = processor.state.lock().await;
+        state
+            .arena_message_deliveries
+            .iter()
+            .find(|delivery| delivery.phase.as_deref() == Some("judge"))
+            .and_then(|delivery| {
+                delivery
+                    .receiver_turn_id
+                    .as_ref()
+                    .map(|turn_id| (delivery.receiver_thread_id.clone(), turn_id.clone()))
+            })
+            .expect("sealed bets must trigger one judge turn")
+    };
+    let verdict = serde_json::json!({
+        "winner_participant_id": "bettor-growth",
+        "ranked_alternatives": ["bettor-risk"],
+        "winning_decision": "Adopt bounded reversible growth.",
+        "accepted_tradeoff": "Trade speed for lower reversal cost.",
+        "next_action": "close",
+        "contribution_attribution": [
+            {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/wedge"], "disposition": "adopted", "rationale": "The wedge resolves the bounded objective."},
+            {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/reversibility"], "disposition": "conditioned", "rationale": "Reversibility constrains acceleration."}
+        ],
+        "dissent": "Retain the bounded risk posture.",
+        "preserved_dissent": ["Retain the bounded risk posture."],
+        "targeted_refinements": [],
+        "reopening_signals": ["Unit economics materially deteriorate."],
+        "protected_decisions_status": "preserved",
+        "reopened_decision_refs": [],
+        "resume_scope_status": "not_applicable",
+        "rationale": "The growth posture wins within the declared reversible boundary."
+    })
+    .to_string();
+    assert!(
+        processor
+            .record_native_turn_completed(
+                &judge_turn.0,
+                &judge_turn.1,
+                "completed",
+                Some(20),
+                Some(10),
+                None,
+                Some(verdict),
+            )
+            .await
+    );
+
+    let state = processor.state.lock().await;
+    assert_eq!(
+        state
+            .arenas
+            .get("arena-composition")
+            .map(|arena| arena.lifecycle_state),
+        Some(MemythosArenaLifecycleState::ClosedCleanly)
+    );
+    assert_eq!(
+        state
+            .arena_compositions
+            .get("arena-composition")
+            .map(|composition| composition.lifecycle_state),
+        Some(MemythosArenaCompositionLifecycleState::Closed)
+    );
+    drop(state);
+    assert!(
+        provisioning
+            .goals
+            .lock()
+            .await
+            .values()
+            .all(|goal| goal.status == ThreadGoalStatus::Complete)
+    );
+}
+
+#[tokio::test]
 async fn arena_request_owns_planning_provisioning_and_initial_activation() {
     let contract = competitive_composition_params().contract;
     let provisioning = Arc::new(FakeArenaParentProvisioningAdapter::default());

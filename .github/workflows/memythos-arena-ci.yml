@@ -256,6 +256,9 @@ jobs:
           cargo test -p codex-app-server arena_request_retains_decision_
           cargo test -p codex-app-server arena_request_requires_explicit_comparability_
 
+      - name: Memythos fake runtime full round
+        run: cargo test -p codex-app-server fake_runtime_executes_a_complete_competitive_round
+
       - name: Memythos parent configuration boundary
         run: |
           cargo test -p codex-app-server memythos_parent_configuration::tests
