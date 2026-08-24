@@ -554,6 +554,7 @@ mod memythos_closure;
 mod memythos_contracts;
 mod memythos_delivery;
 mod memythos_judge;
+mod memythos_loopback;
 mod memythos_observability;
 mod memythos_parent_configuration;
 mod memythos_parent_goal;

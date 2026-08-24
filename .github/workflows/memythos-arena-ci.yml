@@ -129,6 +129,14 @@ jobs:
           cargo test -p codex-app-server competitive_room_cannot_request_judge_before_plural_bets_complete
           cargo test -p codex-app-server partial_resume_intake_authorizes_only_one_combined_reassessment_per_affected_parent
 
+      - name: Memythos loopback materialization boundary
+        run: |
+          cargo test -p codex-app-server native_judge_targeted_refinement_contract_is_bounded_and_attributable
+          cargo test -p codex-app-server partial_resume_intake_authorizes_only_one_combined_reassessment_per_affected_parent
+          cargo test -p codex-app-server completed_bettor_proposals_fan_out_and_trigger_each_bettor_once
+          cargo test -p codex-app-server room_send_input_uses_native_loopback_delivery
+          cargo test -p codex-app-server room_send_input_prefers_concierge_source_when_present
+
       - name: Legacy Memythos migration upgrade
         run: cargo test -p codex-state upgrades_legacy_memythos_migrations_without_checksum_conflicts
 
