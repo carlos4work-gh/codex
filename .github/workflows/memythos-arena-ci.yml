@@ -104,6 +104,11 @@ jobs:
       - name: Durable native mailbox state contract
         run: cargo test -p codex-state native_mailbox_
 
+      - name: OOTB peer delivery adapter boundary
+        run: |
+          cargo test -p codex-app-server native_mailbox_wake_policy_
+          cargo test -p codex-app-server peer_parent_delivery_
+
       - name: Memythos observability contract
         run: cargo test -p codex-app-server memythos_observability::tests
 
