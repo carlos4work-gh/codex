@@ -50,6 +50,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::CodexErr;
@@ -1330,23 +1331,85 @@ impl ThreadManager {
         &self,
         sender_thread_id: ThreadId,
         receiver_thread_id: ThreadId,
+        mut communication: InterAgentCommunication,
+    ) -> CodexResult<String> {
+        if communication.id.is_none() {
+            communication.id = Some(ResponseItemId::from_server(
+                uuid::Uuid::now_v7().to_string(),
+            ));
+        }
+        self.stage_inter_agent_communication(receiver_thread_id, &communication)
+            .await?;
+        self.activate_staged_inter_agent_communication(
+            sender_thread_id,
+            receiver_thread_id,
+            communication,
+        )
+        .await
+    }
+
+    pub async fn stage_inter_agent_communication(
+        &self,
+        receiver_thread_id: ThreadId,
+        communication: &InterAgentCommunication,
+    ) -> CodexResult<Option<String>> {
+        let communication_id = communication
+            .id
+            .as_ref()
+            .map(ToString::to_string)
+            .ok_or_else(|| {
+                CodexErr::Fatal(
+                    "staged native mailbox communication requires a stable id".to_string(),
+                )
+            })?;
+        let receiver_thread = self.get_thread(receiver_thread_id).await?;
+        let mailbox = DurableInterAgentMailbox::new(receiver_thread.state_db());
+        match mailbox
+            .stage_before_send(
+                &receiver_thread_id.to_string(),
+                &communication_id,
+                communication,
+            )
+            .await?
+        {
+            PersistOutcome::Existing { submission_id } => Ok(submission_id),
+            PersistOutcome::ReadyToSend => Ok(None),
+        }
+    }
+
+    pub async fn activate_staged_inter_agent_communication(
+        &self,
+        sender_thread_id: ThreadId,
+        receiver_thread_id: ThreadId,
         communication: InterAgentCommunication,
     ) -> CodexResult<String> {
         let communication_id = communication
             .id
             .as_ref()
             .map(ToString::to_string)
-            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            .ok_or_else(|| {
+                CodexErr::Fatal(
+                    "staged native mailbox communication requires a stable id".to_string(),
+                )
+            })?;
         let receiver_thread = self.get_thread(receiver_thread_id).await?;
         let mailbox = DurableInterAgentMailbox::new(receiver_thread.state_db());
         if let PersistOutcome::Existing {
             submission_id: Some(submission_id),
         } = mailbox
-            .persist_before_send(
+            .stage_before_send(
                 &receiver_thread_id.to_string(),
                 &communication_id,
                 &communication,
             )
+            .await?
+        {
+            return Ok(submission_id);
+        }
+        if let PersistOutcome::Existing {
+            submission_id: Some(submission_id),
+        } = mailbox
+            .activate_before_send(&receiver_thread_id.to_string(), &communication_id)
             .await?
         {
             return Ok(submission_id);

@@ -30,7 +30,7 @@ impl DurableInterAgentMailbox {
         Self { state_db }
     }
 
-    pub(crate) async fn persist_before_send(
+    pub(crate) async fn stage_before_send(
         &self,
         receiver_thread_id: &str,
         communication_id: &str,
@@ -39,34 +39,52 @@ impl DurableInterAgentMailbox {
         let Some(state_db) = self.state_db.as_ref() else {
             return Ok(PersistOutcome::ReadyToSend);
         };
-        let communication_json = serde_json::to_string(communication).map_err(|error| {
-            CodexErr::Fatal(format!(
-                "failed to serialize native mailbox message: {error}"
-            ))
-        })?;
-        let now = chrono::Utc::now().timestamp_millis();
-        let record = NativeMailboxCommunicationRecord {
-            receiver_thread_id: receiver_thread_id.to_string(),
-            communication_id: communication_id.to_string(),
-            source_call_id: Some(communication_id.to_string()),
-            submission_id: None,
-            payload_hash: format!("sha256:{:x}", Sha256::digest(communication_json.as_bytes())),
-            communication_json,
-            status: "pending".to_string(),
-            attempt_count: 0,
-            failure_fingerprint: None,
-            last_progress_ref: None,
-            quarantine_reason: None,
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
+        let record = native_mailbox_record(
+            receiver_thread_id,
+            communication_id,
+            communication,
+            "staged",
+        )?;
         let inserted = state_db
-            .insert_pending_native_mailbox_communication(&record)
+            .insert_staged_native_mailbox_communication(&record)
             .await
             .map_err(|error| {
-                CodexErr::Fatal(format!("failed to persist native mailbox message: {error}"))
+                CodexErr::Fatal(format!("failed to stage native mailbox message: {error}"))
             })?;
         if inserted == NativeMailboxInsertOutcome::Inserted {
+            return Ok(PersistOutcome::ReadyToSend);
+        }
+        let submission_id = state_db
+            .get_native_mailbox_communication(receiver_thread_id, communication_id)
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!("failed to read native mailbox message: {error}"))
+            })?
+            .and_then(|record| record.submission_id);
+        Ok(PersistOutcome::Existing { submission_id })
+    }
+
+    pub(crate) async fn activate_before_send(
+        &self,
+        receiver_thread_id: &str,
+        communication_id: &str,
+    ) -> CodexResult<PersistOutcome> {
+        let Some(state_db) = self.state_db.as_ref() else {
+            return Ok(PersistOutcome::ReadyToSend);
+        };
+        let activated = state_db
+            .activate_staged_native_mailbox_communication(
+                receiver_thread_id,
+                communication_id,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!(
+                    "failed to activate native mailbox message: {error}"
+                ))
+            })?;
+        if activated == NativeMailboxInsertOutcome::Inserted {
             return Ok(PersistOutcome::ReadyToSend);
         }
         let existing = state_db
@@ -179,4 +197,33 @@ impl DurableInterAgentMailbox {
             warnings,
         })
     }
+}
+
+fn native_mailbox_record(
+    receiver_thread_id: &str,
+    communication_id: &str,
+    communication: &InterAgentCommunication,
+    status: &str,
+) -> CodexResult<NativeMailboxCommunicationRecord> {
+    let communication_json = serde_json::to_string(communication).map_err(|error| {
+        CodexErr::Fatal(format!(
+            "failed to serialize native mailbox message: {error}"
+        ))
+    })?;
+    let now = chrono::Utc::now().timestamp_millis();
+    Ok(NativeMailboxCommunicationRecord {
+        receiver_thread_id: receiver_thread_id.to_string(),
+        communication_id: communication_id.to_string(),
+        source_call_id: Some(communication_id.to_string()),
+        submission_id: None,
+        payload_hash: format!("sha256:{:x}", Sha256::digest(communication_json.as_bytes())),
+        communication_json,
+        status: status.to_string(),
+        attempt_count: 0,
+        failure_fingerprint: None,
+        last_progress_ref: None,
+        quarantine_reason: None,
+        created_at_ms: now,
+        updated_at_ms: now,
+    })
 }
