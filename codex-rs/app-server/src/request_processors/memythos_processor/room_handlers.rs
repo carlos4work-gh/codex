@@ -990,6 +990,9 @@ impl MemythosRequestProcessor {
             .peer_parent_delivery_adapter
             .deliver_peer_parent_message(&message, target_reasoning_effort.clone(), connection_id)
             .await;
+        validate_peer_parent_delivery_attempt(&message, &delivery_attempt).map_err(|error| {
+            invalid_params(format!("peer delivery adapter contract rejected: {error}"))
+        })?;
         let Some(target_turn_id) = delivery_attempt.receiver_turn_id.clone() else {
             let rollback_detail = self
                 .rollback_parent_goal_after_failed_delivery(&message, &prepared_goal)

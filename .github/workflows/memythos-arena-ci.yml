@@ -173,6 +173,7 @@ jobs:
 
       - name: OOTB peer delivery adapter boundary
         run: |
+          cargo test -p codex-app-server memythos_peer_delivery::tests
           cargo test -p codex-app-server native_mailbox_wake_policy_
           cargo test -p codex-app-server peer_parent_delivery_
 

@@ -38,6 +38,64 @@ pub(crate) struct PeerParentDeliveryAttempt {
     pub(super) telemetry_summary: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PeerParentDeliveryContractError {
+    MissingField(&'static str),
+    RejectedWithReceiverTurn,
+    AcceptedResponseWithoutReceiverTurn,
+    ResponseWithoutReceiverTurn,
+}
+
+impl std::fmt::Display for PeerParentDeliveryContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingField(field) => write!(formatter, "delivery attempt is missing {field}"),
+            Self::RejectedWithReceiverTurn => {
+                formatter.write_str("rejected delivery attempt cannot expose a receiver turn")
+            }
+            Self::AcceptedResponseWithoutReceiverTurn => formatter.write_str(
+                "accepted response-required delivery attempt must expose a receiver turn",
+            ),
+            Self::ResponseWithoutReceiverTurn => formatter.write_str(
+                "delivery attempt cannot expose a response event without a receiver turn",
+            ),
+        }
+    }
+}
+
+pub(crate) fn validate_peer_parent_delivery_attempt(
+    message: &MemythosArenaMessage,
+    attempt: &PeerParentDeliveryAttempt,
+) -> Result<(), PeerParentDeliveryContractError> {
+    for (field, value) in [
+        ("status", attempt.status.as_str()),
+        ("delivery mechanism", attempt.delivery_mechanism.as_str()),
+        ("telemetry summary", attempt.telemetry_summary.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(PeerParentDeliveryContractError::MissingField(field));
+        }
+    }
+    if attempt.event_refs.is_empty() {
+        return Err(PeerParentDeliveryContractError::MissingField(
+            "evidence reference",
+        ));
+    }
+    if attempt.rejection_reason.is_some() && attempt.receiver_turn_id.is_some() {
+        return Err(PeerParentDeliveryContractError::RejectedWithReceiverTurn);
+    }
+    if attempt.rejection_reason.is_none()
+        && message.requires_response
+        && attempt.receiver_turn_id.is_none()
+    {
+        return Err(PeerParentDeliveryContractError::AcceptedResponseWithoutReceiverTurn);
+    }
+    if attempt.receiver_response_event_ref.is_some() && attempt.receiver_turn_id.is_none() {
+        return Err(PeerParentDeliveryContractError::ResponseWithoutReceiverTurn);
+    }
+    Ok(())
+}
+
 pub(crate) type PeerParentDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = PeerParentDeliveryAttempt> + Send + 'a>>;
 pub(crate) type NativeMailboxReenqueueFuture<'a> =
@@ -491,4 +549,106 @@ pub(super) fn build_peer_parent_envelope(message: &MemythosArenaMessage) -> Stri
         context_packet_ref = message.context_packet_ref,
         response_contract = message.response_contract.as_deref().unwrap_or("none")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_app_server_protocol::MemythosArenaDeliveryPolicy;
+
+    fn message(requires_response: bool) -> MemythosArenaMessage {
+        MemythosArenaMessage {
+            message_id: "message-1".to_string(),
+            case_id: "case-1".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-1".to_string(),
+            from_parent_thread_id: "sender".to_string(),
+            from_parent_role: "bettor".to_string(),
+            to_parent_thread_id: "receiver".to_string(),
+            to_parent_role: "judge".to_string(),
+            message_kind: "peer_bet".to_string(),
+            human_summary: "bet".to_string(),
+            execution_prompt: None,
+            context_packet_ref: "context://round-1".to_string(),
+            artifact_refs: Vec::new(),
+            requires_response,
+            delivery_policy: Some(if requires_response {
+                MemythosArenaDeliveryPolicy::Immediate
+            } else {
+                MemythosArenaDeliveryPolicy::QueueOnly
+            }),
+            aggregate_contract: None,
+            response_contract: None,
+            output_schema: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn record_only_adapter_satisfies_rejected_delivery_contract() {
+        let message = message(true);
+        let attempt = RecordOnlyPeerParentDeliveryAdapter
+            .deliver_peer_parent_message(&message, None, ConnectionId(0))
+            .await;
+
+        assert_eq!(
+            validate_peer_parent_delivery_attempt(&message, &attempt),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn native_delivery_shapes_satisfy_the_shared_contract() {
+        let response_message = message(true);
+        let accepted = PeerParentDeliveryAttempt {
+            status: "delivered_to_native_mailbox_turn".to_string(),
+            delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+            receiver_turn_id: Some("turn-1".to_string()),
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: vec!["app-server://threads/receiver/mailbox/turn-1".to_string()],
+            rejection_reason: None,
+            telemetry_channel: MemythosEventChannel::StateTransition,
+            telemetry_summary: "native delivery accepted".to_string(),
+        };
+        assert_eq!(
+            validate_peer_parent_delivery_attempt(&response_message, &accepted),
+            Ok(())
+        );
+
+        let queue_message = message(false);
+        let queued = PeerParentDeliveryAttempt {
+            receiver_turn_id: None,
+            status: "queued_in_native_mailbox".to_string(),
+            delivery_mechanism: "native_mailbox_queue_only".to_string(),
+            telemetry_summary: "native delivery queued".to_string(),
+            ..accepted
+        };
+        assert_eq!(
+            validate_peer_parent_delivery_attempt(&queue_message, &queued),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn shared_contract_rejects_accepted_response_without_turn() {
+        let message = message(true);
+        let attempt = PeerParentDeliveryAttempt {
+            status: "delivered".to_string(),
+            delivery_mechanism: "invalid_adapter".to_string(),
+            receiver_turn_id: None,
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: vec!["app-server://delivery/1".to_string()],
+            rejection_reason: None,
+            telemetry_channel: MemythosEventChannel::TechnicalDetail,
+            telemetry_summary: "invalid accepted delivery".to_string(),
+        };
+
+        assert_eq!(
+            validate_peer_parent_delivery_attempt(&message, &attempt),
+            Err(PeerParentDeliveryContractError::AcceptedResponseWithoutReceiverTurn)
+        );
+    }
 }
