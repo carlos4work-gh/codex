@@ -1640,12 +1640,25 @@ async fn arena_terminal_turn_reconciles_after_sigkill_without_duplicate_turn() -
 
 #[tokio::test]
 async fn arena_competitive_closure_recovers_same_verdict_after_sigkill() -> Result<()> {
+    run_competitive_terminal_recovery("close", MemythosArenaLifecycleState::ClosedCleanly).await
+}
+
+#[tokio::test]
+async fn arena_parent_rollup_recovers_same_verdict_after_sigkill() -> Result<()> {
+    run_competitive_terminal_recovery("parent_rollup", MemythosArenaLifecycleState::AwaitingParent)
+        .await
+}
+
+async fn run_competitive_terminal_recovery(
+    next_action: &str,
+    expected_lifecycle: MemythosArenaLifecycleState,
+) -> Result<()> {
     let verdict = serde_json::json!({
         "winner_participant_id": "bettor-growth",
         "ranked_alternatives": ["bettor-risk"],
         "winning_decision": "Adopt bounded reversible growth.",
         "accepted_tradeoff": "Trade speed for lower reversal cost.",
-        "next_action": "close",
+        "next_action": next_action,
         "contribution_attribution": [
             {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/wedge"], "disposition": "adopted", "rationale": "The wedge resolves the bounded objective."},
             {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/reversibility"], "disposition": "conditioned", "rationale": "Reversibility constrains acceleration."}
@@ -1820,10 +1833,7 @@ async fn arena_competitive_closure_recovers_same_verdict_after_sigkill() -> Resu
     let judge_turn_id = judge_turn_ids[0].clone();
     assert_eq!(completed.turn.id, judge_turn_id);
     let closed_arena = read_arena_state(&mut process).await?;
-    assert_eq!(
-        closed_arena.arena.lifecycle_state,
-        MemythosArenaLifecycleState::ClosedCleanly
-    );
+    assert_eq!(closed_arena.arena.lifecycle_state, expected_lifecycle);
 
     state_db.upsert_arena_snapshot(&stale_snapshot).await?;
     assert_eq!(process.sigkill().await?.signal(), Some(9));
@@ -1833,7 +1843,7 @@ async fn arena_competitive_closure_recovers_same_verdict_after_sigkill() -> Resu
     let recovered = timeout(RESPONSE_TIMEOUT, async {
         loop {
             let state = read_arena_state(&mut recovered_process).await?;
-            if state.arena.lifecycle_state == MemythosArenaLifecycleState::ClosedCleanly {
+            if state.arena.lifecycle_state == expected_lifecycle {
                 return Ok::<_, anyhow::Error>(state);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
