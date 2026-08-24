@@ -3244,6 +3244,25 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
 
 #[tokio::test]
 async fn arena_restore_rejects_a_corrupt_batch_without_partial_state() {
+    async fn assert_rejected_without_partial_state(
+        processor: MemythosRequestProcessor,
+        expected_error: &str,
+    ) {
+        let error = processor
+            .restore_arena_coordination_snapshots()
+            .await
+            .expect_err("corrupt record must reject the complete restore batch");
+        assert!(
+            error.message.contains(expected_error),
+            "expected {expected_error:?} in {:?}",
+            error.message
+        );
+        let state = processor.state.lock().await;
+        assert!(state.arenas.is_empty());
+        assert!(state.arena_lifecycles.is_empty());
+        assert!(state.restored_coordination_snapshots.is_empty());
+    }
+
     let codex_home = tempfile::tempdir().expect("temporary Codex home");
     let state_db = codex_state::StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(
@@ -3334,28 +3353,74 @@ async fn arena_restore_rejects_a_corrupt_batch_without_partial_state() {
         .await
         .unwrap()
         .unwrap();
+    let corrupt_record = ArenaSnapshotRecord {
+        arena_id: "arena-corrupt".to_string(),
+        concierge_thread_id: participant_thread_ids["judge"].clone(),
+        last_event_hash: "corrupt".to_string(),
+        snapshot_json: valid.snapshot_json.clone(),
+        ..valid.clone()
+    };
     state_db
-        .upsert_arena_snapshot(&ArenaSnapshotRecord {
-            arena_id: "arena-corrupt".to_string(),
-            concierge_thread_id: participant_thread_ids["judge"].clone(),
-            last_event_hash: "corrupt".to_string(),
-            snapshot_json: valid.snapshot_json,
-            ..valid
-        })
+        .upsert_arena_snapshot(&corrupt_record)
         .await
         .expect("persist corrupt trailing snapshot");
     drop(first_process);
 
-    let restored_process = make_processor();
-    let error = restored_process
-        .restore_arena_coordination_snapshots()
+    assert_rejected_without_partial_state(make_processor(), "hash mismatch").await;
+
+    let truncated_json = "{".to_string();
+    let truncated_error = state_db
+        .upsert_arena_snapshot(&ArenaSnapshotRecord {
+            snapshot_json: truncated_json.clone(),
+            last_event_hash: arena_snapshot_sha256(&truncated_json),
+            ..corrupt_record.clone()
+        })
         .await
-        .expect_err("one corrupt record must reject the complete restore batch");
-    assert!(error.message.contains("hash mismatch"));
-    let state = restored_process.state.lock().await;
-    assert!(state.arenas.is_empty());
-    assert!(state.arena_lifecycles.is_empty());
-    assert!(state.restored_coordination_snapshots.is_empty());
+        .expect_err("state DB must reject truncated JSON before restore");
+    assert!(truncated_error.to_string().contains("json_valid"));
+
+    state_db
+        .upsert_arena_snapshot(&ArenaSnapshotRecord {
+            schema_version: 99,
+            last_event_hash: arena_snapshot_sha256(&valid.snapshot_json),
+            snapshot_json: valid.snapshot_json.clone(),
+            ..corrupt_record.clone()
+        })
+        .await
+        .expect("persist future snapshot");
+    assert_rejected_without_partial_state(
+        make_processor(),
+        "unsupported Arena coordination snapshot schema",
+    )
+    .await;
+
+    state_db
+        .upsert_arena_snapshot(&ArenaSnapshotRecord {
+            schema_version: valid.schema_version,
+            last_event_hash: arena_snapshot_sha256(&valid.snapshot_json),
+            snapshot_json: valid.snapshot_json.clone(),
+            ..corrupt_record.clone()
+        })
+        .await
+        .expect("persist identity-mismatched snapshot");
+    assert_rejected_without_partial_state(make_processor(), "snapshot identity mismatch").await;
+
+    let mut sequence_json: serde_json::Value =
+        serde_json::from_str(&valid.snapshot_json).expect("decode valid snapshot");
+    sequence_json["protocol"]["arena_id"] = serde_json::json!("arena-corrupt");
+    sequence_json["room"]["arenaId"] = serde_json::json!("arena-corrupt");
+    let sequence_json = serde_json::to_string(&sequence_json).expect("encode sequence fixture");
+    state_db
+        .upsert_arena_snapshot(&ArenaSnapshotRecord {
+            schema_version: valid.schema_version,
+            snapshot_sequence: valid.snapshot_sequence + 1,
+            last_event_hash: arena_snapshot_sha256(&sequence_json),
+            snapshot_json: sequence_json,
+            ..corrupt_record
+        })
+        .await
+        .expect("persist sequence-mismatched snapshot");
+    assert_rejected_without_partial_state(make_processor(), "snapshot sequence mismatch").await;
 }
 
 #[test]
