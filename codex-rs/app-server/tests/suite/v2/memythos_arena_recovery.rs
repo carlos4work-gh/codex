@@ -861,7 +861,7 @@ async fn arena_mailbox_crash_loop_quarantines_poison_payload_and_warns() -> Resu
         .get_arena_snapshot("arena-sigkill")
         .await?
         .expect("paused Arena snapshot must remain durable");
-    assert_eq!(paused_snapshot.schema_version, 3);
+    assert_eq!(paused_snapshot.schema_version, 4);
     let mut paused_snapshot_json: serde_json::Value =
         serde_json::from_str(&paused_snapshot.snapshot_json)?;
     let blockers = paused_snapshot_json["recovery_blockers"]

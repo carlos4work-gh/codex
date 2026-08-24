@@ -100,7 +100,8 @@ impl MemythosRuntimeState {
 
 pub(super) const LEGACY_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 pub(super) const PREVIOUS_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
-pub(super) const ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+pub(super) const RECOVERY_BLOCKER_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+pub(super) const ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -168,6 +169,8 @@ pub(super) fn arena_pending_effect_key(arena_id: &str, message_id: &str) -> Stri
 pub(super) struct PersistedArenaDeliveryCheckpoint {
     pub(super) delivery_id: String,
     pub(super) message_id: String,
+    #[serde(default)]
+    pub(super) human_summary: String,
     pub(super) status: String,
     pub(super) sender_thread_id: String,
     pub(super) receiver_thread_id: String,
@@ -181,6 +184,10 @@ pub(super) struct PersistedArenaDeliveryCheckpoint {
     pub(super) checkpoint_event_refs: Vec<String>,
     pub(super) receiver_turn_id: Option<String>,
     pub(super) receiver_response_event_ref: Option<String>,
+    #[serde(default)]
+    pub(super) delivered_as_human_instruction: bool,
+    #[serde(default)]
+    pub(super) memory_replay_required: bool,
     pub(super) event_refs: Vec<String>,
     pub(super) rejection_reason: Option<String>,
     pub(super) failure_reason: Option<String>,
@@ -200,10 +207,19 @@ pub(super) struct PersistedArenaAggregateCheckpoint {
 }
 
 impl PersistedArenaDeliveryCheckpoint {
+    pub(super) fn migrate_from_schema(&mut self, source_schema_version: u32) {
+        if source_schema_version < ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
+            && self.phase.as_deref() == Some("arena_intake")
+        {
+            self.delivered_as_human_instruction = true;
+        }
+    }
+
     pub(super) fn capture(delivery: &MemythosArenaMessageDelivery) -> Self {
         Self {
             delivery_id: delivery.delivery_id.clone(),
             message_id: delivery.message_id.clone(),
+            human_summary: delivery.human_summary.clone(),
             status: delivery.status.clone(),
             sender_thread_id: delivery.sender_thread_id.clone(),
             receiver_thread_id: delivery.receiver_thread_id.clone(),
@@ -217,6 +233,8 @@ impl PersistedArenaDeliveryCheckpoint {
             checkpoint_event_refs: delivery.checkpoint_event_refs.clone(),
             receiver_turn_id: delivery.receiver_turn_id.clone(),
             receiver_response_event_ref: delivery.receiver_response_event_ref.clone(),
+            delivered_as_human_instruction: delivery.delivered_as_human_instruction,
+            memory_replay_required: delivery.memory_replay_required,
             event_refs: delivery.event_refs.clone(),
             rejection_reason: delivery.rejection_reason.clone(),
             failure_reason: delivery.failure_reason.clone(),
@@ -227,7 +245,7 @@ impl PersistedArenaDeliveryCheckpoint {
         MemythosArenaMessageDelivery {
             delivery_id: self.delivery_id,
             message_id: self.message_id,
-            human_summary: String::new(),
+            human_summary: self.human_summary,
             status: self.status,
             sender_thread_id: self.sender_thread_id,
             receiver_thread_id: self.receiver_thread_id,
@@ -242,8 +260,8 @@ impl PersistedArenaDeliveryCheckpoint {
             checkpoint_event_refs: self.checkpoint_event_refs,
             receiver_turn_id: self.receiver_turn_id,
             receiver_response_event_ref: self.receiver_response_event_ref,
-            delivered_as_human_instruction: false,
-            memory_replay_required: false,
+            delivered_as_human_instruction: self.delivered_as_human_instruction,
+            memory_replay_required: self.memory_replay_required,
             event_refs: self.event_refs,
             rejection_reason: self.rejection_reason,
             failure_reason: self.failure_reason,
@@ -307,6 +325,74 @@ pub(super) struct NativeArenaMessageAggregate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivery_checkpoint_preserves_intake_and_loopback_semantics() {
+        let delivery = MemythosArenaMessageDelivery {
+            delivery_id: "delivery-intake".to_string(),
+            message_id: "message-intake".to_string(),
+            human_summary: "Durable Concierge framing".to_string(),
+            status: "receiver_turn_completed".to_string(),
+            sender_thread_id: "human".to_string(),
+            receiver_thread_id: "concierge-thread".to_string(),
+            arena_id: "arena-a".to_string(),
+            round_id: "round-1".to_string(),
+            phase: Some("arena_intake".to_string()),
+            delivery_mechanism: "native_turn".to_string(),
+            delivery_policy: Some(MemythosArenaDeliveryPolicy::Immediate),
+            aggregate_id: None,
+            aggregate_state: None,
+            checkpoint_state: None,
+            checkpoint_event_refs: Vec::new(),
+            receiver_turn_id: Some("turn-intake".to_string()),
+            receiver_response_event_ref: Some("item-intake".to_string()),
+            delivered_as_human_instruction: true,
+            memory_replay_required: true,
+            event_refs: vec!["event-intake".to_string()],
+            rejection_reason: None,
+            failure_reason: None,
+        };
+
+        let restored = PersistedArenaDeliveryCheckpoint::capture(&delivery).restore("arena-a");
+
+        assert_eq!(restored.human_summary, delivery.human_summary);
+        assert!(restored.delivered_as_human_instruction);
+        assert!(restored.memory_replay_required);
+    }
+
+    #[test]
+    fn old_delivery_checkpoint_defaults_new_semantic_fields() {
+        let mut checkpoint: PersistedArenaDeliveryCheckpoint =
+            serde_json::from_value(serde_json::json!({
+                "delivery_id": "delivery-old",
+                "message_id": "message-old",
+                "status": "receiver_turn_completed",
+                "sender_thread_id": "human",
+                "receiver_thread_id": "concierge-thread",
+                "round_id": "round-1",
+                "phase": "arena_intake",
+                "delivery_mechanism": "native_turn",
+                "delivery_policy": null,
+                "aggregate_id": null,
+                "aggregate_state": null,
+                "checkpoint_state": null,
+                "checkpoint_event_refs": [],
+                "receiver_turn_id": "turn-old",
+                "receiver_response_event_ref": "item-old",
+                "event_refs": [],
+                "rejection_reason": null,
+                "failure_reason": null
+            }))
+            .expect("v1-v3 checkpoint remains readable");
+
+        assert!(checkpoint.human_summary.is_empty());
+        assert!(!checkpoint.delivered_as_human_instruction);
+        assert!(!checkpoint.memory_replay_required);
+
+        checkpoint.migrate_from_schema(3);
+        assert!(checkpoint.delivered_as_human_instruction);
+        assert!(checkpoint.human_summary.is_empty());
+    }
 
     #[test]
     fn aggregate_checkpoint_capture_is_deterministic_and_round_trips() {

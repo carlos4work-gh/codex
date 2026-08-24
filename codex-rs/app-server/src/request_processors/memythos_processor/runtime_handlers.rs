@@ -85,6 +85,7 @@ impl MemythosRequestProcessor {
                 Some(
                     LEGACY_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
                         | PREVIOUS_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
+                        | RECOVERY_BLOCKER_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
                         | ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
                 )
             ) {
@@ -107,6 +108,7 @@ impl MemythosRequestProcessor {
                         record.arena_id
                     ))
                 })?;
+            let source_schema_version = snapshot.schema_version;
             if i64::from(snapshot.schema_version) != record.schema_version
                 || snapshot.protocol.arena_id != record.arena_id
                 || snapshot.room.arena_id != record.arena_id
@@ -117,6 +119,9 @@ impl MemythosRequestProcessor {
                 )));
             }
             snapshot.schema_version = ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION;
+            for delivery in &mut snapshot.deliveries {
+                delivery.migrate_from_schema(source_schema_version);
+            }
             for pending_effect in &snapshot.pending_effects {
                 let key = arena_pending_effect_key(&record.arena_id, &pending_effect.message_id);
                 if pending_effect.arena_id != record.arena_id
