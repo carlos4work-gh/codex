@@ -152,6 +152,11 @@ jobs:
           cargo test -p codex-app-server native_turn_completion_promotes_parent_peer_observation
           cargo test -p codex-app-server canonical_arena_lifecycle_is_owned_by_rust_across_rpc_calls
 
+      - name: Memythos native event handler boundary
+        run: |
+          cargo test -p codex-app-server room_activity_list_summarizes_delivery_without_closing_arena
+          cargo test -p codex-app-server arena_terminalizes_after_native_judge_returns_a_structured_verdict
+
       - name: Memythos aggregate checkpoint boundary
         run: |
           cargo test -p codex-app-server aggregate_then_trigger_queues_until_expected_sources_are_complete
