@@ -122,6 +122,13 @@ jobs:
           cargo test -p codex-app-server room_registration_rejects_legacy_observer_concierge_encoding
           cargo test -p codex-app-server room_tool_lists_registered_parent_threads
 
+      - name: Memythos room routing boundary
+        run: |
+          cargo test -p codex-app-server competitive_room_requires_explicit_semantic_message_kinds
+          cargo test -p codex-app-server competitive_room_routes_phases_through_their_native_roles
+          cargo test -p codex-app-server competitive_room_cannot_request_judge_before_plural_bets_complete
+          cargo test -p codex-app-server partial_resume_intake_authorizes_only_one_combined_reassessment_per_affected_parent
+
       - name: Legacy Memythos migration upgrade
         run: cargo test -p codex-state upgrades_legacy_memythos_migrations_without_checksum_conflicts
 

@@ -566,6 +566,7 @@ mod memythos_runtime;
 mod memythos_runtime_state;
 mod memythos_round;
 mod memythos_room;
+mod memythos_room_routing;
 mod memythos_thread_consolidation;
 mod persisted_resume_settings;
 mod plugins;
