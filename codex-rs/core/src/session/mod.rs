@@ -828,6 +828,24 @@ impl SessionIo {
         Ok(id)
     }
 
+    pub(crate) async fn submit_with_trace_and_id(
+        &self,
+        id: String,
+        op: Op,
+        parent_turn_id: Option<String>,
+        root_turn_id: Option<String>,
+    ) -> CodexResult<String> {
+        self.submit_with_id(Submission {
+            id: id.clone(),
+            op,
+            trace: None,
+            parent_turn_id,
+            root_turn_id,
+        })
+        .await?;
+        Ok(id)
+    }
+
     /// Use sparingly: prefer `submit()` so submission IDs are generated consistently.
     pub(crate) async fn submit_with_id(&self, mut sub: Submission) -> CodexResult<()> {
         if sub.trace.is_none() {

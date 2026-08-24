@@ -1,0 +1,1 @@
+ALTER TABLE native_mailbox_communications ADD COLUMN planned_submission_id TEXT;

@@ -75,6 +75,7 @@ pub use native_mailbox::NativeMailboxResolutionAction;
 pub use native_mailbox::NativeMailboxResolutionAuditRecord;
 pub use native_mailbox::NativeMailboxResolutionCommand;
 pub use native_mailbox::NativeMailboxResolutionOutcome;
+pub use native_mailbox::NativeMailboxSubmissionState;
 pub use queued_items::SqliteQueueStore;
 pub use recovery::RuntimeDbBackup;
 pub(super) use recovery::RuntimeDbInitError;

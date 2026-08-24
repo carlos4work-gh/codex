@@ -81,6 +81,7 @@ pub use runtime::NativeMailboxResolutionAction;
 pub use runtime::NativeMailboxResolutionAuditRecord;
 pub use runtime::NativeMailboxResolutionCommand;
 pub use runtime::NativeMailboxResolutionOutcome;
+pub use runtime::NativeMailboxSubmissionState;
 pub use runtime::RemoteControlEnrollmentRecord;
 pub use runtime::RuntimeDbBackup;
 pub use runtime::SqliteQueueStore;

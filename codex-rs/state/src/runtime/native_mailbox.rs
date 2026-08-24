@@ -24,6 +24,14 @@ pub enum NativeMailboxInsertOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeMailboxSubmissionState {
+    pub planned_submission_id: Option<String>,
+    pub submission_id: Option<String>,
+    pub status: String,
+    pub newly_reserved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeMailboxRecoveryOutcome {
     Claimed(NativeMailboxCommunicationRecord),
     Quarantined(NativeMailboxCommunicationRecord),
@@ -420,18 +428,81 @@ WHERE receiver_thread_id = ? AND communication_id = ?
         submission_id: &str,
         updated_at_ms: i64,
     ) -> anyhow::Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"UPDATE native_mailbox_communications
-               SET submission_id = ?, updated_at_ms = ?
-               WHERE receiver_thread_id = ? AND communication_id = ?"#,
+               SET planned_submission_id = COALESCE(planned_submission_id, ?),
+                   submission_id = ?, updated_at_ms = ?
+               WHERE receiver_thread_id = ? AND communication_id = ?
+                 AND (planned_submission_id IS NULL OR planned_submission_id = ?)
+                 AND (submission_id IS NULL OR submission_id = ?)"#,
         )
+        .bind(submission_id)
         .bind(submission_id)
         .bind(updated_at_ms)
         .bind(receiver_thread_id)
         .bind(communication_id)
+        .bind(submission_id)
+        .bind(submission_id)
         .execute(self.pool.as_ref())
         .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "native mailbox submission conflicts with the planned or bound identity"
+        );
         Ok(())
+    }
+
+    pub async fn reserve_native_mailbox_submission_id(
+        &self,
+        receiver_thread_id: &str,
+        communication_id: &str,
+        planned_submission_id: &str,
+        updated_at_ms: i64,
+    ) -> anyhow::Result<NativeMailboxSubmissionState> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let previous_planned_submission_id: Option<String> = sqlx::query_scalar(
+            r#"SELECT planned_submission_id FROM native_mailbox_communications
+               WHERE receiver_thread_id = ? AND communication_id = ?"#,
+        )
+        .bind(receiver_thread_id)
+        .bind(communication_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let result = sqlx::query(
+            r#"UPDATE native_mailbox_communications
+               SET planned_submission_id = COALESCE(planned_submission_id, ?),
+                   updated_at_ms = ?
+               WHERE receiver_thread_id = ? AND communication_id = ?
+                 AND (planned_submission_id IS NULL OR planned_submission_id = ?)"#,
+        )
+        .bind(planned_submission_id)
+        .bind(updated_at_ms)
+        .bind(receiver_thread_id)
+        .bind(communication_id)
+        .bind(planned_submission_id)
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            result.rows_affected() == 1,
+            "native mailbox planned submission conflicts with another identity"
+        );
+        let state = sqlx::query(
+            r#"SELECT planned_submission_id, submission_id, status
+               FROM native_mailbox_communications
+               WHERE receiver_thread_id = ? AND communication_id = ?"#,
+        )
+        .bind(receiver_thread_id)
+        .bind(communication_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let state = NativeMailboxSubmissionState {
+            planned_submission_id: state.try_get("planned_submission_id")?,
+            submission_id: state.try_get("submission_id")?,
+            status: state.try_get("status")?,
+            newly_reserved: previous_planned_submission_id.is_none(),
+        };
+        tx.commit().await?;
+        Ok(state)
     }
 
     pub async fn list_pending_native_mailbox_communications(
@@ -1112,6 +1183,135 @@ mod tests {
         .await
         .expect("count staged records after activation retry");
         assert_eq!(staged_count, 0);
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn native_mailbox_planned_submission_is_stable_and_adoptable() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-4000-8000-000000000625").expect("valid thread id");
+        let mut builder = ThreadMetadataBuilder::new(
+            thread_id,
+            codex_home.join("sessions").join("receiver.jsonl"),
+            Utc::now(),
+            SessionSource::Cli,
+        );
+        builder.cwd = codex_home.clone();
+        runtime
+            .upsert_thread(&builder.build("test-provider"))
+            .await
+            .expect("persist receiver thread");
+
+        let now = Utc::now().timestamp_millis();
+        let record = NativeMailboxCommunicationRecord {
+            receiver_thread_id: thread_id.to_string(),
+            communication_id: "planned-communication-1".to_string(),
+            source_call_id: Some("planned-source-call-1".to_string()),
+            submission_id: None,
+            communication_json: r#"{"content":"stable submission"}"#.to_string(),
+            payload_hash: "sha256:planned".to_string(),
+            status: "pending".to_string(),
+            attempt_count: 0,
+            failure_fingerprint: None,
+            last_progress_ref: None,
+            quarantine_reason: None,
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        runtime
+            .insert_pending_native_mailbox_communication(&record)
+            .await
+            .expect("insert pending communication");
+
+        let first = runtime
+            .reserve_native_mailbox_submission_id(
+                &thread_id.to_string(),
+                &record.communication_id,
+                "planned-submission-1",
+                now + 1,
+            )
+            .await
+            .expect("reserve planned submission");
+        assert_eq!(
+            first.planned_submission_id.as_deref(),
+            Some("planned-submission-1")
+        );
+        assert_eq!(first.submission_id, None);
+        assert_eq!(first.status, "pending");
+        assert!(first.newly_reserved);
+
+        let retry = runtime
+            .reserve_native_mailbox_submission_id(
+                &thread_id.to_string(),
+                &record.communication_id,
+                "planned-submission-1",
+                now + 2,
+            )
+            .await
+            .expect("retry planned submission");
+        assert!(!retry.newly_reserved);
+        assert!(
+            runtime
+                .reserve_native_mailbox_submission_id(
+                    &thread_id.to_string(),
+                    &record.communication_id,
+                    "conflicting-submission",
+                    now + 3,
+                )
+                .await
+                .expect_err("reject conflicting reservation")
+                .to_string()
+                .contains("conflicts")
+        );
+
+        runtime
+            .mark_native_mailbox_communication_consumed(
+                &thread_id.to_string(),
+                &record.communication_id,
+                now + 4,
+            )
+            .await
+            .expect("consume communication");
+        runtime
+            .set_native_mailbox_submission_id(
+                &thread_id.to_string(),
+                &record.communication_id,
+                "planned-submission-1",
+                now + 5,
+            )
+            .await
+            .expect("adopt planned submission after consumption");
+        assert!(
+            runtime
+                .set_native_mailbox_submission_id(
+                    &thread_id.to_string(),
+                    &record.communication_id,
+                    "conflicting-submission",
+                    now + 6,
+                )
+                .await
+                .expect_err("reject conflicting bind")
+                .to_string()
+                .contains("conflicts")
+        );
+        assert_eq!(
+            runtime
+                .get_native_mailbox_communication(&thread_id.to_string(), &record.communication_id)
+                .await
+                .expect("read bound communication")
+                .expect("communication exists")
+                .submission_id
+                .as_deref(),
+            Some("planned-submission-1")
+        );
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }

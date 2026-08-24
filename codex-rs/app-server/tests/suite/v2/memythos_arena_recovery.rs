@@ -188,7 +188,7 @@ async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents()
 }
 
 #[tokio::test]
-async fn arena_pending_effect_resumes_after_sigkill_without_caller_retry() -> Result<()> {
+async fn arena_planned_mailbox_effect_resumes_after_sigkill_without_caller_retry() -> Result<()> {
     const MESSAGE_ID: &str = "pending-effect-before-sigkill";
     const PAYLOAD: &str = "PENDING_EFFECT_PAYLOAD_BEFORE_SIGKILL";
     let model_server = create_mock_responses_server_repeating_assistant("unused").await;
@@ -236,7 +236,7 @@ async fn arena_pending_effect_resumes_after_sigkill_without_caller_retry() -> Re
     .await?;
     let now = chrono::Utc::now().timestamp_millis();
     state_db
-        .insert_staged_native_mailbox_communication(
+        .insert_pending_native_mailbox_communication(
             &codex_state::NativeMailboxCommunicationRecord {
                 receiver_thread_id: bettor.thread_id.clone(),
                 communication_id: MESSAGE_ID.to_string(),
@@ -244,7 +244,7 @@ async fn arena_pending_effect_resumes_after_sigkill_without_caller_retry() -> Re
                 submission_id: None,
                 communication_json,
                 payload_hash: payload_hash.clone(),
-                status: "staged".to_string(),
+                status: "pending".to_string(),
                 attempt_count: 0,
                 failure_fingerprint: None,
                 last_progress_ref: None,
@@ -254,6 +254,22 @@ async fn arena_pending_effect_resumes_after_sigkill_without_caller_retry() -> Re
             },
         )
         .await?;
+    let digest = Sha256::digest(format!("{}\0{MESSAGE_ID}", bettor.thread_id).as_bytes());
+    let mut submission_bytes = [0_u8; 16];
+    submission_bytes.copy_from_slice(&digest[..16]);
+    submission_bytes[6] = (submission_bytes[6] & 0x0f) | 0x50;
+    submission_bytes[8] = (submission_bytes[8] & 0x3f) | 0x80;
+    let planned_submission_id = uuid::Uuid::from_bytes(submission_bytes).to_string();
+    let reservation = state_db
+        .reserve_native_mailbox_submission_id(
+            &bettor.thread_id,
+            MESSAGE_ID,
+            &planned_submission_id,
+            now + 1,
+        )
+        .await?;
+    assert!(reservation.newly_reserved);
+    assert_eq!(reservation.submission_id, None);
     let mut snapshot = state_db
         .get_arena_snapshot("arena-sigkill")
         .await?
@@ -304,9 +320,18 @@ async fn arena_pending_effect_resumes_after_sigkill_without_caller_retry() -> Re
     let active = state_db
         .get_native_mailbox_communication(&bettor.thread_id, MESSAGE_ID)
         .await?
-        .expect("restore must promote the staged mailbox record");
+        .expect("restore must adopt the active mailbox record");
     assert_eq!(active.status, "pending");
-    assert!(active.submission_id.is_some());
+    assert_eq!(
+        active.submission_id.as_deref(),
+        Some(planned_submission_id.as_str())
+    );
+    assert!(
+        delivery
+            .event_refs
+            .iter()
+            .any(|event_ref| event_ref.ends_with(&format!("/mailbox/{planned_submission_id}")))
+    );
     let reconciled_snapshot = state_db
         .get_arena_snapshot("arena-sigkill")
         .await?

@@ -232,6 +232,49 @@ impl AgentControl {
         .await
     }
 
+    pub(crate) async fn send_inter_agent_communication_with_submission_id(
+        &self,
+        agent_id: ThreadId,
+        communication: InterAgentCommunication,
+        agent_communication_context: AgentCommunicationContext,
+        submission_id: String,
+    ) -> CodexResult<String> {
+        let state = self.upgrade()?;
+        if communication.trigger_turn {
+            let thread = state.get_thread(agent_id).await?;
+            self.ensure_execution_capacity_for_turn_start(&thread)
+                .await?;
+        }
+        let communication_for_log =
+            crate::agent_communication::logging_enabled().then(|| communication.clone());
+        let result = self
+            .handle_thread_request_result(
+                agent_id,
+                &state,
+                state
+                    .send_op_with_id(
+                        agent_id,
+                        submission_id,
+                        Op::InterAgentCommunication { communication },
+                        None,
+                        None,
+                    )
+                    .await,
+            )
+            .await;
+        if let (Some(communication), Ok(communication_id)) =
+            (communication_for_log, result.as_ref())
+        {
+            crate::agent_communication::emit_agent_communication_send(
+                communication_id,
+                &agent_communication_context,
+                &communication,
+                agent_id,
+            );
+        }
+        result
+    }
+
     async fn send_inter_agent_communication_after_capacity_check(
         &self,
         agent_id: ThreadId,

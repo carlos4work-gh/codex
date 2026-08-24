@@ -140,6 +140,15 @@ impl InputQueue {
         !self.mailbox_pending_mails.lock().await.is_empty()
     }
 
+    pub(crate) async fn has_mailbox_communication(&self, communication_id: &str) -> bool {
+        self.mailbox_pending_mails.lock().await.iter().any(|mail| {
+            mail.communication
+                .id
+                .as_ref()
+                .is_some_and(|id| id.to_string() == communication_id)
+        })
+    }
+
     pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
         self.mailbox_pending_mails
             .lock()

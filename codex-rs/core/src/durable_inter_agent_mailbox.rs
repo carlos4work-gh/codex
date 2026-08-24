@@ -5,6 +5,7 @@ use codex_rollout::state_db::StateDbHandle;
 use codex_state::NativeMailboxCommunicationRecord;
 use codex_state::NativeMailboxInsertOutcome;
 use codex_state::NativeMailboxRecoveryOutcome;
+use codex_state::NativeMailboxSubmissionState;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -24,6 +25,7 @@ pub(crate) struct RestoredCommunications {
 pub(crate) struct ActivatedCommunication {
     pub communication: InterAgentCommunication,
     pub submission_id: Option<String>,
+    pub was_staged: bool,
 }
 
 pub(crate) struct DurableInterAgentMailbox {
@@ -128,7 +130,7 @@ impl DurableInterAgentMailbox {
                 CodexErr::Fatal(format!("failed to read active mailbox message: {error}"))
             })?
             .ok_or_else(|| CodexErr::Fatal("native mailbox message disappeared".to_string()))?;
-        if let Some(staged) = staged {
+        if let Some(staged) = staged.as_ref() {
             if staged.payload_hash != active.payload_hash
                 || staged.communication_json != active.communication_json
             {
@@ -149,6 +151,7 @@ impl DurableInterAgentMailbox {
         Ok(ActivatedCommunication {
             communication,
             submission_id,
+            was_staged: staged.is_some(),
         })
     }
 
@@ -171,6 +174,32 @@ impl DurableInterAgentMailbox {
             .await
             .map_err(|error| {
                 CodexErr::Fatal(format!("failed to bind native mailbox submission: {error}"))
+            })
+    }
+
+    pub(crate) async fn reserve_submission(
+        &self,
+        receiver_thread_id: &str,
+        communication_id: &str,
+        planned_submission_id: &str,
+    ) -> CodexResult<NativeMailboxSubmissionState> {
+        let state_db = self.state_db.as_ref().ok_or_else(|| {
+            CodexErr::Fatal(
+                "native mailbox submission reservation requires sqlite state".to_string(),
+            )
+        })?;
+        state_db
+            .reserve_native_mailbox_submission_id(
+                receiver_thread_id,
+                communication_id,
+                planned_submission_id,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!(
+                    "failed to reserve native mailbox submission: {error}"
+                ))
             })
     }
 
@@ -279,4 +308,16 @@ fn native_mailbox_record(
         created_at_ms: now,
         updated_at_ms: now,
     })
+}
+
+pub(crate) fn native_mailbox_submission_id(
+    receiver_thread_id: &str,
+    communication_id: &str,
+) -> String {
+    let digest = Sha256::digest(format!("{receiver_thread_id}\0{communication_id}").as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
 }

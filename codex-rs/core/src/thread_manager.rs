@@ -9,6 +9,7 @@ use crate::config::ThreadStoreConfig;
 use crate::current_time::TimeProvider;
 use crate::durable_inter_agent_mailbox::DurableInterAgentMailbox;
 use crate::durable_inter_agent_mailbox::PersistOutcome;
+use crate::durable_inter_agent_mailbox::native_mailbox_submission_id;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::default_thread_environment_selections;
 use crate::mcp::McpManager;
@@ -1394,44 +1395,20 @@ impl ThreadManager {
             })?;
         let receiver_thread = self.get_thread(receiver_thread_id).await?;
         let mailbox = DurableInterAgentMailbox::new(receiver_thread.state_db());
-        if let PersistOutcome::Existing {
-            submission_id: Some(submission_id),
-        } = mailbox
+        mailbox
             .stage_before_send(
                 &receiver_thread_id.to_string(),
                 &communication_id,
                 &communication,
             )
-            .await?
-        {
-            return Ok(submission_id);
-        }
-        if let PersistOutcome::Existing {
-            submission_id: Some(submission_id),
-        } = mailbox
-            .activate_before_send(&receiver_thread_id.to_string(), &communication_id)
-            .await?
-        {
-            return Ok(submission_id);
-        }
-        let submission_id = self
-            .agent_control()
-            .send_inter_agent_communication(
-                receiver_thread_id,
-                communication,
-                AgentCommunicationContext::new(AgentCommunicationKind::Message, sender_thread_id),
-                None,
-                None,
-            )
             .await?;
-        mailbox
-            .bind_submission(
-                &receiver_thread_id.to_string(),
-                &communication_id,
-                &submission_id,
-            )
-            .await?;
-        Ok(submission_id)
+        self.activate_staged_inter_agent_communication_by_id(
+            sender_thread_id,
+            receiver_thread_id,
+            &communication_id,
+        )
+        .await
+        .map(|(submission_id, _)| submission_id)
     }
 
     pub async fn activate_staged_inter_agent_communication_by_id(
@@ -1448,14 +1425,62 @@ impl ThreadManager {
         if let Some(submission_id) = activated.submission_id {
             return Ok((submission_id, activated.communication));
         }
+        let planned_submission_id =
+            native_mailbox_submission_id(&receiver_thread_id.to_string(), communication_id);
+        let submission_state = mailbox
+            .reserve_submission(
+                &receiver_thread_id.to_string(),
+                communication_id,
+                &planned_submission_id,
+            )
+            .await?;
+        if let Some(submission_id) = submission_state.submission_id {
+            return Ok((submission_id, activated.communication));
+        }
+        if submission_state.status == "consumed" {
+            if submission_state.newly_reserved {
+                return Err(CodexErr::Fatal(
+                    "consumed native mailbox communication has no adoptable planned submission"
+                        .to_string(),
+                ));
+            }
+            mailbox
+                .bind_submission(
+                    &receiver_thread_id.to_string(),
+                    communication_id,
+                    &planned_submission_id,
+                )
+                .await?;
+            return Ok((planned_submission_id, activated.communication));
+        }
+        if !activated.was_staged
+            && self
+                .state
+                .has_pending_mailbox_communication(receiver_thread_id, communication_id)
+                .await?
+        {
+            self.state
+                .start_pending_mailbox_work_with_id(
+                    receiver_thread_id,
+                    planned_submission_id.clone(),
+                )
+                .await?;
+            mailbox
+                .bind_submission(
+                    &receiver_thread_id.to_string(),
+                    communication_id,
+                    &planned_submission_id,
+                )
+                .await?;
+            return Ok((planned_submission_id, activated.communication));
+        }
         let submission_id = self
             .agent_control()
-            .send_inter_agent_communication(
+            .send_inter_agent_communication_with_submission_id(
                 receiver_thread_id,
                 activated.communication.clone(),
                 AgentCommunicationContext::new(AgentCommunicationKind::Message, sender_thread_id),
-                None,
-                None,
+                planned_submission_id,
             )
             .await?;
         mailbox
@@ -1619,6 +1644,47 @@ impl ThreadManagerState {
             .io
             .submit_with_trace(op, /*trace*/ None, parent_turn_id, root_turn_id)
             .await
+    }
+
+    pub(crate) async fn send_op_with_id(
+        &self,
+        thread_id: ThreadId,
+        submission_id: String,
+        op: Op,
+        parent_turn_id: Option<String>,
+        root_turn_id: Option<String>,
+    ) -> CodexResult<String> {
+        let thread = self.get_thread(thread_id).await?;
+        thread
+            .io
+            .submit_with_trace_and_id(submission_id, op, parent_turn_id, root_turn_id)
+            .await
+    }
+
+    async fn start_pending_mailbox_work_with_id(
+        &self,
+        thread_id: ThreadId,
+        submission_id: String,
+    ) -> CodexResult<()> {
+        let thread = self.get_thread(thread_id).await?;
+        thread
+            .session
+            .maybe_start_turn_for_pending_work_with_sub_id(submission_id)
+            .await;
+        Ok(())
+    }
+
+    async fn has_pending_mailbox_communication(
+        &self,
+        thread_id: ThreadId,
+        communication_id: &str,
+    ) -> CodexResult<bool> {
+        let thread = self.get_thread(thread_id).await?;
+        Ok(thread
+            .session
+            .input_queue
+            .has_mailbox_communication(communication_id)
+            .await)
     }
 
     /// Remove a thread from the manager by ID, returning it when present.
