@@ -168,6 +168,11 @@ jobs:
           cargo test -p codex-app-server native_bettor_turns_
           cargo test -p codex-app-server arena_request_partially_resumes_
 
+      - name: Memythos parent configuration boundary
+        run: |
+          cargo test -p codex-app-server memythos_parent_configuration::tests
+          cargo test -p codex-app-server room_activity_list_exposes_native_registration_cursor_events
+
       - name: Independent root role rollout contract
         run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
 

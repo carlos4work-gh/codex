@@ -554,6 +554,7 @@ mod memythos_contracts;
 mod memythos_delivery;
 mod memythos_judge;
 mod memythos_observability;
+mod memythos_parent_configuration;
 mod memythos_parent_provisioning;
 mod memythos_processor;
 mod memythos_resume;
@@ -590,7 +591,7 @@ pub(crate) use memythos_composition_planning::NativeArenaCompositionPlanningAdap
 pub(crate) use memythos_parent_provisioning::NativeArenaParentProvisioningAdapter;
 pub(crate) use memythos_processor::NativeMailboxPeerParentDeliveryAdapter;
 pub(crate) use memythos_processor::ThreadGoalParentSnapshotAdapter;
-pub(crate) use memythos_processor::ThreadManagerParentConfigurationAdapter;
+pub(crate) use memythos_parent_configuration::ThreadManagerParentConfigurationAdapter;
 pub(crate) use memythos_processor::ThreadTurnsParentResponseAdapter;
 pub(crate) use memythos_processor::TurnStartThreadConsolidationAdapter;
 pub(crate) use plugins::PluginRequestProcessor;
