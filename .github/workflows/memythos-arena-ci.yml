@@ -149,6 +149,8 @@ jobs:
           cargo test -p codex-app-server aggregate_then_trigger_queues_until_expected_sources_are_complete
           cargo test -p codex-app-server aggregate_then_trigger_does_not_count_duplicate_messages
           cargo test -p codex-app-server autonomous_bet_aggregate_applies_the_native_judge_contract
+          cargo test -p codex-app-server native_bettor_turns_receive_mechanism_output_contracts
+          cargo test -p codex-app-server native_judge_targeted_refinement_contract_is_bounded_and_attributable
 
       - name: Legacy Memythos migration upgrade
         run: cargo test -p codex-state upgrades_legacy_memythos_migrations_without_checksum_conflicts
