@@ -113,6 +113,13 @@ jobs:
           cargo test -p codex-app-server thread_consolidate_
           cargo test -p codex-app-server thread_contract_assemble_
 
+      - name: OOTB thread consolidation adapter boundary
+        run: |
+          cargo test -p codex-app-server thread_consolidate_rejects_empty_sources
+          cargo test -p codex-app-server thread_consolidate_uses_native_summary_and_coordinator_turn
+          cargo test -p codex-app-server thread_contract_assemble_registers_native_contract_ref
+          cargo test -p codex-app-server thread_contract_assemble_rejects_missing_output_schema
+
       - name: Memythos resume lifecycle contract
         run: |
           cargo test -p codex-app-server memythos_resume::tests
