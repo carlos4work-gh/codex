@@ -20,6 +20,81 @@ pub(crate) struct ParentGoalSnapshot {
     pub(super) degraded_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParentGoalSnapshotContractError {
+    MixedDegradedState,
+    IncompleteNativeSnapshot,
+    NegativeUsage,
+    ForeignEvidenceRef(String),
+}
+
+impl std::fmt::Display for ParentGoalSnapshotContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MixedDegradedState => {
+                formatter.write_str("degraded goal snapshot cannot expose native state")
+            }
+            Self::IncompleteNativeSnapshot => {
+                formatter.write_str("native goal snapshot is incomplete")
+            }
+            Self::NegativeUsage => formatter.write_str("goal usage values cannot be negative"),
+            Self::ForeignEvidenceRef(reference) => {
+                write!(
+                    formatter,
+                    "goal evidence ref belongs to another thread: {reference}"
+                )
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_parent_goal_snapshot(
+    thread_id: &str,
+    snapshot: &ParentGoalSnapshot,
+) -> Result<(), ParentGoalSnapshotContractError> {
+    let has_native_state = snapshot.goal_snapshot_ref.is_some()
+        || snapshot.budget_state_ref.is_some()
+        || snapshot.goal_status.is_some()
+        || snapshot.token_budget.is_some()
+        || snapshot.tokens_used.is_some()
+        || snapshot.time_used_seconds.is_some()
+        || !snapshot.evidence_refs.is_empty();
+    if snapshot.degraded_reason.is_some() {
+        return if has_native_state {
+            Err(ParentGoalSnapshotContractError::MixedDegradedState)
+        } else {
+            Ok(())
+        };
+    }
+    let (Some(goal_ref), Some(budget_ref), Some(_), Some(tokens_used), Some(time_used_seconds)) = (
+        snapshot.goal_snapshot_ref.as_ref(),
+        snapshot.budget_state_ref.as_ref(),
+        snapshot.goal_status.as_ref(),
+        snapshot.tokens_used,
+        snapshot.time_used_seconds,
+    ) else {
+        return Err(ParentGoalSnapshotContractError::IncompleteNativeSnapshot);
+    };
+    if tokens_used < 0
+        || time_used_seconds < 0
+        || snapshot.token_budget.is_some_and(|budget| budget < 0)
+    {
+        return Err(ParentGoalSnapshotContractError::NegativeUsage);
+    }
+    let prefix = format!("app-server://threads/{thread_id}/");
+    for reference in snapshot.evidence_refs.iter().chain([goal_ref, budget_ref]) {
+        if !reference.starts_with(&prefix) {
+            return Err(ParentGoalSnapshotContractError::ForeignEvidenceRef(
+                reference.clone(),
+            ));
+        }
+    }
+    if !snapshot.evidence_refs.contains(goal_ref) || !snapshot.evidence_refs.contains(budget_ref) {
+        return Err(ParentGoalSnapshotContractError::IncompleteNativeSnapshot);
+    }
+    Ok(())
+}
+
 pub(crate) type ParentGoalSnapshotFuture<'a> =
     Pin<Box<dyn Future<Output = ParentGoalSnapshot> + Send + 'a>>;
 
@@ -117,6 +192,7 @@ mod tests {
             snapshot.degraded_reason.as_deref(),
             Some("thread/goal/get returned no active goal")
         );
+        assert_eq!(validate_parent_goal_snapshot("thread-a", &snapshot), Ok(()));
     }
 
     #[test]
@@ -139,5 +215,37 @@ mod tests {
         assert_eq!(snapshot.tokens_used, Some(25));
         assert_eq!(snapshot.evidence_refs.len(), 2);
         assert!(snapshot.degraded_reason.is_none());
+        assert_eq!(validate_parent_goal_snapshot("thread-a", &snapshot), Ok(()));
+    }
+
+    #[test]
+    fn contract_rejects_mixed_or_foreign_goal_state() {
+        let mut snapshot = parent_goal_snapshot_from_goal("thread-a", None);
+        snapshot.tokens_used = Some(1);
+        assert_eq!(
+            validate_parent_goal_snapshot("thread-a", &snapshot),
+            Err(ParentGoalSnapshotContractError::MixedDegradedState)
+        );
+
+        let mut snapshot = parent_goal_snapshot_from_goal(
+            "thread-a",
+            Some(ThreadGoal {
+                thread_id: "thread-a".to_string(),
+                objective: "decide".to_string(),
+                status: ThreadGoalStatus::Active,
+                token_budget: None,
+                tokens_used: 0,
+                time_used_seconds: 0,
+                created_at: 1,
+                updated_at: 2,
+            }),
+        );
+        snapshot
+            .evidence_refs
+            .push("app-server://threads/thread-b/goals/current".to_string());
+        assert!(matches!(
+            validate_parent_goal_snapshot("thread-a", &snapshot),
+            Err(ParentGoalSnapshotContractError::ForeignEvidenceRef(_))
+        ));
     }
 }

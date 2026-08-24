@@ -36,6 +36,9 @@ impl MemythosRequestProcessor {
                 .parent_goal_snapshot_adapter
                 .current_goal_snapshot(&parent.thread_id)
                 .await;
+            validate_parent_goal_snapshot(&parent.thread_id, &goal_snapshot).map_err(|error| {
+                invalid_params(format!("parent goal adapter contract rejected: {error}"))
+            })?;
             continuities.push(build_parent_thread_continuity(
                 &parent,
                 &deliveries,
