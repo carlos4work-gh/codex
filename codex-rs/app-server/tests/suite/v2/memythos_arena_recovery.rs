@@ -1640,18 +1640,30 @@ async fn arena_terminal_turn_reconciles_after_sigkill_without_duplicate_turn() -
 
 #[tokio::test]
 async fn arena_competitive_closure_recovers_same_verdict_after_sigkill() -> Result<()> {
-    run_competitive_terminal_recovery("close", MemythosArenaLifecycleState::ClosedCleanly).await
+    run_competitive_terminal_recovery("close", MemythosArenaLifecycleState::ClosedCleanly, false)
+        .await
 }
 
 #[tokio::test]
 async fn arena_parent_rollup_recovers_same_verdict_after_sigkill() -> Result<()> {
-    run_competitive_terminal_recovery("parent_rollup", MemythosArenaLifecycleState::AwaitingParent)
+    run_competitive_terminal_recovery(
+        "parent_rollup",
+        MemythosArenaLifecycleState::AwaitingParent,
+        false,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn arena_targeted_refinement_final_verdict_recovers_after_sigkill() -> Result<()> {
+    run_competitive_terminal_recovery("close", MemythosArenaLifecycleState::ClosedCleanly, true)
         .await
 }
 
 async fn run_competitive_terminal_recovery(
     next_action: &str,
     expected_lifecycle: MemythosArenaLifecycleState,
+    targeted_refinement_final: bool,
 ) -> Result<()> {
     let verdict = serde_json::json!({
         "winner_participant_id": "bettor-growth",
@@ -1668,8 +1680,16 @@ async fn run_competitive_terminal_recovery(
         "targeted_refinements": [],
         "reopening_signals": ["Unit economics materially deteriorate."],
         "protected_decisions_status": "preserved",
-        "reopened_decision_refs": [],
-        "resume_scope_status": "not_applicable",
+        "reopened_decision_refs": if targeted_refinement_final {
+            vec!["decision://growth/reversal-threshold"]
+        } else {
+            Vec::<&str>::new()
+        },
+        "resume_scope_status": if targeted_refinement_final {
+            "partially_reopened"
+        } else {
+            "not_applicable"
+        },
         "rationale": "The growth posture wins within the declared reversible boundary."
     })
     .to_string();
@@ -1780,6 +1800,62 @@ async fn run_competitive_terminal_recovery(
                 }));
         }
     }
+    if targeted_refinement_final {
+        snapshot_json["deliveries"]
+            .as_array_mut()
+            .expect("delivery checkpoints")
+            .push(serde_json::json!({
+                "delivery_id": "delivery-initial-targeted-verdict",
+                "message_id": "message-initial-targeted-verdict",
+                "human_summary": "Judge requested two localized owner attestations.",
+                "status": "receiver_turn_completed",
+                "sender_thread_id": concierge.thread_id,
+                "receiver_thread_id": judge.thread_id,
+                "round_id": "round-1",
+                "phase": "judge",
+                "delivery_mechanism": "native_checkpoint_fixture",
+                "delivery_policy": null,
+                "aggregate_id": null,
+                "aggregate_state": null,
+                "checkpoint_state": null,
+                "checkpoint_event_refs": [],
+                "receiver_turn_id": "mailbox_queued",
+                "receiver_response_event_ref": "app-server://arena-sigkill/initial-targeted-verdict",
+                "delivered_as_human_instruction": false,
+                "memory_replay_required": false,
+                "event_refs": ["app-server://arena-sigkill/initial-targeted-verdict"],
+                "rejection_reason": null,
+                "failure_reason": null
+            }));
+        for (bettor_index, bettor) in bettors.iter().enumerate() {
+            snapshot_json["deliveries"]
+                .as_array_mut()
+                .expect("delivery checkpoints")
+                .push(serde_json::json!({
+                    "delivery_id": format!("delivery-targeted-refinement-{bettor_index}"),
+                    "message_id": format!("message-targeted-refinement-{bettor_index}"),
+                    "human_summary": "Localized owner attestation is complete.",
+                    "status": "receiver_turn_completed",
+                    "sender_thread_id": concierge.thread_id,
+                    "receiver_thread_id": bettor.thread_id,
+                    "round_id": "round-1",
+                    "phase": "targeted_refinement",
+                    "delivery_mechanism": "native_checkpoint_fixture",
+                    "delivery_policy": null,
+                    "aggregate_id": null,
+                    "aggregate_state": null,
+                    "checkpoint_state": null,
+                    "checkpoint_event_refs": [],
+                    "receiver_turn_id": "mailbox_queued",
+                    "receiver_response_event_ref": format!("app-server://arena-sigkill/targeted-refinement/{bettor_index}"),
+                    "delivered_as_human_instruction": false,
+                    "memory_replay_required": false,
+                    "event_refs": [format!("app-server://arena-sigkill/targeted-refinement/{bettor_index}")],
+                    "rejection_reason": null,
+                    "failure_reason": null
+                }));
+        }
+    }
     snapshot.snapshot_json = serde_json::to_string(&snapshot_json)?;
     snapshot.last_event_hash = format!("{:x}", Sha256::digest(snapshot.snapshot_json.as_bytes()));
     state_db.upsert_arena_snapshot(&snapshot).await?;
@@ -1792,15 +1868,34 @@ async fn run_competitive_terminal_recovery(
         resume_native_thread(&mut process, &lease.thread_id).await?;
     }
 
-    let mut verdict_request = triggered_proposal_message(
-        "competitive-verdict-request",
-        &concierge.thread_id,
-        &judge.thread_id,
-    );
+    let verdict_message_id = if targeted_refinement_final {
+        "competitive-final-verdict-request"
+    } else {
+        "competitive-verdict-request"
+    };
+    let terminal_phase = if targeted_refinement_final {
+        "final_judge"
+    } else {
+        "judge"
+    };
+    let mut verdict_request =
+        triggered_proposal_message(verdict_message_id, &concierge.thread_id, &judge.thread_id);
     verdict_request.to_parent_role = "judge".to_string();
-    verdict_request.message_kind = "verdict_request".to_string();
+    verdict_request.message_kind = if targeted_refinement_final {
+        "final_verdict_request"
+    } else {
+        "verdict_request"
+    }
+    .to_string();
     verdict_request.human_summary = "Judge the sealed competitive round.".to_string();
-    verdict_request.response_contract = Some("judge_verdict".to_string());
+    verdict_request.response_contract = Some(
+        if targeted_refinement_final {
+            "final_judge_verdict"
+        } else {
+            "judge_verdict"
+        }
+        .to_string(),
+    );
     let delivered = send_arena_message(&mut process, verdict_request).await?;
     assert_eq!(delivered.status, "delivered_to_native_mailbox_turn");
     let stale_snapshot = state_db
@@ -1813,7 +1908,7 @@ async fn run_competitive_terminal_recovery(
         .as_array()
         .expect("delivery checkpoints")
         .iter()
-        .find(|delivery| delivery["message_id"] == "competitive-verdict-request")
+        .find(|delivery| delivery["message_id"] == verdict_message_id)
         .expect("Judge delivery must be durable before its OOTB turn completes");
     assert_eq!(
         stale_judge_delivery["status"],
@@ -1861,7 +1956,7 @@ async fn run_competitive_terminal_recovery(
             .filter(|delivery| {
                 delivery.sender_thread_id == judge.thread_id
                     && delivery.receiver_thread_id == concierge.thread_id
-                    && delivery.phase.as_deref() == Some("judge")
+                    && delivery.phase.as_deref() == Some(terminal_phase)
             })
             .count(),
         1
@@ -1883,6 +1978,18 @@ async fn run_competitive_terminal_recovery(
             .communication_json
             .contains("claim://risk/reversibility")
     );
+    if targeted_refinement_final {
+        assert!(
+            verdict_loopback
+                .communication_json
+                .contains("decision://growth/reversal-threshold")
+        );
+        assert!(
+            verdict_loopback
+                .communication_json
+                .contains("partially_reopened")
+        );
+    }
     for lease in &provisioned.leases {
         let request_id = recovered_process
             .send_raw_request(

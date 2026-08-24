@@ -342,6 +342,7 @@ jobs:
           cargo test -p codex-app-server --test all arena_terminal_turn_reconciles_after_sigkill_without_duplicate_turn
           cargo test -p codex-app-server --test all arena_competitive_closure_recovers_same_verdict_after_sigkill
           cargo test -p codex-app-server --test all arena_parent_rollup_recovers_same_verdict_after_sigkill
+          cargo test -p codex-app-server --test all arena_targeted_refinement_final_verdict_recovers_after_sigkill
 
       - name: Full Memythos Arena recovery regression
         run: cargo test -p codex-app-server --test all v2::memythos_arena_recovery
