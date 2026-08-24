@@ -4969,6 +4969,9 @@ impl ParentTurnResponseAdapter for DelayedParentTurnResponseAdapter {
 #[derive(Debug)]
 struct FakeThreadConsolidationAdapter;
 
+#[derive(Debug)]
+struct ForeignEvidenceThreadConsolidationAdapter;
+
 impl ThreadConsolidationAdapter for FakeThreadConsolidationAdapter {
     fn consolidate_threads<'a>(
         &'a self,
@@ -5013,6 +5016,39 @@ impl ThreadConsolidationAdapter for FakeThreadConsolidationAdapter {
                     used_thread_turns_summary: true,
                     blockers: Vec::new(),
                 }
+        })
+    }
+}
+
+impl ThreadConsolidationAdapter for ForeignEvidenceThreadConsolidationAdapter {
+    fn consolidate_threads<'a>(
+        &'a self,
+        params: &'a MemythosThreadConsolidateParams,
+    ) -> ThreadConsolidationFuture<'a> {
+        Box::pin(async move {
+            ThreadConsolidationAttempt {
+                consolidation_turn_id: Some("turn-consolidation-foreign".to_string()),
+                source_refs: params
+                    .source_thread_ids
+                    .iter()
+                    .map(|thread_id| MemythosThreadConsolidationSourceRef {
+                        thread_id: thread_id.clone(),
+                        turn_refs: vec!["app-server://threads/foreign/turns/turn-1".to_string()],
+                        items_view: "summary".to_string(),
+                        cursor: params.since_cursors.get(thread_id).cloned(),
+                        next_cursor: None,
+                        latest_agent_message_ref: None,
+                        latest_agent_message_text: None,
+                        technical_evidence_refs: Vec::new(),
+                    })
+                    .collect(),
+                agent_message_ref: None,
+                structured_output_ref: None,
+                technical_evidence_refs: Vec::new(),
+                source_method: "thread/turns/list".to_string(),
+                used_thread_turns_summary: true,
+                blockers: Vec::new(),
+            }
         })
     }
 }
@@ -6210,6 +6246,36 @@ async fn thread_consolidate_uses_native_summary_and_coordinator_turn() {
         telemetry_ref.kind == MemythosTelemetryRefKind::ThreadConsolidation
             && telemetry_ref.source == MemythosTelemetrySource::AppServerNative
     }));
+}
+
+#[tokio::test]
+async fn thread_contract_assemble_rejects_foreign_evidence_before_persisting() {
+    let processor = MemythosRequestProcessor::new_for_transport_with_adapters(
+        AppServerRpcTransport::Websocket,
+        Arc::new(FakeLivePeerParentDeliveryAdapter),
+        Arc::new(FakeParentGoalSnapshotAdapter),
+        Arc::new(ForeignEvidenceThreadConsolidationAdapter),
+        Arc::new(RecordOnlyParentTurnResponseAdapter),
+    );
+
+    let error = processor
+        .thread_contract_assemble(MemythosThreadContractAssembleParams {
+            coordinator_thread_id: "thread_concierge".to_string(),
+            source_thread_ids: vec!["thread_a".to_string()],
+            since_cursors: HashMap::new(),
+            items_view: Some("summary".to_string()),
+            contract_kind: "resume_contract".to_string(),
+            instructions: "Assemble only attributable evidence.".to_string(),
+            per_source_limit: Some(2),
+            client_user_message_id: Some("contract-invalid".to_string()),
+            output_schema: Some(serde_json::json!({"type": "object"})),
+        })
+        .await
+        .expect_err("foreign source evidence must be rejected");
+
+    assert!(error.message.contains("adapter contract rejected"));
+    assert!(error.message.contains("foreign evidence ref"));
+    assert!(processor.state.lock().await.structured_contracts.is_empty());
 }
 
 #[tokio::test]

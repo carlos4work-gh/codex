@@ -10,6 +10,11 @@ impl MemythosRequestProcessor {
             .thread_consolidation_adapter
             .consolidate_threads(&params)
             .await;
+        validate_thread_consolidation_attempt(&params, &attempt).map_err(|error| {
+            invalid_params(format!(
+                "thread consolidation adapter contract rejected: {error}"
+            ))
+        })?;
         let consolidation_turn_id = attempt
             .consolidation_turn_id
             .clone()
@@ -64,21 +69,29 @@ impl MemythosRequestProcessor {
     ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
         validate_thread_contract_assemble_request(&params)?;
 
+        let consolidation_params = MemythosThreadConsolidateParams {
+            coordinator_thread_id: params.coordinator_thread_id.clone(),
+            source_thread_ids: params.source_thread_ids.clone(),
+            since_cursors: params.since_cursors.clone(),
+            items_view: params.items_view.clone(),
+            purpose: MemythosThreadConsolidationPurpose::ArenaRoundConsolidation,
+            authority_mode: MemythosThreadConsolidationAuthorityMode::PeerCoordination,
+            instructions: params.instructions.clone(),
+            per_source_limit: params.per_source_limit,
+            client_user_message_id: params.client_user_message_id.clone(),
+            output_schema: params.output_schema.clone(),
+        };
         let assembly = self
             .thread_consolidation_adapter
-            .consolidate_threads(&MemythosThreadConsolidateParams {
-                coordinator_thread_id: params.coordinator_thread_id.clone(),
-                source_thread_ids: params.source_thread_ids.clone(),
-                since_cursors: params.since_cursors.clone(),
-                items_view: params.items_view.clone(),
-                purpose: MemythosThreadConsolidationPurpose::ArenaRoundConsolidation,
-                authority_mode: MemythosThreadConsolidationAuthorityMode::PeerCoordination,
-                instructions: params.instructions.clone(),
-                per_source_limit: params.per_source_limit,
-                client_user_message_id: params.client_user_message_id.clone(),
-                output_schema: params.output_schema.clone(),
-            })
+            .consolidate_threads(&consolidation_params)
             .await;
+        validate_thread_consolidation_attempt(&consolidation_params, &assembly).map_err(
+            |error| {
+                invalid_params(format!(
+                    "thread consolidation adapter contract rejected: {error}"
+                ))
+            },
+        )?;
 
         let contract_id = self.next_id("mem_contract", &self.next_contract_id);
         let producer_turn_id = assembly
