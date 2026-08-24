@@ -380,6 +380,13 @@ impl MemythosRequestProcessor {
                 .parent_configuration_adapter
                 .read_configuration(&participant.thread_id)
                 .await;
+            validate_parent_configuration_snapshot(&participant.thread_id, &snapshot).map_err(
+                |error| {
+                    invalid_params(format!(
+                        "parent configuration adapter contract rejected: {error}"
+                    ))
+                },
+            )?;
             let configuration = parent_configuration_for_participant(&room, participant, snapshot);
             blockers.extend(
                 configuration

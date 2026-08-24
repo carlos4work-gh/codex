@@ -19,6 +19,72 @@ pub(crate) struct ParentConfigurationSnapshot {
     pub(super) blockers: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParentConfigurationContractError {
+    MissingField(&'static str),
+    LoadedWithBlockers,
+    LoadedWithoutNativeSource,
+    DegradedWithoutBlocker,
+    ForeignConfigSource(String),
+}
+
+impl std::fmt::Display for ParentConfigurationContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingField(field) => write!(formatter, "configuration is missing {field}"),
+            Self::LoadedWithBlockers => {
+                formatter.write_str("loaded configuration cannot expose blockers")
+            }
+            Self::LoadedWithoutNativeSource => {
+                formatter.write_str("loaded configuration requires its native thread source")
+            }
+            Self::DegradedWithoutBlocker => {
+                formatter.write_str("degraded configuration requires an explicit blocker")
+            }
+            Self::ForeignConfigSource(source) => {
+                write!(
+                    formatter,
+                    "configuration source belongs to another thread: {source}"
+                )
+            }
+        }
+    }
+}
+
+pub(crate) fn validate_parent_configuration_snapshot(
+    thread_id: &str,
+    snapshot: &ParentConfigurationSnapshot,
+) -> Result<(), ParentConfigurationContractError> {
+    for (field, value) in [
+        ("collaboration mode", snapshot.collaboration_mode.as_str()),
+        ("session source", snapshot.session_source.as_str()),
+        ("lifecycle state", snapshot.lifecycle_state.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(ParentConfigurationContractError::MissingField(field));
+        }
+    }
+    let native_source = format!("app-server://threads/{thread_id}/config");
+    for source in &snapshot.config_sources {
+        if source.starts_with("app-server://threads/") && source != &native_source {
+            return Err(ParentConfigurationContractError::ForeignConfigSource(
+                source.clone(),
+            ));
+        }
+    }
+    if snapshot.lifecycle_state == "loaded" {
+        if !snapshot.blockers.is_empty() {
+            return Err(ParentConfigurationContractError::LoadedWithBlockers);
+        }
+        if !snapshot.config_sources.contains(&native_source) {
+            return Err(ParentConfigurationContractError::LoadedWithoutNativeSource);
+        }
+    } else if snapshot.blockers.is_empty() {
+        return Err(ParentConfigurationContractError::DegradedWithoutBlocker);
+    }
+    Ok(())
+}
+
 pub(crate) type ParentConfigurationFuture<'a> =
     Pin<Box<dyn Future<Output = ParentConfigurationSnapshot> + Send + 'a>>;
 
@@ -106,5 +172,47 @@ mod tests {
         assert!(snapshot.parent_thread_id.is_none());
         assert!(snapshot.config_sources.is_empty());
         assert!(snapshot.blockers.is_empty());
+    }
+
+    #[test]
+    fn contract_accepts_loaded_or_explicitly_degraded_configuration() {
+        let loaded = ParentConfigurationSnapshot {
+            collaboration_mode: "default".to_string(),
+            session_source: "app_server".to_string(),
+            lifecycle_state: "loaded".to_string(),
+            config_sources: vec!["app-server://threads/thread-a/config".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_parent_configuration_snapshot("thread-a", &loaded),
+            Ok(())
+        );
+
+        let degraded = ParentConfigurationSnapshot {
+            collaboration_mode: "unknown".to_string(),
+            session_source: "unavailable".to_string(),
+            lifecycle_state: "thread_unavailable".to_string(),
+            blockers: vec!["native thread unavailable".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_parent_configuration_snapshot("thread-a", &degraded),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn contract_rejects_unattributed_loaded_configuration() {
+        let snapshot = ParentConfigurationSnapshot {
+            collaboration_mode: "default".to_string(),
+            session_source: "app_server".to_string(),
+            lifecycle_state: "loaded".to_string(),
+            config_sources: vec!["app-server://threads/thread-b/config".to_string()],
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_parent_configuration_snapshot("thread-a", &snapshot),
+            Err(ParentConfigurationContractError::ForeignConfigSource(_))
+        ));
     }
 }

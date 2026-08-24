@@ -431,6 +431,13 @@ impl MemythosRequestProcessor {
                 .parent_configuration_adapter
                 .read_configuration(&provisioned.thread_id)
                 .await;
+            validate_parent_configuration_snapshot(&provisioned.thread_id, &snapshot).map_err(
+                |error| {
+                    invalid_params(format!(
+                        "parent configuration adapter contract rejected: {error}"
+                    ))
+                },
+            )?;
             if !snapshot.blockers.is_empty() {
                 for parent in provisioned_parents
                     .iter()
