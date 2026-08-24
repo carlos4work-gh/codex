@@ -565,6 +565,7 @@ mod memythos_resume;
 mod memythos_runtime;
 mod memythos_runtime_state;
 mod memythos_round;
+mod memythos_room;
 mod memythos_thread_consolidation;
 mod persisted_resume_settings;
 mod plugins;
@@ -700,8 +701,8 @@ mod thread_lifecycle;
 mod thread_resume_redaction;
 mod thread_summary;
 
-pub(crate) use self::memythos_processor::MemythosRoomToolSendMessageArgs;
-pub(crate) use self::memythos_processor::MemythosRoomToolSendToRoomArgs;
+pub(crate) use self::memythos_room::MemythosRoomToolSendMessageArgs;
+pub(crate) use self::memythos_room::MemythosRoomToolSendToRoomArgs;
 
 use self::config_errors::*;
 use self::request_errors::*;
