@@ -10,6 +10,7 @@ use sha2::Sha256;
 
 pub(crate) const ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 const LEGACY_ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+const ARENA_PROTOCOL_V1_TO_V2_MIGRATION_ID: &str = "arena_protocol_v1_to_v2_operations";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +34,16 @@ pub(crate) struct NativeArenaProtocolSnapshot {
     pub(crate) sequence: u64,
     #[serde(default)]
     pub(crate) operations: Vec<NativeArenaOperationSnapshot>,
+    #[serde(default)]
+    pub(crate) migration: Option<NativeArenaMigrationSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeArenaMigrationSnapshot {
+    pub(crate) source_schema_version: u32,
+    pub(crate) target_schema_version: u32,
+    pub(crate) migration_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -66,6 +77,7 @@ pub(crate) struct NativeArenaState {
     completed_phases: HashSet<(String, String)>,
     sequence: u64,
     operations: HashMap<String, NativeArenaOperationSnapshot>,
+    migration: Option<NativeArenaMigrationSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +168,7 @@ impl NativeArenaState {
             completed_phases: HashSet::new(),
             sequence: 0,
             operations: HashMap::new(),
+            migration: None,
         })
     }
 
@@ -256,6 +269,7 @@ impl NativeArenaState {
             completed_phases,
             sequence: self.sequence,
             operations,
+            migration: self.migration.clone(),
         }
     }
 
@@ -326,6 +340,23 @@ impl NativeArenaState {
             }
         }
 
+        let migration = if snapshot.schema_version == LEGACY_ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION
+        {
+            if snapshot.migration.is_some() {
+                return Err(ArenaDomainError::new(
+                    "legacy arena protocol snapshot cannot contain migration evidence",
+                ));
+            }
+            Some(NativeArenaMigrationSnapshot {
+                source_schema_version: LEGACY_ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION,
+                target_schema_version: ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION,
+                migration_id: ARENA_PROTOCOL_V1_TO_V2_MIGRATION_ID.to_string(),
+            })
+        } else {
+            validate_migration_snapshot(snapshot.migration.as_ref())?;
+            snapshot.migration
+        };
+
         let restored = Self {
             arena_id: snapshot.arena_id,
             status: snapshot.status,
@@ -334,6 +365,7 @@ impl NativeArenaState {
             completed_phases,
             sequence: snapshot.sequence,
             operations,
+            migration,
         };
         restored.validate_invariants()?;
         Ok(restored)
@@ -497,6 +529,23 @@ fn validate_operation_identity(identity: &ArenaOperationIdentity) -> Result<(), 
     {
         return Err(ArenaDomainError::new(
             "arena operation identity rejects an empty causation_id",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_migration_snapshot(
+    migration: Option<&NativeArenaMigrationSnapshot>,
+) -> Result<(), ArenaDomainError> {
+    let Some(migration) = migration else {
+        return Ok(());
+    };
+    if migration.source_schema_version != LEGACY_ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION
+        || migration.target_schema_version != ARENA_PROTOCOL_SNAPSHOT_SCHEMA_VERSION
+        || migration.migration_id != ARENA_PROTOCOL_V1_TO_V2_MIGRATION_ID
+    {
+        return Err(ArenaDomainError::new(
+            "arena protocol snapshot contains unsupported migration evidence",
         ));
     }
     Ok(())
@@ -743,17 +792,26 @@ mod tests {
 
     #[test]
     fn legacy_protocol_snapshot_restores_with_an_empty_operation_ledger() {
-        let state = NativeArenaState::new("arena-legacy").unwrap();
-        let current_json = serde_json::to_value(state.protocol_snapshot()).unwrap();
-        let mut legacy_json = current_json;
-        legacy_json["schema_version"] = serde_json::json!(1);
-        legacy_json.as_object_mut().unwrap().remove("operations");
-
-        let legacy_snapshot = serde_json::from_value(legacy_json).unwrap();
+        let legacy_snapshot = serde_json::from_str(include_str!(
+            "../../tests/fixtures/memythos/arena_protocol_snapshot_v1.json"
+        ))
+        .unwrap();
         let restored = NativeArenaState::restore_protocol_snapshot(legacy_snapshot).unwrap();
 
         assert!(restored.operations.is_empty());
-        assert_eq!(restored.protocol_snapshot().schema_version, 2);
+        let current = restored.protocol_snapshot();
+        assert_eq!(current.schema_version, 2);
+        assert_eq!(
+            current.migration,
+            Some(NativeArenaMigrationSnapshot {
+                source_schema_version: 1,
+                target_schema_version: 2,
+                migration_id: ARENA_PROTOCOL_V1_TO_V2_MIGRATION_ID.to_string(),
+            })
+        );
+
+        let restored_again = NativeArenaState::restore_protocol_snapshot(current.clone()).unwrap();
+        assert_eq!(restored_again.protocol_snapshot(), current);
     }
 
     #[test]
