@@ -308,8 +308,9 @@ jobs:
       - name: Requester disconnect regression
         run: cargo test -p codex-app-server arena_request_state_survives_the_request_connection_boundary
 
-      - name: OOTB Arena restart recovery
+      - name: OOTB Arena restart compatibility and corruption matrix
         run: |
+          cargo test -p codex-app-server-protocol arena_snapshot_restore_failure_kinds_use_stable_public_values
           cargo test -p codex-app-server canonical_arena_restores_from_ootb_state_without_replanning
           cargo test -p codex-app-server arena_restore_rejects_a_corrupt_batch_without_partial_state
 

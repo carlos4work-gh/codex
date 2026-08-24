@@ -34,6 +34,15 @@ pub enum MemythosArenaKind {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum MemythosArenaSnapshotRestoreFailureKind {
+    Incompatible,
+    Corrupt,
+    DependencyMissing,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
 pub enum MemythosArenaLifecycleState {
     Draft,
     Running,
@@ -2197,6 +2206,23 @@ pub struct MemythosThreadContractListResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn arena_snapshot_restore_failure_kinds_use_stable_public_values() {
+        assert_eq!(
+            serde_json::to_value(MemythosArenaSnapshotRestoreFailureKind::Incompatible).unwrap(),
+            json!("incompatible")
+        );
+        assert_eq!(
+            serde_json::to_value(MemythosArenaSnapshotRestoreFailureKind::Corrupt).unwrap(),
+            json!("corrupt")
+        );
+        assert_eq!(
+            serde_json::to_value(MemythosArenaSnapshotRestoreFailureKind::DependencyMissing)
+                .unwrap(),
+            json!("dependencyMissing")
+        );
+    }
 
     #[test]
     fn layer_create_params_use_camel_case_contract() {

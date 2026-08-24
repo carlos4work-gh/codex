@@ -3244,6 +3244,13 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
         .await
         .expect_err("missing OOTB parent goal must pause recovery");
     assert!(missing_reference.message.contains("OOTB goal missing"));
+    assert_eq!(
+        missing_reference.data,
+        Some(serde_json::json!({
+            "reason": "arenaSnapshotRestore",
+            "kind": "dependencyMissing",
+        }))
+    );
 }
 
 #[tokio::test]
@@ -3251,6 +3258,7 @@ async fn arena_restore_rejects_a_corrupt_batch_without_partial_state() {
     async fn assert_rejected_without_partial_state(
         processor: MemythosRequestProcessor,
         expected_error: &str,
+        expected_kind: MemythosArenaSnapshotRestoreFailureKind,
     ) {
         let error = processor
             .restore_arena_coordination_snapshots()
@@ -3260,6 +3268,13 @@ async fn arena_restore_rejects_a_corrupt_batch_without_partial_state() {
             error.message.contains(expected_error),
             "expected {expected_error:?} in {:?}",
             error.message
+        );
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "reason": "arenaSnapshotRestore",
+                "kind": expected_kind,
+            }))
         );
         let state = processor.state.lock().await;
         assert!(state.arenas.is_empty());
@@ -3370,7 +3385,12 @@ async fn arena_restore_rejects_a_corrupt_batch_without_partial_state() {
         .expect("persist corrupt trailing snapshot");
     drop(first_process);
 
-    assert_rejected_without_partial_state(make_processor(), "hash mismatch").await;
+    assert_rejected_without_partial_state(
+        make_processor(),
+        "hash mismatch",
+        MemythosArenaSnapshotRestoreFailureKind::Corrupt,
+    )
+    .await;
 
     let truncated_json = "{".to_string();
     let truncated_error = state_db
@@ -3395,6 +3415,7 @@ async fn arena_restore_rejects_a_corrupt_batch_without_partial_state() {
     assert_rejected_without_partial_state(
         make_processor(),
         "unsupported Arena coordination snapshot schema",
+        MemythosArenaSnapshotRestoreFailureKind::Incompatible,
     )
     .await;
 
@@ -3407,7 +3428,34 @@ async fn arena_restore_rejects_a_corrupt_batch_without_partial_state() {
         })
         .await
         .expect("persist identity-mismatched snapshot");
-    assert_rejected_without_partial_state(make_processor(), "snapshot identity mismatch").await;
+    assert_rejected_without_partial_state(
+        make_processor(),
+        "snapshot identity mismatch",
+        MemythosArenaSnapshotRestoreFailureKind::Corrupt,
+    )
+    .await;
+
+    let mut incompatible_json: serde_json::Value =
+        serde_json::from_str(&valid.snapshot_json).expect("decode valid snapshot");
+    incompatible_json["room"]["participants"][0]["threadId"] =
+        serde_json::json!({ "unsupported": "thread reference" });
+    let incompatible_json =
+        serde_json::to_string(&incompatible_json).expect("encode incompatible reference fixture");
+    state_db
+        .upsert_arena_snapshot(&ArenaSnapshotRecord {
+            schema_version: valid.schema_version,
+            last_event_hash: arena_snapshot_sha256(&incompatible_json),
+            snapshot_json: incompatible_json,
+            ..corrupt_record.clone()
+        })
+        .await
+        .expect("persist type-incompatible thread reference");
+    assert_rejected_without_partial_state(
+        make_processor(),
+        "invalid Arena coordination snapshot",
+        MemythosArenaSnapshotRestoreFailureKind::Incompatible,
+    )
+    .await;
 
     let mut sequence_json: serde_json::Value =
         serde_json::from_str(&valid.snapshot_json).expect("decode valid snapshot");
@@ -3424,7 +3472,12 @@ async fn arena_restore_rejects_a_corrupt_batch_without_partial_state() {
         })
         .await
         .expect("persist sequence-mismatched snapshot");
-    assert_rejected_without_partial_state(make_processor(), "snapshot sequence mismatch").await;
+    assert_rejected_without_partial_state(
+        make_processor(),
+        "snapshot sequence mismatch",
+        MemythosArenaSnapshotRestoreFailureKind::Corrupt,
+    )
+    .await;
 }
 
 #[test]

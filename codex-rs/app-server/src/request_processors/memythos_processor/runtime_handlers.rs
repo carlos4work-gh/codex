@@ -4,13 +4,9 @@ impl MemythosRequestProcessor {
     pub(super) async fn ensure_arena_state_restored(&self) -> Result<(), JSONRPCErrorError> {
         let result = self
             .arena_restore_result
-            .get_or_init(|| async {
-                self.restore_arena_coordination_snapshots()
-                    .await
-                    .map_err(|error| error.message)
-            })
+            .get_or_init(|| self.restore_arena_coordination_snapshots())
             .await;
-        result.clone().map_err(invalid_params)?;
+        result.clone()?;
         let terminal_result = self
             .arena_terminal_recovery_result
             .get_or_init(|| async {
@@ -73,9 +69,10 @@ impl MemythosRequestProcessor {
             return Ok(());
         };
         let records = state_db.list_arena_snapshots().await.map_err(|error| {
-            invalid_params(format!(
-                "failed to load Arena snapshots from app-server state: {error}"
-            ))
+            arena_snapshot_restore_error(
+                MemythosArenaSnapshotRestoreFailureKind::DependencyMissing,
+                format!("failed to load Arena snapshots from app-server state: {error}"),
+            )
         })?;
         let mut validated_snapshots = Vec::with_capacity(records.len());
         let mut pending_effect_keys = HashSet::new();
@@ -89,34 +86,50 @@ impl MemythosRequestProcessor {
                         | ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
                 )
             ) {
-                return Err(invalid_params(format!(
-                    "unsupported Arena coordination snapshot schema {} for {}",
-                    record.schema_version, record.arena_id
-                )));
+                return Err(arena_snapshot_restore_error(
+                    MemythosArenaSnapshotRestoreFailureKind::Incompatible,
+                    format!(
+                        "unsupported Arena coordination snapshot schema {} for {}",
+                        record.schema_version, record.arena_id
+                    ),
+                ));
             }
             let actual_hash = arena_snapshot_sha256(&record.snapshot_json);
             if actual_hash != record.last_event_hash {
-                return Err(invalid_params(format!(
-                    "Arena snapshot hash mismatch for {}",
-                    record.arena_id
-                )));
+                return Err(arena_snapshot_restore_error(
+                    MemythosArenaSnapshotRestoreFailureKind::Corrupt,
+                    format!("Arena snapshot hash mismatch for {}", record.arena_id),
+                ));
             }
             let mut snapshot: PersistedArenaCoordinationSnapshot =
                 serde_json::from_str(&record.snapshot_json).map_err(|error| {
-                    invalid_params(format!(
-                        "invalid Arena coordination snapshot for {}: {error}",
-                        record.arena_id
-                    ))
+                    let kind = match error.classify() {
+                        serde_json::error::Category::Data => {
+                            MemythosArenaSnapshotRestoreFailureKind::Incompatible
+                        }
+                        serde_json::error::Category::Io
+                        | serde_json::error::Category::Syntax
+                        | serde_json::error::Category::Eof => {
+                            MemythosArenaSnapshotRestoreFailureKind::Corrupt
+                        }
+                    };
+                    arena_snapshot_restore_error(
+                        kind,
+                        format!(
+                            "invalid Arena coordination snapshot for {}: {error}",
+                            record.arena_id
+                        ),
+                    )
                 })?;
             let source_schema_version = snapshot.schema_version;
             if i64::from(snapshot.schema_version) != record.schema_version
                 || snapshot.protocol.arena_id != record.arena_id
                 || snapshot.room.arena_id != record.arena_id
             {
-                return Err(invalid_params(format!(
-                    "Arena snapshot identity mismatch for {}",
-                    record.arena_id
-                )));
+                return Err(arena_snapshot_restore_error(
+                    MemythosArenaSnapshotRestoreFailureKind::Corrupt,
+                    format!("Arena snapshot identity mismatch for {}", record.arena_id),
+                ));
             }
             snapshot.schema_version = ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION;
             for delivery in &mut snapshot.deliveries {
@@ -145,19 +158,27 @@ impl MemythosRequestProcessor {
                         .any(|delivery| delivery.message_id == pending_effect.message_id)
                     || !pending_effect_keys.insert(key)
                 {
-                    return Err(invalid_params(format!(
-                        "Arena {} has an invalid or conflicting pending effect {}",
-                        record.arena_id, pending_effect.message_id
-                    )));
+                    return Err(arena_snapshot_restore_error(
+                        MemythosArenaSnapshotRestoreFailureKind::Corrupt,
+                        format!(
+                            "Arena {} has an invalid or conflicting pending effect {}",
+                            record.arena_id, pending_effect.message_id
+                        ),
+                    ));
                 }
             }
             let lifecycle = NativeArenaState::restore_protocol_snapshot(snapshot.protocol.clone())
-                .map_err(|error| invalid_params(error.to_string()))?;
+                .map_err(|error| {
+                    arena_snapshot_restore_error(
+                        MemythosArenaSnapshotRestoreFailureKind::Corrupt,
+                        error.to_string(),
+                    )
+                })?;
             if i64::try_from(snapshot.protocol.sequence).ok() != Some(record.snapshot_sequence) {
-                return Err(invalid_params(format!(
-                    "Arena snapshot sequence mismatch for {}",
-                    record.arena_id
-                )));
+                return Err(arena_snapshot_restore_error(
+                    MemythosArenaSnapshotRestoreFailureKind::Corrupt,
+                    format!("Arena snapshot sequence mismatch for {}", record.arena_id),
+                ));
             }
             let concierge = snapshot
                 .room
@@ -165,16 +186,22 @@ impl MemythosRequestProcessor {
                 .iter()
                 .find(|participant| participant.parent_role == "room_concierge")
                 .ok_or_else(|| {
-                    invalid_params(format!(
-                        "Arena {} snapshot has no OOTB Room Concierge",
-                        record.arena_id
-                    ))
+                    arena_snapshot_restore_error(
+                        MemythosArenaSnapshotRestoreFailureKind::Corrupt,
+                        format!(
+                            "Arena {} snapshot has no OOTB Room Concierge",
+                            record.arena_id
+                        ),
+                    )
                 })?;
             if concierge.thread_id != record.concierge_thread_id || concierge.goal_ref.is_none() {
-                return Err(invalid_params(format!(
-                    "Arena {} Concierge reference is inconsistent",
-                    record.arena_id
-                )));
+                return Err(arena_snapshot_restore_error(
+                    MemythosArenaSnapshotRestoreFailureKind::Incompatible,
+                    format!(
+                        "Arena {} Concierge reference is inconsistent",
+                        record.arena_id
+                    ),
+                ));
             }
 
             let mut restored_goals = HashMap::new();
@@ -184,12 +211,20 @@ impl MemythosRequestProcessor {
                     .read_parent_goal(&participant.thread_id)
                     .await
                     .map_err(ArenaPortError::classify_effect_failure)
-                    .map_err(|error| error.into_jsonrpc("parent_runtime"))?
+                    .map_err(|error| {
+                        arena_snapshot_restore_error(
+                            MemythosArenaSnapshotRestoreFailureKind::DependencyMissing,
+                            error.into_jsonrpc("parent_runtime").message,
+                        )
+                    })?
                     .ok_or_else(|| {
-                        invalid_params(format!(
-                            "Arena {} recovery paused: OOTB goal missing for parent {}",
-                            record.arena_id, participant.thread_id
-                        ))
+                        arena_snapshot_restore_error(
+                            MemythosArenaSnapshotRestoreFailureKind::DependencyMissing,
+                            format!(
+                                "Arena {} recovery paused: OOTB goal missing for parent {}",
+                                record.arena_id, participant.thread_id
+                            ),
+                        )
                     })?;
                 restored_goals.insert(participant.thread_id.clone(), goal);
             }
@@ -799,6 +834,18 @@ impl MemythosRequestProcessor {
         );
         Ok(response.into())
     }
+}
+
+fn arena_snapshot_restore_error(
+    kind: MemythosArenaSnapshotRestoreFailureKind,
+    message: impl Into<String>,
+) -> JSONRPCErrorError {
+    let mut error = invalid_params(message);
+    error.data = Some(serde_json::json!({
+        "reason": "arenaSnapshotRestore",
+        "kind": kind,
+    }));
+    error
 }
 
 fn mailbox_quarantine_event_ref(receiver_thread_id: &str, communication_id: &str) -> String {

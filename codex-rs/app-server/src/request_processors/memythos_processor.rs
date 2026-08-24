@@ -60,6 +60,7 @@ use codex_app_server_protocol::MemythosArenaResumeExecutionMode;
 use codex_app_server_protocol::MemythosArenaResumeExecutionPlan;
 use codex_app_server_protocol::MemythosArenaRunParams;
 use codex_app_server_protocol::MemythosArenaRunResponse;
+use codex_app_server_protocol::MemythosArenaSnapshotRestoreFailureKind;
 use codex_app_server_protocol::MemythosArenaStateGetParams;
 use codex_app_server_protocol::MemythosArenaStateGetResponse;
 use codex_app_server_protocol::MemythosEventChannel;
@@ -452,7 +453,7 @@ impl ThreadConsolidationAdapter for RecordOnlyThreadConsolidationAdapter {
 pub(crate) struct MemythosRequestProcessor {
     state: Arc<Mutex<MemythosRuntimeState>>,
     arena_state_db: Option<StateDbHandle>,
-    arena_restore_result: Arc<OnceCell<Result<(), String>>>,
+    arena_restore_result: Arc<OnceCell<Result<(), JSONRPCErrorError>>>,
     arena_terminal_recovery_result: Arc<OnceCell<Result<(), String>>>,
     peer_parent_delivery_adapter: Arc<dyn PeerParentDeliveryAdapter>,
     parent_goal_snapshot_adapter: Arc<dyn ParentGoalSnapshotAdapter>,
