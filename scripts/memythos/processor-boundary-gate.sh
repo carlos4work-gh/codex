@@ -5,7 +5,7 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 processor="codex-rs/app-server/src/request_processors/memythos_processor.rs"
-processor_max="${MEMYTHOS_PROCESSOR_MAX_LINES:-4440}"
+processor_max="${MEMYTHOS_PROCESSOR_MAX_LINES:-4260}"
 module_max="${MEMYTHOS_MODULE_MAX_LINES:-3000}"
 processor_lines="$(wc -l <"$processor" | tr -d ' ')"
 

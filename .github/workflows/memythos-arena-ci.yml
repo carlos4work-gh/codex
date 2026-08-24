@@ -147,6 +147,11 @@ jobs:
           cargo test -p codex-app-server attaches_threads_and_filters_telemetry_refs
           cargo test -p codex-app-server native_telemetry_refs_are_source_tagged_and_compact
 
+      - name: Memythos query handler boundary
+        run: |
+          cargo test -p codex-app-server native_turn_completion_promotes_parent_peer_observation
+          cargo test -p codex-app-server canonical_arena_lifecycle_is_owned_by_rust_across_rpc_calls
+
       - name: Memythos aggregate checkpoint boundary
         run: |
           cargo test -p codex-app-server aggregate_then_trigger_queues_until_expected_sources_are_complete
