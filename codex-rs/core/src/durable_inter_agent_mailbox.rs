@@ -10,9 +10,10 @@ use sha2::Sha256;
 
 const MAX_RECOVERY_ATTEMPTS: i64 = 3;
 
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PersistOutcome {
     ReadyToSend,
-    Existing { submission_id: String },
+    Existing { submission_id: Option<String> },
 }
 
 pub(crate) struct RestoredCommunications {
@@ -76,9 +77,7 @@ impl DurableInterAgentMailbox {
             })?
             .ok_or_else(|| CodexErr::Fatal("native mailbox message disappeared".to_string()))?;
         Ok(PersistOutcome::Existing {
-            submission_id: existing
-                .submission_id
-                .unwrap_or_else(|| communication_id.to_string()),
+            submission_id: existing.submission_id,
         })
     }
 

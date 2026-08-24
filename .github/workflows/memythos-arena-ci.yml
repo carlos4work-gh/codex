@@ -308,7 +308,9 @@ jobs:
         run: cargo test -p codex-app-server --test all arena_provision_checkpoint_survives_sigkill_without_duplicate_parents
 
       - name: Native mailbox payload rehydration after SIGKILL
-        run: cargo test -p codex-app-server --test all arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once
+        run: |
+          cargo test -p codex-app-server --test all arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once
+          cargo test -p codex-app-server --test all arena_staged_mailbox_effect_materializes_once_with_native_submission_id
 
       - name: Native mailbox crash-loop quarantine and live retry
         run: cargo test -p codex-app-server --test all arena_mailbox_crash_loop_quarantines_poison_payload_and_warns

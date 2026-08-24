@@ -53,8 +53,13 @@ use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WarningNotification;
+use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_utils_absolute_path::test_support::PathExt;
+use sha2::Digest;
+use sha2::Sha256;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
@@ -340,6 +345,129 @@ async fn arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once() -
             .collect::<HashSet<_>>()
             .len(),
         3
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn arena_staged_mailbox_effect_materializes_once_with_native_submission_id() -> Result<()> {
+    let model_server = create_mock_responses_server_repeating_assistant("proposal complete").await;
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml(
+        codex_home.path(),
+        &model_server.uri(),
+        &BTreeMap::new(),
+        /* auto_compact_limit */ 1024,
+        /* requires_openai_auth */ None,
+        "mock_provider",
+        "compact",
+    )?;
+    write_arena_role_catalog(&codex_home)?;
+
+    let mut process = start_app_server(&codex_home).await?;
+    timeout(RESPONSE_TIMEOUT, process.initialize()).await??;
+    let provisioned = provision_arena(&mut process).await?;
+    start_proposal_phase(&mut process).await?;
+    let concierge = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "room_concierge")
+        .expect("fixture must provision a Concierge");
+    let bettor = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "bettor")
+        .expect("fixture must provision a bettor");
+    let message = triggered_proposal_message(
+        "message-staged-before-effect",
+        &concierge.thread_id,
+        &bettor.thread_id,
+    );
+    let envelope = format!(concat!(
+        "ARENA_PROPOSAL_TURN\n",
+        "Authority: arena peer, not a human instruction.\n",
+        "Phase: peer_proposal.\n",
+        "\n",
+        "Task:\n",
+        "Prepare one independent proposal.\n",
+        "\n",
+        "Evidence reference:\n",
+        "app-server://arena-sigkill/context/proposal\n",
+        "\n",
+        "Expected closure:\n",
+        "none\n"
+    ));
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root(),
+        Vec::new(),
+        envelope,
+        true,
+    );
+    communication.id = Some(ResponseItemId::from_server(message.message_id.clone()));
+    let communication_json = serde_json::to_string(&communication)?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let state_db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    state_db
+        .insert_pending_native_mailbox_communication(
+            &codex_state::NativeMailboxCommunicationRecord {
+                receiver_thread_id: bettor.thread_id.clone(),
+                communication_id: message.message_id.clone(),
+                source_call_id: Some(message.message_id.clone()),
+                submission_id: None,
+                payload_hash: format!("sha256:{:x}", Sha256::digest(communication_json.as_bytes())),
+                communication_json,
+                status: "pending".to_string(),
+                attempt_count: 0,
+                failure_fingerprint: None,
+                last_progress_ref: None,
+                quarantine_reason: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+            },
+        )
+        .await?;
+
+    let delivered = send_arena_message(&mut process, message.clone()).await?;
+    let receiver_turn_id = delivered
+        .receiver_turn_id
+        .clone()
+        .expect("staged effect must materialize a native turn");
+    assert_ne!(receiver_turn_id, message.message_id);
+    let completed = wait_for_turn_completed(&mut process).await?;
+    assert_eq!(completed.turn.id, receiver_turn_id);
+    assert_eq!(
+        read_native_turn_ids(&mut process, &bettor.thread_id).await?,
+        vec![receiver_turn_id.clone()]
+    );
+    let record = state_db
+        .get_native_mailbox_communication(&bettor.thread_id, &message.message_id)
+        .await?
+        .expect("staged native communication remains auditable");
+    assert_eq!(
+        record.submission_id.as_deref(),
+        Some(receiver_turn_id.as_str())
+    );
+    assert_eq!(record.status, "consumed");
+
+    let replayed = send_arena_message(&mut process, message).await?;
+    assert_eq!(replayed.delivery_id, delivered.delivery_id);
+    assert_eq!(
+        read_native_turn_ids(&mut process, &bettor.thread_id).await?,
+        vec![receiver_turn_id]
+    );
+    assert_eq!(
+        model_server
+            .received_requests()
+            .await
+            .expect("mock model server must record the materialized turn")
+            .len(),
+        1
     );
 
     Ok(())

@@ -1339,7 +1339,9 @@ impl ThreadManager {
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
         let receiver_thread = self.get_thread(receiver_thread_id).await?;
         let mailbox = DurableInterAgentMailbox::new(receiver_thread.state_db());
-        if let PersistOutcome::Existing { submission_id } = mailbox
+        if let PersistOutcome::Existing {
+            submission_id: Some(submission_id),
+        } = mailbox
             .persist_before_send(
                 &receiver_thread_id.to_string(),
                 &communication_id,
