@@ -588,6 +588,7 @@ impl MemythosRequestProcessor {
                 arena_parents: HashMap::new(),
                 arena_compositions: HashMap::new(),
                 restored_coordination_snapshots: HashMap::new(),
+                arena_pending_effects: HashMap::new(),
                 arena_message_deliveries: Vec::new(),
                 arena_messages: HashMap::new(),
                 arena_message_aggregates: HashMap::new(),

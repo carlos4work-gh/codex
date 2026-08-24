@@ -25,8 +25,15 @@ impl MemythosRequestProcessor {
             ))
         })?;
         let mut validated_snapshots = Vec::with_capacity(records.len());
+        let mut pending_effect_keys = HashSet::new();
         for record in records {
-            if record.schema_version != i64::from(ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION) {
+            if !matches!(
+                u32::try_from(record.schema_version).ok(),
+                Some(
+                    LEGACY_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
+                        | ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
+                )
+            ) {
                 return Err(invalid_params(format!(
                     "unsupported Arena coordination snapshot schema {} for {}",
                     record.schema_version, record.arena_id
@@ -39,14 +46,14 @@ impl MemythosRequestProcessor {
                     record.arena_id
                 )));
             }
-            let snapshot: PersistedArenaCoordinationSnapshot =
+            let mut snapshot: PersistedArenaCoordinationSnapshot =
                 serde_json::from_str(&record.snapshot_json).map_err(|error| {
                     invalid_params(format!(
                         "invalid Arena coordination snapshot for {}: {error}",
                         record.arena_id
                     ))
                 })?;
-            if snapshot.schema_version != ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION
+            if i64::from(snapshot.schema_version) != record.schema_version
                 || snapshot.protocol.arena_id != record.arena_id
                 || snapshot.room.arena_id != record.arena_id
             {
@@ -54,6 +61,31 @@ impl MemythosRequestProcessor {
                     "Arena snapshot identity mismatch for {}",
                     record.arena_id
                 )));
+            }
+            snapshot.schema_version = ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION;
+            for pending_effect in &snapshot.pending_effects {
+                let key = arena_pending_effect_key(&record.arena_id, &pending_effect.message_id);
+                if pending_effect.arena_id != record.arena_id
+                    || pending_effect.message_id.trim().is_empty()
+                    || pending_effect.communication_id.trim().is_empty()
+                    || pending_effect.source_call_id != pending_effect.communication_id
+                    || pending_effect.receiver_thread_id.trim().is_empty()
+                    || !pending_effect.payload_hash.starts_with("sha256:")
+                    || pending_effect.payload_hash.len() <= "sha256:".len()
+                    || !snapshot.room.participants.iter().any(|participant| {
+                        participant.thread_id == pending_effect.receiver_thread_id
+                    })
+                    || snapshot
+                        .deliveries
+                        .iter()
+                        .any(|delivery| delivery.message_id == pending_effect.message_id)
+                    || !pending_effect_keys.insert(key)
+                {
+                    return Err(invalid_params(format!(
+                        "Arena {} has an invalid or conflicting pending effect {}",
+                        record.arena_id, pending_effect.message_id
+                    )));
+                }
             }
             let lifecycle = NativeArenaState::restore_protocol_snapshot(snapshot.protocol.clone())
                 .map_err(|error| invalid_params(error.to_string()))?;
@@ -157,6 +189,12 @@ impl MemythosRequestProcessor {
                     .into_iter()
                     .map(|delivery| delivery.restore(&record.arena_id)),
             );
+            for pending_effect in snapshot.pending_effects.clone() {
+                state.arena_pending_effects.insert(
+                    arena_pending_effect_key(&pending_effect.arena_id, &pending_effect.message_id),
+                    pending_effect,
+                );
+            }
             for aggregate in snapshot.aggregates.clone() {
                 let (key, aggregate) = aggregate.restore();
                 state.arena_message_aggregates.insert(key, aggregate);
@@ -193,6 +231,13 @@ impl MemythosRequestProcessor {
                 .map(PersistedArenaDeliveryCheckpoint::capture)
                 .collect::<Vec<_>>();
             deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
+            let mut pending_effects = state
+                .arena_pending_effects
+                .values()
+                .filter(|effect| effect.arena_id == arena_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            pending_effects.sort_by(|left, right| left.message_id.cmp(&right.message_id));
             let aggregate_prefix = format!("{arena_id}::");
             let mut aggregates = state
                 .arena_message_aggregates
@@ -212,6 +257,7 @@ impl MemythosRequestProcessor {
                     composition_version: composition.composition_version,
                     composition_lifecycle_state: composition.lifecycle_state,
                     leases: composition.leases.clone(),
+                    pending_effects,
                     deliveries,
                     aggregates,
                 }
@@ -226,6 +272,8 @@ impl MemythosRequestProcessor {
                         ))
                     })?;
                 restored.protocol = protocol;
+                restored.schema_version = ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION;
+                restored.pending_effects = pending_effects;
                 restored.deliveries = deliveries;
                 restored.aggregates = aggregates;
                 restored

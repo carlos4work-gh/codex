@@ -3053,7 +3053,7 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
         })
         .await
         .expect("open proposal phase");
-    let persisted_before_restart = state_db
+    let mut persisted_before_restart = state_db
         .get_arena_snapshot("arena-composition")
         .await
         .expect("read persisted Arena")
@@ -3078,6 +3078,24 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
             .snapshot_json
             .contains("next_action")
     );
+    assert_eq!(persisted_before_restart.schema_version, 2);
+    let mut legacy_snapshot: serde_json::Value =
+        serde_json::from_str(&persisted_before_restart.snapshot_json)
+            .expect("decode current coordination snapshot");
+    legacy_snapshot["schema_version"] = serde_json::json!(1);
+    legacy_snapshot
+        .as_object_mut()
+        .expect("coordination snapshot object")
+        .remove("pending_effects");
+    persisted_before_restart.schema_version = 1;
+    persisted_before_restart.snapshot_json =
+        serde_json::to_string(&legacy_snapshot).expect("encode legacy coordination snapshot");
+    persisted_before_restart.last_event_hash =
+        arena_snapshot_sha256(&persisted_before_restart.snapshot_json);
+    state_db
+        .upsert_arena_snapshot(&persisted_before_restart)
+        .await
+        .expect("downgrade persisted snapshot to legacy schema");
     drop(first_process);
 
     let second_process = make_processor();
@@ -3147,6 +3165,12 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
         .await
         .expect("read advanced Arena")
         .expect("advanced Arena snapshot exists");
+    assert_eq!(persisted_after_restart.schema_version, 2);
+    assert!(
+        persisted_after_restart
+            .snapshot_json
+            .contains("pending_effects")
+    );
     assert!(persisted_after_restart.snapshot_sequence > persisted_before_restart.snapshot_sequence);
 
     provisioning

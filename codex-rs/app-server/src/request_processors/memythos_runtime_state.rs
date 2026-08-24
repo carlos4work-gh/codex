@@ -52,6 +52,7 @@ pub(super) struct MemythosRuntimeState {
     pub(super) arena_parents: HashMap<String, MemythosArenaParent>,
     pub(super) arena_compositions: HashMap<String, MemythosArenaCompositionProvisionResponse>,
     pub(super) restored_coordination_snapshots: HashMap<String, PersistedArenaCoordinationSnapshot>,
+    pub(super) arena_pending_effects: HashMap<String, PersistedArenaPendingEffect>,
     pub(super) arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
     pub(super) arena_messages: HashMap<String, MemythosArenaMessage>,
     pub(super) arena_message_aggregates: HashMap<String, NativeArenaMessageAggregate>,
@@ -96,7 +97,8 @@ impl MemythosRuntimeState {
     }
 }
 
-pub(super) const ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub(super) const LEGACY_ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub(super) const ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,8 +112,25 @@ pub(super) struct PersistedArenaCoordinationSnapshot {
     pub(super) composition_version: u32,
     pub(super) composition_lifecycle_state: MemythosArenaCompositionLifecycleState,
     pub(super) leases: Vec<MemythosArenaCompositionLease>,
+    #[serde(default)]
+    pub(super) pending_effects: Vec<PersistedArenaPendingEffect>,
     pub(super) deliveries: Vec<PersistedArenaDeliveryCheckpoint>,
     pub(super) aggregates: Vec<PersistedArenaAggregateCheckpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PersistedArenaPendingEffect {
+    pub(super) arena_id: String,
+    pub(super) message_id: String,
+    pub(super) communication_id: String,
+    pub(super) source_call_id: String,
+    pub(super) receiver_thread_id: String,
+    pub(super) payload_hash: String,
+}
+
+pub(super) fn arena_pending_effect_key(arena_id: &str, message_id: &str) -> String {
+    format!("{arena_id}::{message_id}")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
