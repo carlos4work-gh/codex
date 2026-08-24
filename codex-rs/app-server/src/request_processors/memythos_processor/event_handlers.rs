@@ -331,6 +331,8 @@ impl MemythosRequestProcessor {
                     return;
                 }
                 Err(error) => {
+                    let error = ArenaPortError::classify_effect_failure(error)
+                        .into_jsonrpc("parent_runtime");
                     warn!(
                         arena_id = candidate.arena_id,
                         parent_thread_id,
@@ -356,6 +358,8 @@ impl MemythosRequestProcessor {
                     )
                     .await
                 {
+                    let error = ArenaPortError::classify_effect_failure(error)
+                        .into_jsonrpc("parent_runtime");
                     warn!(
                         arena_id = candidate.arena_id,
                         parent_thread_id = goal.thread_id,
@@ -373,6 +377,9 @@ impl MemythosRequestProcessor {
                             )
                             .await
                         {
+                            let rollback_error =
+                                ArenaPortError::classify_effect_failure(rollback_error)
+                                    .into_jsonrpc("parent_runtime");
                             warn!(
                                 arena_id = candidate.arena_id,
                                 parent_thread_id = transitioned_goal.thread_id,

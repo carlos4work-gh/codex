@@ -85,7 +85,9 @@ impl MemythosRequestProcessor {
                 let goal = self
                     .arena_parent_provisioning_adapter
                     .read_parent_goal(&participant.thread_id)
-                    .await?
+                    .await
+                    .map_err(ArenaPortError::classify_effect_failure)
+                    .map_err(|error| error.into_jsonrpc("parent_runtime"))?
                     .ok_or_else(|| {
                         invalid_params(format!(
                             "Arena {} recovery paused: OOTB goal missing for parent {}",
@@ -265,7 +267,9 @@ impl MemythosRequestProcessor {
         let current_goal = self
             .arena_parent_provisioning_adapter
             .read_parent_goal(&message.to_parent_thread_id)
-            .await?
+            .await
+            .map_err(ArenaPortError::classify_effect_failure)
+            .map_err(|error| error.into_jsonrpc("parent_runtime"))?
             .ok_or_else(|| {
                 invalid_params(format!(
                     "parent thread {} has no provisioned goal",
@@ -282,7 +286,9 @@ impl MemythosRequestProcessor {
                         ThreadGoalStatus::Active,
                         true,
                     )
-                    .await?;
+                    .await
+                    .map_err(ArenaPortError::classify_effect_failure)
+                    .map_err(|error| error.into_jsonrpc("parent_runtime"))?;
                 Ok(PreparedParentDeliveryGoal {
                     active_goal,
                     previous_goal: current_goal,
@@ -299,7 +305,9 @@ impl MemythosRequestProcessor {
                         ThreadGoalStatus::Active,
                         true,
                     )
-                    .await?;
+                    .await
+                    .map_err(ArenaPortError::classify_effect_failure)
+                    .map_err(|error| error.into_jsonrpc("parent_runtime"))?;
                 Ok(PreparedParentDeliveryGoal {
                     active_goal,
                     previous_goal: current_goal,
@@ -326,7 +334,13 @@ impl MemythosRequestProcessor {
             )
             .await
             .err()
-            .map(|error| format!("delivery goal rollback also failed: {}", error.message))
+            .map(ArenaPortError::classify_effect_failure)
+            .map(|error| {
+                error.into_jsonrpc("parent_runtime").message.replace(
+                    "arena port parent_runtime ",
+                    "delivery goal rollback also failed: ",
+                )
+            })
     }
 
     pub(super) async fn complete_parent_goal_after_successful_delivery(
@@ -342,6 +356,8 @@ impl MemythosRequestProcessor {
             Ok(Some(goal)) => goal,
             Ok(None) => return,
             Err(error) => {
+                let error =
+                    ArenaPortError::classify_effect_failure(error).into_jsonrpc("parent_runtime");
                 warn!(
                     thread_id,
                     error = %error.message,
@@ -363,6 +379,8 @@ impl MemythosRequestProcessor {
             )
             .await
         {
+            let error =
+                ArenaPortError::classify_effect_failure(error).into_jsonrpc("parent_runtime");
             warn!(
                 thread_id,
                 error = %error.message,
