@@ -550,6 +550,7 @@ mod mcp_processor;
 mod memythos_arena_state;
 mod memythos_composition;
 mod memythos_composition_planning;
+mod memythos_closure;
 mod memythos_contracts;
 mod memythos_delivery;
 mod memythos_judge;
