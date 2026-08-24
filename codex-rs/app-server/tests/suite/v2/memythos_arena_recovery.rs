@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
+use app_test_support::create_mock_responses_server_repeating_assistant_with_delay;
 use app_test_support::to_response;
 use app_test_support::write_mock_responses_config_toml;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -47,6 +48,8 @@ use codex_app_server_protocol::MemythosRoomActivityListParams;
 use codex_app_server_protocol::MemythosRoomActivityListResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SortDirection;
+use codex_app_server_protocol::ThreadGoalGetResponse;
+use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -1631,6 +1634,264 @@ async fn arena_terminal_turn_reconciles_after_sigkill_without_duplicate_turn() -
         read_native_turn_ids(&mut restarted_process, &bettor.thread_id).await?,
         vec![receiver_turn_id]
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn arena_competitive_closure_recovers_same_verdict_after_sigkill() -> Result<()> {
+    let verdict = serde_json::json!({
+        "winner_participant_id": "bettor-growth",
+        "ranked_alternatives": ["bettor-risk"],
+        "winning_decision": "Adopt bounded reversible growth.",
+        "accepted_tradeoff": "Trade speed for lower reversal cost.",
+        "next_action": "close",
+        "contribution_attribution": [
+            {"participant_id": "bettor-growth", "claim_refs": ["claim://growth/wedge"], "disposition": "adopted", "rationale": "The wedge resolves the bounded objective."},
+            {"participant_id": "bettor-risk", "claim_refs": ["claim://risk/reversibility"], "disposition": "conditioned", "rationale": "Reversibility constrains acceleration."}
+        ],
+        "dissent": "Retain the bounded risk posture.",
+        "preserved_dissent": ["Retain the bounded risk posture."],
+        "targeted_refinements": [],
+        "reopening_signals": ["Unit economics materially deteriorate."],
+        "protected_decisions_status": "preserved",
+        "reopened_decision_refs": [],
+        "resume_scope_status": "not_applicable",
+        "rationale": "The growth posture wins within the declared reversible boundary."
+    })
+    .to_string();
+    let model_server = create_mock_responses_server_repeating_assistant_with_delay(
+        &verdict,
+        Duration::from_millis(500),
+    )
+    .await;
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml(
+        codex_home.path(),
+        &model_server.uri(),
+        &BTreeMap::new(),
+        /* auto_compact_limit */ 1024,
+        /* requires_openai_auth */ None,
+        "mock_provider",
+        "compact",
+    )?;
+    write_arena_role_catalog(&codex_home)?;
+
+    let mut process = start_app_server(&codex_home).await?;
+    timeout(RESPONSE_TIMEOUT, process.initialize()).await??;
+    let provisioned = provision_arena(&mut process).await?;
+    start_proposal_phase(&mut process).await?;
+    let concierge = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "room_concierge")
+        .expect("fixture must provision a Concierge");
+    let bettors = provisioned
+        .leases
+        .iter()
+        .filter(|lease| lease.role == "bettor")
+        .collect::<Vec<_>>();
+    let judge = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "judge")
+        .expect("fixture must provision a Judge");
+    assert_eq!(bettors.len(), 2);
+
+    let state_db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let mut snapshot = state_db
+        .get_arena_snapshot("arena-sigkill")
+        .await?
+        .expect("provisioned Arena snapshot");
+    let mut snapshot_json: serde_json::Value = serde_json::from_str(&snapshot.snapshot_json)?;
+    snapshot_json["deliveries"]
+        .as_array_mut()
+        .expect("delivery checkpoints")
+        .push(serde_json::json!({
+            "delivery_id": "delivery-arena-intake",
+            "message_id": "message-arena-intake",
+            "human_summary": "Resolve the bounded competitive decision.",
+            "status": "receiver_turn_completed",
+            "sender_thread_id": "human",
+            "receiver_thread_id": concierge.thread_id,
+            "round_id": "round-1",
+            "phase": "arena_intake",
+            "delivery_mechanism": "native_human_intake",
+            "delivery_policy": null,
+            "aggregate_id": null,
+            "aggregate_state": null,
+            "checkpoint_state": null,
+            "checkpoint_event_refs": [],
+            "receiver_turn_id": "mailbox_queued",
+            "receiver_response_event_ref": "app-server://arena-sigkill/intake",
+            "delivered_as_human_instruction": true,
+            "memory_replay_required": false,
+            "event_refs": ["app-server://arena-sigkill/intake"],
+            "rejection_reason": null,
+            "failure_reason": null
+        }));
+    for (phase_index, phase) in ["proposal", "peer_review_and_objection", "bet"]
+        .into_iter()
+        .enumerate()
+    {
+        for (bettor_index, bettor) in bettors.iter().enumerate() {
+            snapshot_json["deliveries"]
+                .as_array_mut()
+                .expect("delivery checkpoints")
+                .push(serde_json::json!({
+                    "delivery_id": format!("delivery-prerequisite-{phase_index}-{bettor_index}"),
+                    "message_id": format!("message-prerequisite-{phase_index}-{bettor_index}"),
+                    "human_summary": format!("Durable {phase} checkpoint."),
+                    "status": "receiver_turn_completed",
+                    "sender_thread_id": concierge.thread_id,
+                    "receiver_thread_id": bettor.thread_id,
+                    "round_id": "round-1",
+                    "phase": phase,
+                    "delivery_mechanism": "native_checkpoint_fixture",
+                    "delivery_policy": null,
+                    "aggregate_id": null,
+                    "aggregate_state": null,
+                    "checkpoint_state": null,
+                    "checkpoint_event_refs": [],
+                    "receiver_turn_id": "mailbox_queued",
+                    "receiver_response_event_ref": format!("app-server://arena-sigkill/{phase}/{bettor_index}"),
+                    "delivered_as_human_instruction": false,
+                    "memory_replay_required": false,
+                    "event_refs": [format!("app-server://arena-sigkill/{phase}/{bettor_index}")],
+                    "rejection_reason": null,
+                    "failure_reason": null
+                }));
+        }
+    }
+    snapshot.snapshot_json = serde_json::to_string(&snapshot_json)?;
+    snapshot.last_event_hash = format!("{:x}", Sha256::digest(snapshot.snapshot_json.as_bytes()));
+    state_db.upsert_arena_snapshot(&snapshot).await?;
+
+    assert_eq!(process.sigkill().await?.signal(), Some(9));
+    drop(process);
+    let mut process = start_app_server(&codex_home).await?;
+    timeout(RESPONSE_TIMEOUT, process.initialize()).await??;
+    for lease in &provisioned.leases {
+        resume_native_thread(&mut process, &lease.thread_id).await?;
+    }
+
+    let mut verdict_request = triggered_proposal_message(
+        "competitive-verdict-request",
+        &concierge.thread_id,
+        &judge.thread_id,
+    );
+    verdict_request.to_parent_role = "judge".to_string();
+    verdict_request.message_kind = "verdict_request".to_string();
+    verdict_request.human_summary = "Judge the sealed competitive round.".to_string();
+    verdict_request.response_contract = Some("judge_verdict".to_string());
+    let delivered = send_arena_message(&mut process, verdict_request).await?;
+    assert_eq!(delivered.status, "delivered_to_native_mailbox_turn");
+    let stale_snapshot = state_db
+        .get_arena_snapshot("arena-sigkill")
+        .await?
+        .expect("in-flight Judge checkpoint must be durable before completion");
+    let stale_snapshot_json: serde_json::Value =
+        serde_json::from_str(&stale_snapshot.snapshot_json)?;
+    let stale_judge_delivery = stale_snapshot_json["deliveries"]
+        .as_array()
+        .expect("delivery checkpoints")
+        .iter()
+        .find(|delivery| delivery["message_id"] == "competitive-verdict-request")
+        .expect("Judge delivery must be durable before its OOTB turn completes");
+    assert_eq!(
+        stale_judge_delivery["status"],
+        "delivered_to_native_mailbox_turn"
+    );
+    assert!(stale_judge_delivery["receiver_response_event_ref"].is_null());
+
+    let completed = wait_for_turn_completed(&mut process).await?;
+    assert_eq!(completed.thread_id, judge.thread_id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    let judge_turn_ids = read_native_turn_ids(&mut process, &judge.thread_id).await?;
+    assert_eq!(
+        judge_turn_ids.len(),
+        1,
+        "faulted run must invoke Judge once"
+    );
+    let judge_turn_id = judge_turn_ids[0].clone();
+    assert_eq!(completed.turn.id, judge_turn_id);
+    let closed_arena = read_arena_state(&mut process).await?;
+    assert_eq!(
+        closed_arena.arena.lifecycle_state,
+        MemythosArenaLifecycleState::ClosedCleanly
+    );
+
+    state_db.upsert_arena_snapshot(&stale_snapshot).await?;
+    assert_eq!(process.sigkill().await?.signal(), Some(9));
+    drop(process);
+    let mut recovered_process = start_app_server(&codex_home).await?;
+    timeout(RESPONSE_TIMEOUT, recovered_process.initialize()).await??;
+    let recovered = timeout(RESPONSE_TIMEOUT, async {
+        loop {
+            let state = read_arena_state(&mut recovered_process).await?;
+            if state.arena.lifecycle_state == MemythosArenaLifecycleState::ClosedCleanly {
+                return Ok::<_, anyhow::Error>(state);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await??;
+    assert_eq!(
+        read_native_turn_ids(&mut recovered_process, &judge.thread_id).await?,
+        vec![judge_turn_id.clone()]
+    );
+    assert_eq!(
+        recovered
+            .deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.sender_thread_id == judge.thread_id
+                    && delivery.receiver_thread_id == concierge.thread_id
+                    && delivery.phase.as_deref() == Some("judge")
+            })
+            .count(),
+        1
+    );
+    let verdict_loopback = state_db
+        .get_native_mailbox_communication(
+            &concierge.thread_id,
+            &format!("turn-loopback-{judge_turn_id}"),
+        )
+        .await?
+        .expect("Judge verdict loopback must use the native durable mailbox");
+    assert!(
+        verdict_loopback
+            .communication_json
+            .contains("bettor-growth")
+    );
+    assert!(
+        verdict_loopback
+            .communication_json
+            .contains("claim://risk/reversibility")
+    );
+    for lease in &provisioned.leases {
+        let request_id = recovered_process
+            .send_raw_request(
+                "thread/goal/get",
+                Some(serde_json::json!({"threadId": lease.thread_id})),
+            )
+            .await?;
+        let goal: ThreadGoalGetResponse = timeout(
+            RESPONSE_TIMEOUT,
+            recovered_process.read_response(request_id),
+        )
+        .await??;
+        assert_eq!(
+            goal.goal
+                .expect("recovered parent goal remains auditable")
+                .status,
+            ThreadGoalStatus::Complete
+        );
+    }
 
     Ok(())
 }

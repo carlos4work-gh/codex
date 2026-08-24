@@ -1,5 +1,6 @@
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use core_test_support::responses;
 use wiremock::Mock;
@@ -67,6 +68,14 @@ impl Respond for SeqResponder {
 
 /// Create a mock responses API server that returns the same assistant message for every request.
 pub async fn create_mock_responses_server_repeating_assistant(message: &str) -> MockServer {
+    create_mock_responses_server_repeating_assistant_with_delay(message, Duration::ZERO).await
+}
+
+/// Create a repeating mock response with enough latency to inspect in-flight state.
+pub async fn create_mock_responses_server_repeating_assistant_with_delay(
+    message: &str,
+    delay: Duration,
+) -> MockServer {
     let server = responses::start_mock_server().await;
     let body = responses::sse(vec![
         responses::ev_response_created("resp-1"),
@@ -75,7 +84,7 @@ pub async fn create_mock_responses_server_repeating_assistant(message: &str) -> 
     ]);
     Mock::given(method("POST"))
         .and(path_regex(".*/responses$"))
-        .respond_with(responses::sse_response(body))
+        .respond_with(responses::sse_response(body).set_delay(delay))
         .mount(&server)
         .await;
     server
