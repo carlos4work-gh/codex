@@ -147,7 +147,6 @@ use codex_app_server_protocol::MemythosThreadContractReadParams;
 use codex_app_server_protocol::MemythosThreadContractReadResponse;
 use codex_app_server_protocol::MemythosThreadListParams;
 use codex_app_server_protocol::MemythosThreadListResponse;
-use codex_app_server_protocol::MemythosTokenUsageBreakdown;
 use codex_app_server_protocol::MemythosTurnUsageAttribution;
 use codex_app_server_protocol::ThreadGoal;
 use codex_app_server_protocol::ThreadGoalStatus;
@@ -180,7 +179,6 @@ use crate::error_code::invalid_params;
 use crate::outgoing_message::ConnectionId;
 use crate::request_processors::memythos_arena_state::ArenaCommand;
 use crate::request_processors::memythos_arena_state::ArenaEventKind;
-use crate::request_processors::memythos_arena_state::NativeArenaProtocolSnapshot;
 use crate::request_processors::memythos_arena_state::NativeArenaState;
 use crate::request_processors::memythos_composition::*;
 use crate::request_processors::memythos_composition_planning::*;
@@ -194,196 +192,8 @@ use crate::request_processors::memythos_parent_provisioning::*;
 use crate::request_processors::memythos_parent_response::*;
 use crate::request_processors::memythos_peer_delivery::*;
 use crate::request_processors::memythos_resume::*;
+use crate::request_processors::memythos_runtime_state::*;
 use crate::request_processors::memythos_thread_consolidation::*;
-
-struct MemythosRuntimeState {
-    runtime_id: String,
-    lifecycle_state: MemythosRuntimeLifecycleState,
-    runtime_family: String,
-    connection_mode: String,
-    transport_owner: String,
-    transport_id: Option<String>,
-    daemon_runtime_verified: bool,
-    degraded_reasons: Vec<String>,
-    layers: HashMap<String, MemythosLayer>,
-    arenas: HashMap<String, MemythosArena>,
-    arena_lifecycles: HashMap<String, NativeArenaState>,
-    rooms: HashMap<String, MemythosRoom>,
-    thread_attachments: HashMap<String, MemythosThreadAttachment>,
-    arena_parents: HashMap<String, MemythosArenaParent>,
-    arena_compositions: HashMap<String, MemythosArenaCompositionProvisionResponse>,
-    restored_coordination_snapshots: HashMap<String, PersistedArenaCoordinationSnapshot>,
-    arena_message_deliveries: Vec<MemythosArenaMessageDelivery>,
-    arena_messages: HashMap<String, MemythosArenaMessage>,
-    arena_message_aggregates: HashMap<String, NativeArenaMessageAggregate>,
-    arena_resume_execution_plans: HashMap<String, MemythosArenaResumeExecutionPlan>,
-    room_activity_events: HashMap<String, Vec<MemythosRoomActivityEvent>>,
-    native_parent_turn_responses: HashMap<String, ParentTurnResponse>,
-    structured_contracts: HashMap<String, MemythosStructuredContract>,
-    native_token_usage_refs: HashMap<String, String>,
-    native_thread_usage_totals: HashMap<String, MemythosTokenUsageBreakdown>,
-    native_turn_usage: HashMap<String, MemythosTurnUsageAttribution>,
-    telemetry_refs: Vec<MemythosTelemetryRef>,
-}
-
-const ARENA_COORDINATION_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedArenaCoordinationSnapshot {
-    schema_version: u32,
-    protocol: NativeArenaProtocolSnapshot,
-    layer_id: String,
-    room: MemythosRoom,
-    contract_version: String,
-    coordination: MemythosArenaCompositionCoordination,
-    composition_version: u32,
-    composition_lifecycle_state: MemythosArenaCompositionLifecycleState,
-    leases: Vec<MemythosArenaCompositionLease>,
-    deliveries: Vec<PersistedArenaDeliveryCheckpoint>,
-    aggregates: Vec<PersistedArenaAggregateCheckpoint>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedArenaDeliveryCheckpoint {
-    delivery_id: String,
-    message_id: String,
-    status: String,
-    sender_thread_id: String,
-    receiver_thread_id: String,
-    round_id: String,
-    phase: Option<String>,
-    delivery_mechanism: String,
-    delivery_policy: Option<MemythosArenaDeliveryPolicy>,
-    aggregate_id: Option<String>,
-    aggregate_state: Option<MemythosArenaAggregateState>,
-    checkpoint_state: Option<MemythosArenaCheckpointState>,
-    checkpoint_event_refs: Vec<String>,
-    receiver_turn_id: Option<String>,
-    receiver_response_event_ref: Option<String>,
-    event_refs: Vec<String>,
-    rejection_reason: Option<String>,
-    failure_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedArenaAggregateCheckpoint {
-    key: String,
-    contract: MemythosArenaAggregateContract,
-    state: MemythosArenaAggregateState,
-    received_source_thread_ids: Vec<String>,
-    received_message_ids: Vec<String>,
-    trigger_message_id: Option<String>,
-    checkpoint_state: MemythosArenaCheckpointState,
-    checkpoint_history: Vec<MemythosArenaCheckpointState>,
-}
-
-impl PersistedArenaDeliveryCheckpoint {
-    fn capture(delivery: &MemythosArenaMessageDelivery) -> Self {
-        Self {
-            delivery_id: delivery.delivery_id.clone(),
-            message_id: delivery.message_id.clone(),
-            status: delivery.status.clone(),
-            sender_thread_id: delivery.sender_thread_id.clone(),
-            receiver_thread_id: delivery.receiver_thread_id.clone(),
-            round_id: delivery.round_id.clone(),
-            phase: delivery.phase.clone(),
-            delivery_mechanism: delivery.delivery_mechanism.clone(),
-            delivery_policy: delivery.delivery_policy,
-            aggregate_id: delivery.aggregate_id.clone(),
-            aggregate_state: delivery.aggregate_state,
-            checkpoint_state: delivery.checkpoint_state,
-            checkpoint_event_refs: delivery.checkpoint_event_refs.clone(),
-            receiver_turn_id: delivery.receiver_turn_id.clone(),
-            receiver_response_event_ref: delivery.receiver_response_event_ref.clone(),
-            event_refs: delivery.event_refs.clone(),
-            rejection_reason: delivery.rejection_reason.clone(),
-            failure_reason: delivery.failure_reason.clone(),
-        }
-    }
-
-    fn restore(self, arena_id: &str) -> MemythosArenaMessageDelivery {
-        MemythosArenaMessageDelivery {
-            delivery_id: self.delivery_id,
-            message_id: self.message_id,
-            human_summary: String::new(),
-            status: self.status,
-            sender_thread_id: self.sender_thread_id,
-            receiver_thread_id: self.receiver_thread_id,
-            arena_id: arena_id.to_string(),
-            round_id: self.round_id,
-            phase: self.phase,
-            delivery_mechanism: self.delivery_mechanism,
-            delivery_policy: self.delivery_policy,
-            aggregate_id: self.aggregate_id,
-            aggregate_state: self.aggregate_state,
-            checkpoint_state: self.checkpoint_state,
-            checkpoint_event_refs: self.checkpoint_event_refs,
-            receiver_turn_id: self.receiver_turn_id,
-            receiver_response_event_ref: self.receiver_response_event_ref,
-            delivered_as_human_instruction: false,
-            memory_replay_required: false,
-            event_refs: self.event_refs,
-            rejection_reason: self.rejection_reason,
-            failure_reason: self.failure_reason,
-        }
-    }
-}
-
-impl PersistedArenaAggregateCheckpoint {
-    fn capture(key: &str, aggregate: &NativeArenaMessageAggregate) -> Self {
-        let mut received_source_thread_ids = aggregate
-            .received_source_thread_ids
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        received_source_thread_ids.sort();
-        let mut received_message_ids = aggregate
-            .received_message_ids
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        received_message_ids.sort();
-        Self {
-            key: key.to_string(),
-            contract: aggregate.contract.clone(),
-            state: aggregate.state,
-            received_source_thread_ids,
-            received_message_ids,
-            trigger_message_id: aggregate.trigger_message_id.clone(),
-            checkpoint_state: aggregate.checkpoint_state,
-            checkpoint_history: aggregate.checkpoint_history.clone(),
-        }
-    }
-
-    fn restore(self) -> (String, NativeArenaMessageAggregate) {
-        (
-            self.key,
-            NativeArenaMessageAggregate {
-                contract: self.contract,
-                state: self.state,
-                received_source_thread_ids: self.received_source_thread_ids.into_iter().collect(),
-                received_message_ids: self.received_message_ids.into_iter().collect(),
-                trigger_message_id: self.trigger_message_id,
-                checkpoint_state: self.checkpoint_state,
-                checkpoint_history: self.checkpoint_history,
-            },
-        )
-    }
-}
-
-#[derive(Debug, Clone)]
-struct NativeArenaMessageAggregate {
-    contract: MemythosArenaAggregateContract,
-    state: MemythosArenaAggregateState,
-    received_source_thread_ids: HashSet<String>,
-    received_message_ids: HashSet<String>,
-    trigger_message_id: Option<String>,
-    checkpoint_state: MemythosArenaCheckpointState,
-    checkpoint_history: Vec<MemythosArenaCheckpointState>,
-}
 
 #[derive(Debug, Clone)]
 struct ArenaClosureCandidate {
