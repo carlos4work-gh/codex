@@ -1064,6 +1064,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_mailbox_rollout_checkpoint_prevents_long_turn_false_quarantine() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("initialize runtime");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-4000-8000-000000000627").expect("valid thread id");
+        let mut builder = ThreadMetadataBuilder::new(
+            thread_id,
+            codex_home.join("sessions").join("receiver.jsonl"),
+            Utc::now(),
+            SessionSource::Cli,
+        );
+        builder.cwd = codex_home.clone();
+        runtime
+            .upsert_thread(&builder.build("test-provider"))
+            .await
+            .expect("persist receiver thread");
+
+        let now = Utc::now().timestamp_millis();
+        let record = NativeMailboxCommunicationRecord {
+            receiver_thread_id: thread_id.to_string(),
+            communication_id: "long-turn-communication".to_string(),
+            source_call_id: Some("long-turn-source-call".to_string()),
+            submission_id: Some("long-turn-submission".to_string()),
+            communication_json: r#"{"content":"long turn"}"#.to_string(),
+            payload_hash: "sha256:long-turn".to_string(),
+            status: "pending".to_string(),
+            attempt_count: 0,
+            failure_fingerprint: None,
+            last_progress_ref: None,
+            quarantine_reason: None,
+            created_at_ms: now,
+            updated_at_ms: now,
+        };
+        runtime
+            .insert_pending_native_mailbox_communication(&record)
+            .await
+            .expect("insert pending communication");
+
+        for attempt in 1..=2 {
+            let outcome = runtime
+                .claim_native_mailbox_communication_for_recovery(
+                    &thread_id.to_string(),
+                    &record.communication_id,
+                    3,
+                    now + attempt,
+                )
+                .await
+                .expect("claim before rollout checkpoint");
+            assert!(matches!(
+                outcome,
+                Some(NativeMailboxRecoveryOutcome::Claimed(_))
+            ));
+        }
+
+        assert!(
+            runtime
+                .mark_native_mailbox_communication_consumed(
+                    &thread_id.to_string(),
+                    &record.communication_id,
+                    now + 3,
+                )
+                .await
+                .expect("persist rollout checkpoint")
+        );
+
+        for restart in 1..=10 {
+            assert!(
+                runtime
+                    .claim_native_mailbox_communication_for_recovery(
+                        &thread_id.to_string(),
+                        &record.communication_id,
+                        3,
+                        now + 3 + restart,
+                    )
+                    .await
+                    .expect("restart after rollout checkpoint")
+                    .is_none()
+            );
+        }
+        let checkpointed = runtime
+            .get_native_mailbox_communication(&thread_id.to_string(), &record.communication_id)
+            .await
+            .expect("read checkpointed communication")
+            .expect("communication remains auditable");
+        assert_eq!(checkpointed.status, "consumed");
+        assert_eq!(checkpointed.attempt_count, 2);
+        assert!(checkpointed.failure_fingerprint.is_none());
+        assert!(checkpointed.quarantine_reason.is_none());
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
     async fn native_mailbox_staged_record_is_inert_until_atomic_activation() {
         let codex_home = unique_temp_dir();
         let runtime = StateRuntime::init(

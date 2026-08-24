@@ -22,6 +22,8 @@ require_pattern codex-rs/app-server/tests/suite/v2/mod.rs "mod memythos_arena_re
 require_pattern codex-rs/state/src/runtime.rs "mod arena_snapshots;"
 require_pattern codex-rs/state/src/runtime.rs "mod native_mailbox;"
 require_pattern codex-rs/core/src/lib.rs "mod durable_inter_agent_mailbox;"
+require_pattern codex-rs/core/src/session/mod.rs "if rollout_persisted"
+require_pattern codex-rs/core/src/session/mod.rs ".mark_consumed(&self.thread_id.to_string(), &communication_id)"
 require_pattern codex-rs/cli/src/main.rs "mod memythos_sniff;"
 
 durable_mailbox_service="codex-rs/core/src/durable_inter_agent_mailbox.rs"
