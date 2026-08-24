@@ -3173,6 +3173,60 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
     );
     assert!(persisted_after_restart.snapshot_sequence > persisted_before_restart.snapshot_sequence);
 
+    let mut pending_snapshot: serde_json::Value =
+        serde_json::from_str(&persisted_after_restart.snapshot_json)
+            .expect("decode v2 coordination snapshot");
+    pending_snapshot["pending_effects"] = serde_json::json!([{
+        "arena_id": "arena-composition",
+        "delivery_id": "mem_delivery_999",
+        "message_id": "recovered-pending-message",
+        "communication_id": "recovered-pending-message",
+        "source_call_id": "recovered-pending-message",
+        "receiver_thread_id": participant_thread_ids["bettor-risk"],
+        "payload_hash": "sha256:pending-payload",
+        "sender_thread_id": participant_thread_ids["bettor-growth"],
+        "round_id": "round-1",
+        "message_kind": "peer_proposal",
+        "to_parent_role": "bettor",
+        "requires_response": false,
+        "delivery_policy": "queue_only",
+        "aggregate_contract": null,
+        "prepared_aggregate_state": null
+    }]);
+    let mut pending_record = persisted_after_restart.clone();
+    pending_record.snapshot_json =
+        serde_json::to_string(&pending_snapshot).expect("encode pending coordination snapshot");
+    pending_record.last_event_hash = arena_snapshot_sha256(&pending_record.snapshot_json);
+    state_db
+        .upsert_arena_snapshot(&pending_record)
+        .await
+        .expect("persist pending effect checkpoint");
+    drop(second_process);
+
+    let recovery_process = make_processor();
+    recovery_process
+        .arena_state_get(MemythosArenaStateGetParams {
+            arena_id: "arena-composition".to_string(),
+        })
+        .await
+        .expect("restore and reconcile pending effect without caller retry");
+    let reconciled = state_db
+        .get_arena_snapshot("arena-composition")
+        .await
+        .expect("read reconciled snapshot")
+        .expect("reconciled snapshot exists");
+    let reconciled_json: serde_json::Value =
+        serde_json::from_str(&reconciled.snapshot_json).expect("decode reconciled snapshot");
+    assert_eq!(reconciled_json["pending_effects"], serde_json::json!([]));
+    assert!(
+        reconciled_json["deliveries"]
+            .as_array()
+            .expect("delivery checkpoints")
+            .iter()
+            .any(|delivery| delivery["message_id"] == "recovered-pending-message")
+    );
+    drop(recovery_process);
+
     provisioning
         .goals
         .lock()

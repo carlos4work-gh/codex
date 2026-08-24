@@ -122,11 +122,29 @@ pub(super) struct PersistedArenaCoordinationSnapshot {
 #[serde(deny_unknown_fields)]
 pub(super) struct PersistedArenaPendingEffect {
     pub(super) arena_id: String,
+    #[serde(default)]
+    pub(super) delivery_id: String,
     pub(super) message_id: String,
     pub(super) communication_id: String,
     pub(super) source_call_id: String,
     pub(super) receiver_thread_id: String,
     pub(super) payload_hash: String,
+    #[serde(default)]
+    pub(super) sender_thread_id: String,
+    #[serde(default)]
+    pub(super) round_id: String,
+    #[serde(default)]
+    pub(super) message_kind: String,
+    #[serde(default)]
+    pub(super) to_parent_role: String,
+    #[serde(default)]
+    pub(super) requires_response: bool,
+    #[serde(default)]
+    pub(super) delivery_policy: Option<MemythosArenaDeliveryPolicy>,
+    #[serde(default)]
+    pub(super) aggregate_contract: Option<MemythosArenaAggregateContract>,
+    #[serde(default)]
+    pub(super) prepared_aggregate_state: Option<MemythosArenaAggregateState>,
 }
 
 pub(super) fn arena_pending_effect_key(arena_id: &str, message_id: &str) -> String {

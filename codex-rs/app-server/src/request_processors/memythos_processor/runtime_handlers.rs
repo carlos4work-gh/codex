@@ -70,6 +70,11 @@ impl MemythosRequestProcessor {
                     || pending_effect.communication_id.trim().is_empty()
                     || pending_effect.source_call_id != pending_effect.communication_id
                     || pending_effect.receiver_thread_id.trim().is_empty()
+                    || pending_effect.delivery_id.trim().is_empty()
+                    || pending_effect.sender_thread_id.trim().is_empty()
+                    || pending_effect.round_id.trim().is_empty()
+                    || pending_effect.message_kind.trim().is_empty()
+                    || pending_effect.to_parent_role.trim().is_empty()
                     || !pending_effect.payload_hash.starts_with("sha256:")
                     || pending_effect.payload_hash.len() <= "sha256:".len()
                     || !snapshot.room.participants.iter().any(|participant| {
@@ -150,6 +155,31 @@ impl MemythosRequestProcessor {
             validated_snapshots.push((record, snapshot, lifecycle, arena));
         }
 
+        let mut reconciled_effects = Vec::new();
+        for (_, snapshot, _, _) in &validated_snapshots {
+            for pending in &snapshot.pending_effects {
+                let message = pending_effect_message(pending);
+                let effect = PeerParentStagedEffect {
+                    communication_id: pending.communication_id.clone(),
+                    source_call_id: pending.source_call_id.clone(),
+                    receiver_thread_id: pending.receiver_thread_id.clone(),
+                    payload_hash: pending.payload_hash.clone(),
+                };
+                let attempt = self
+                    .peer_parent_delivery_adapter
+                    .activate_staged_peer_parent_message(&message, &effect, None, ConnectionId(0))
+                    .await;
+                validate_peer_parent_delivery_attempt(&message, &attempt)
+                    .map_err(|error| ArenaPortError::contract_rejected(error.to_string()))
+                    .map_err(|error| error.into_jsonrpc("peer_delivery_recovery"))?;
+                if let Some(reason) = attempt.rejection_reason.as_ref() {
+                    return Err(ArenaPortError::outcome_unknown(reason.clone())
+                        .into_jsonrpc("peer_delivery_recovery"));
+                }
+                reconciled_effects.push((pending.clone(), message, attempt));
+            }
+        }
+
         let mut state = self.state.lock().await;
         for (record, snapshot, lifecycle, arena) in validated_snapshots {
             let lifecycle_state = lifecycle.protocol_state();
@@ -157,6 +187,9 @@ impl MemythosRequestProcessor {
                 .deliveries
                 .iter()
                 .filter_map(|delivery| generated_id_sequence(&delivery.delivery_id, "mem_delivery"))
+                .chain(snapshot.pending_effects.iter().filter_map(|effect| {
+                    generated_id_sequence(&effect.delivery_id, "mem_delivery")
+                }))
                 .max()
             {
                 self.next_delivery_id
@@ -202,6 +235,56 @@ impl MemythosRequestProcessor {
             state
                 .restored_coordination_snapshots
                 .insert(record.arena_id, snapshot);
+        }
+        let mut reconciled_arena_ids = HashSet::new();
+        for (pending, message, attempt) in reconciled_effects {
+            let aggregate_state = finalize_native_aggregate_delivery(
+                &mut state,
+                &message,
+                pending.prepared_aggregate_state,
+                true,
+            );
+            let (checkpoint_state, checkpoint_event_refs) =
+                native_aggregate_checkpoint_projection(&state, &message);
+            let delivery = MemythosArenaMessageDelivery {
+                delivery_id: pending.delivery_id,
+                message_id: pending.message_id.clone(),
+                human_summary: String::new(),
+                status: attempt.status,
+                sender_thread_id: pending.sender_thread_id,
+                receiver_thread_id: pending.receiver_thread_id,
+                arena_id: pending.arena_id.clone(),
+                round_id: pending.round_id,
+                phase: phase_from_message_kind(&pending.message_kind),
+                delivery_mechanism: attempt.delivery_mechanism,
+                delivery_policy: pending.delivery_policy,
+                aggregate_id: pending
+                    .aggregate_contract
+                    .as_ref()
+                    .map(|contract| contract.aggregate_id.clone()),
+                aggregate_state,
+                checkpoint_state,
+                checkpoint_event_refs,
+                receiver_turn_id: attempt.receiver_turn_id,
+                receiver_response_event_ref: attempt.receiver_response_event_ref,
+                delivered_as_human_instruction: false,
+                memory_replay_required: false,
+                event_refs: attempt.event_refs,
+                rejection_reason: None,
+                failure_reason: None,
+            };
+            state
+                .arena_pending_effects
+                .remove(&arena_pending_effect_key(
+                    &pending.arena_id,
+                    &pending.message_id,
+                ));
+            state.arena_message_deliveries.push(delivery);
+            reconciled_arena_ids.insert(pending.arena_id);
+        }
+        drop(state);
+        for arena_id in reconciled_arena_ids {
+            self.persist_arena_coordination_snapshot(&arena_id).await?;
         }
         Ok(())
     }
@@ -470,5 +553,28 @@ impl MemythosRequestProcessor {
             format!("Runtime closed with state {lifecycle_state:?}."),
         );
         Ok(response.into())
+    }
+}
+
+fn pending_effect_message(pending: &PersistedArenaPendingEffect) -> MemythosArenaMessage {
+    MemythosArenaMessage {
+        message_id: pending.message_id.clone(),
+        case_id: String::new(),
+        arena_id: pending.arena_id.clone(),
+        round_id: pending.round_id.clone(),
+        from_parent_thread_id: pending.sender_thread_id.clone(),
+        from_parent_role: "recovered_native_parent".to_string(),
+        to_parent_thread_id: pending.receiver_thread_id.clone(),
+        to_parent_role: pending.to_parent_role.clone(),
+        message_kind: pending.message_kind.clone(),
+        human_summary: String::new(),
+        execution_prompt: None,
+        context_packet_ref: String::new(),
+        artifact_refs: Vec::new(),
+        requires_response: pending.requires_response,
+        delivery_policy: pending.delivery_policy,
+        aggregate_contract: pending.aggregate_contract.clone(),
+        response_contract: None,
+        output_schema: None,
     }
 }

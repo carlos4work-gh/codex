@@ -914,6 +914,7 @@ impl MemythosRequestProcessor {
             None
         };
 
+        let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
         let staged_effect = self
             .peer_parent_delivery_adapter
             .stage_peer_parent_message(&message)
@@ -923,11 +924,20 @@ impl MemythosRequestProcessor {
         if let Some(effect) = staged_effect.as_ref() {
             let pending_effect = PersistedArenaPendingEffect {
                 arena_id: message.arena_id.clone(),
+                delivery_id: delivery_id.clone(),
                 message_id: message.message_id.clone(),
                 communication_id: effect.communication_id.clone(),
                 source_call_id: effect.source_call_id.clone(),
                 receiver_thread_id: effect.receiver_thread_id.clone(),
                 payload_hash: effect.payload_hash.clone(),
+                sender_thread_id: message.from_parent_thread_id.clone(),
+                round_id: message.round_id.clone(),
+                message_kind: message.message_kind.clone(),
+                to_parent_role: message.to_parent_role.clone(),
+                requires_response: message.requires_response,
+                delivery_policy: message.delivery_policy,
+                aggregate_contract: message.aggregate_contract.clone(),
+                prepared_aggregate_state: aggregate_state,
             };
             self.state.lock().await.arena_pending_effects.insert(
                 arena_pending_effect_key(&message.arena_id, &message.message_id),
@@ -937,7 +947,6 @@ impl MemythosRequestProcessor {
                 .await?;
         }
 
-        let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
         let delivery_attempt = if let Some(effect) = staged_effect.as_ref() {
             self.peer_parent_delivery_adapter
                 .activate_staged_peer_parent_message(
