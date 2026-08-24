@@ -997,23 +997,24 @@ impl MemythosRequestProcessor {
             .peer_parent_delivery_adapter
             .deliver_peer_parent_message(&message, target_reasoning_effort.clone(), connection_id)
             .await;
-        validate_peer_parent_delivery_attempt(&message, &delivery_attempt).map_err(|error| {
-            invalid_params(format!("peer delivery adapter contract rejected: {error}"))
-        })?;
+        validate_peer_parent_delivery_attempt(&message, &delivery_attempt)
+            .map_err(|error| ArenaPortError::contract_rejected(error.to_string()))
+            .map_err(|error| error.into_jsonrpc("peer_delivery"))?;
         let Some(target_turn_id) = delivery_attempt.receiver_turn_id.clone() else {
             let rollback_detail = self
                 .rollback_parent_goal_after_failed_delivery(&message, &prepared_goal)
                 .await
                 .map(|detail| format!("; {detail}"))
                 .unwrap_or_default();
-            return Err(invalid_params(format!(
+            return Err(ArenaPortError::permanent_failure(format!(
                 "room sendInput failed to create target turn: {}{}",
                 delivery_attempt
                     .rejection_reason
                     .clone()
                     .unwrap_or_else(|| "unknown delivery failure".to_string()),
                 rollback_detail
-            )));
+            ))
+            .into_jsonrpc("peer_delivery"));
         };
         let room_event_ref = format!(
             "app-server://rooms/{}/messages/{}/delivered",

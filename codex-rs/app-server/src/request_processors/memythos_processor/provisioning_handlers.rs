@@ -42,7 +42,7 @@ impl MemythosRequestProcessor {
                 .arena_composition_planning_adapter
                 .assess_resume(&params, previous, connection_id)
                 .await
-                .map_err(ArenaPortError::classify_planning_failure)
+                .map_err(ArenaPortError::classify_effect_failure)
                 .map_err(|error| error.into_jsonrpc("composition_planning"))?;
             validate_planned_arena_resume(previous, &planned)
                 .map_err(|error| ArenaPortError::contract_rejected(error.to_string()))
@@ -87,7 +87,7 @@ impl MemythosRequestProcessor {
                     .arena_composition_planning_adapter
                     .plan(&params, previous.as_ref(), connection_id)
                     .await
-                    .map_err(ArenaPortError::classify_planning_failure)
+                    .map_err(ArenaPortError::classify_effect_failure)
                     .map_err(|error| error.into_jsonrpc("composition_planning"))?;
                 validate_planned_arena_composition(&params, &planned)
                     .map_err(|error| ArenaPortError::contract_rejected(error.to_string()))
@@ -422,9 +422,10 @@ impl MemythosRequestProcessor {
                                 .rollback_parent(&previous.thread_id)
                                 .await;
                         }
-                        return Err(invalid_params(format!(
-                            "parent provisioning adapter contract rejected: {contract_error}"
-                        )));
+                        return Err(
+                            ArenaPortError::contract_rejected(contract_error.to_string())
+                                .into_jsonrpc("parent_provisioning"),
+                        );
                     }
                     provisioned_parents.push(parent);
                 }
@@ -438,7 +439,8 @@ impl MemythosRequestProcessor {
                             .rollback_parent(&parent.thread_id)
                             .await;
                     }
-                    return Err(error);
+                    return Err(ArenaPortError::classify_effect_failure(error)
+                        .into_jsonrpc("parent_provisioning"));
                 }
             }
         }

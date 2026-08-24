@@ -932,9 +932,9 @@ impl MemythosRequestProcessor {
             .peer_parent_delivery_adapter
             .deliver_peer_parent_message(&message, target_reasoning_effort.clone(), ConnectionId(0))
             .await;
-        validate_peer_parent_delivery_attempt(&message, &delivery_attempt).map_err(|error| {
-            invalid_params(format!("peer delivery adapter contract rejected: {error}"))
-        })?;
+        validate_peer_parent_delivery_attempt(&message, &delivery_attempt)
+            .map_err(|error| ArenaPortError::contract_rejected(error.to_string()))
+            .map_err(|error| error.into_jsonrpc("peer_delivery"))?;
         if delivery_attempt.rejection_reason.is_some()
             && let Some(prepared_goal) = prepared_goal.as_ref()
         {
