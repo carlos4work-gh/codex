@@ -143,6 +143,9 @@ jobs:
           cargo test -p codex-app-server room_activity_list_uses_native_agent_message_completion_projection
           cargo test -p codex-app-server parent_continuity_tracks_multiple_receiver_turns
           cargo test -p codex-app-server parent_continuity_is_verified_with_goal_snapshot_and_completed_turn
+          cargo test -p codex-app-server room_timeline_get_reports_final_native_source_method
+          cargo test -p codex-app-server attaches_threads_and_filters_telemetry_refs
+          cargo test -p codex-app-server native_telemetry_refs_are_source_tagged_and_compact
 
       - name: Memythos aggregate checkpoint boundary
         run: |

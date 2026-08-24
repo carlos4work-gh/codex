@@ -5,7 +5,7 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 processor="codex-rs/app-server/src/request_processors/memythos_processor.rs"
-processor_max="${MEMYTHOS_PROCESSOR_MAX_LINES:-5580}"
+processor_max="${MEMYTHOS_PROCESSOR_MAX_LINES:-4970}"
 module_max="${MEMYTHOS_MODULE_MAX_LINES:-3000}"
 processor_lines="$(wc -l <"$processor" | tr -d ' ')"
 
@@ -21,8 +21,9 @@ while IFS= read -r module; do
     exit 1
   fi
 done < <(
-  find codex-rs/app-server/src/request_processors -maxdepth 1 \
-    -name 'memythos_*.rs' \
+  find codex-rs/app-server/src/request_processors -maxdepth 2 \
+    -type f -name '*.rs' \
+    \( -name 'memythos_*.rs' -o -path '*/memythos_processor/*.rs' \) \
     ! -name 'memythos_processor.rs' \
     ! -name 'memythos_processor_tests.rs' \
     -print | sort
