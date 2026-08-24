@@ -1048,6 +1048,17 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
     assert_eq!(quarantined_health.quarantined_count, 5);
     assert_eq!(quarantined_health.max_attempt_count, 4);
     assert_eq!(quarantined_health.resolution_count, 0);
+    let paused = room_activity(&mut process, &provisioned.room.room_id).await?;
+    assert_eq!(paused.lifecycle.room_state, "recoverable_pause");
+    assert_eq!(paused.blockers.len(), 5);
+    assert_eq!(
+        paused
+            .events
+            .iter()
+            .filter(|event| event.event_kind == "mailbox_quarantined")
+            .count(),
+        5
+    );
     let skip = resolve_quarantine(
         &mut process,
         MemythosMailboxQuarantineResolveParams {
@@ -1062,6 +1073,9 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
     )
     .await?;
     assert_eq!(skip.resulting_status, "skipped");
+    let after_skip = room_activity(&mut process, &provisioned.room.room_id).await?;
+    assert_eq!(after_skip.lifecycle.room_state, "recoverable_pause");
+    assert_eq!(after_skip.blockers.len(), 4);
     let abort = resolve_quarantine(
         &mut process,
         MemythosMailboxQuarantineResolveParams {
@@ -1076,6 +1090,9 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
     )
     .await?;
     assert_eq!(abort.resulting_status, "aborted");
+    let after_abort = room_activity(&mut process, &provisioned.room.room_id).await?;
+    assert_eq!(after_abort.lifecycle.room_state, "recoverable_pause");
+    assert_eq!(after_abort.blockers.len(), 3);
     let mut replacement = queued_proposal_message(
         "message-terminal-replacement",
         &concierge.thread_id,
@@ -1213,6 +1230,18 @@ async fn arena_mailbox_terminal_resolutions_and_replace_survive_restart() -> Res
                     && outcome.replacement_communication_id
                         == contention_winner.replacement_communication_id
             })
+    );
+    let resumed = room_activity(&mut process, &provisioned.room.room_id).await?;
+    assert_eq!(resumed.lifecycle.room_state, "running");
+    assert!(resumed.blockers.is_empty());
+    assert_eq!(
+        resumed
+            .events
+            .iter()
+            .filter(|event| event.event_kind == "mailbox_quarantined")
+            .count(),
+        5,
+        "reconciliation must not duplicate technical incidents"
     );
 
     let first_page_id = process
@@ -1558,6 +1587,29 @@ async fn mailbox_health(
     )
     .await??;
     Ok(to_response(response)?)
+}
+
+async fn room_activity(
+    process: &mut TestAppServer,
+    room_id: &str,
+) -> Result<MemythosRoomActivityListResponse> {
+    let request_id = process
+        .send_memythos_room_activity_list_request(MemythosRoomActivityListParams {
+            room_id: room_id.to_string(),
+            round_id: None,
+            phase: None,
+            since_cursor: None,
+            after_cursor: None,
+            limit: None,
+            include_debug_refs: false,
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        RESPONSE_TIMEOUT,
+        process.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    to_response(response)
 }
 
 async fn resume_native_thread(server: &mut TestAppServer, thread_id: &str) -> Result<()> {
