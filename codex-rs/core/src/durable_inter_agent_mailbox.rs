@@ -21,6 +21,11 @@ pub(crate) struct RestoredCommunications {
     pub warnings: Vec<String>,
 }
 
+pub(crate) struct ActivatedCommunication {
+    pub communication: InterAgentCommunication,
+    pub submission_id: Option<String>,
+}
+
 pub(crate) struct DurableInterAgentMailbox {
     state_db: Option<StateDbHandle>,
 }
@@ -96,6 +101,54 @@ impl DurableInterAgentMailbox {
             .ok_or_else(|| CodexErr::Fatal("native mailbox message disappeared".to_string()))?;
         Ok(PersistOutcome::Existing {
             submission_id: existing.submission_id,
+        })
+    }
+
+    pub(crate) async fn activate_by_id(
+        &self,
+        receiver_thread_id: &str,
+        communication_id: &str,
+    ) -> CodexResult<ActivatedCommunication> {
+        let state_db = self.state_db.as_ref().ok_or_else(|| {
+            CodexErr::Fatal("staged mailbox activation requires sqlite state".to_string())
+        })?;
+        let staged = state_db
+            .get_staged_native_mailbox_communication(receiver_thread_id, communication_id)
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!("failed to read staged mailbox message: {error}"))
+            })?;
+        let outcome = self
+            .activate_before_send(receiver_thread_id, communication_id)
+            .await?;
+        let active = state_db
+            .get_native_mailbox_communication(receiver_thread_id, communication_id)
+            .await
+            .map_err(|error| {
+                CodexErr::Fatal(format!("failed to read active mailbox message: {error}"))
+            })?
+            .ok_or_else(|| CodexErr::Fatal("native mailbox message disappeared".to_string()))?;
+        if let Some(staged) = staged {
+            if staged.payload_hash != active.payload_hash
+                || staged.communication_json != active.communication_json
+            {
+                return Err(CodexErr::Fatal(
+                    "staged mailbox payload changed during activation".to_string(),
+                ));
+            }
+        }
+        let communication = serde_json::from_str(&active.communication_json).map_err(|error| {
+            CodexErr::Fatal(format!(
+                "failed to decode activated mailbox message {communication_id}: {error}"
+            ))
+        })?;
+        let submission_id = match outcome {
+            PersistOutcome::Existing { submission_id } => submission_id,
+            PersistOutcome::ReadyToSend => None,
+        };
+        Ok(ActivatedCommunication {
+            communication,
+            submission_id,
         })
     }
 

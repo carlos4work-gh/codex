@@ -393,6 +393,26 @@ WHERE receiver_thread_id = ? AND communication_id = ?
         row.map(native_mailbox_record_from_row).transpose()
     }
 
+    pub async fn get_staged_native_mailbox_communication(
+        &self,
+        receiver_thread_id: &str,
+        communication_id: &str,
+    ) -> anyhow::Result<Option<NativeMailboxCommunicationRecord>> {
+        let row = sqlx::query(
+            r#"SELECT receiver_thread_id, communication_id, source_call_id, submission_id,
+                      communication_json, payload_hash, 'staged' AS status, 0 AS attempt_count,
+                      NULL AS failure_fingerprint, NULL AS last_progress_ref,
+                      NULL AS quarantine_reason, created_at_ms, updated_at_ms
+               FROM native_mailbox_staged_communications
+               WHERE receiver_thread_id = ? AND communication_id = ?"#,
+        )
+        .bind(receiver_thread_id)
+        .bind(communication_id)
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+        row.map(native_mailbox_record_from_row).transpose()
+    }
+
     pub async fn set_native_mailbox_submission_id(
         &self,
         receiver_thread_id: &str,

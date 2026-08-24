@@ -1434,6 +1434,40 @@ impl ThreadManager {
         Ok(submission_id)
     }
 
+    pub async fn activate_staged_inter_agent_communication_by_id(
+        &self,
+        sender_thread_id: ThreadId,
+        receiver_thread_id: ThreadId,
+        communication_id: &str,
+    ) -> CodexResult<(String, InterAgentCommunication)> {
+        let receiver_thread = self.get_thread(receiver_thread_id).await?;
+        let mailbox = DurableInterAgentMailbox::new(receiver_thread.state_db());
+        let activated = mailbox
+            .activate_by_id(&receiver_thread_id.to_string(), communication_id)
+            .await?;
+        if let Some(submission_id) = activated.submission_id {
+            return Ok((submission_id, activated.communication));
+        }
+        let submission_id = self
+            .agent_control()
+            .send_inter_agent_communication(
+                receiver_thread_id,
+                activated.communication.clone(),
+                AgentCommunicationContext::new(AgentCommunicationKind::Message, sender_thread_id),
+                None,
+                None,
+            )
+            .await?;
+        mailbox
+            .bind_submission(
+                &receiver_thread_id.to_string(),
+                communication_id,
+                &submission_id,
+            )
+            .await?;
+        Ok((submission_id, activated.communication))
+    }
+
     pub async fn reenqueue_inter_agent_communication(
         &self,
         sender_thread_id: ThreadId,

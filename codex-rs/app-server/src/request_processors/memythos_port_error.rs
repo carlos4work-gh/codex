@@ -36,7 +36,11 @@ impl ArenaPortError {
     }
 
     pub(crate) fn classify_effect_failure(error: JSONRPCErrorError) -> Self {
-        let message = error.message;
+        Self::classify_effect_message(error.message)
+    }
+
+    pub(crate) fn classify_effect_message(message: impl Into<String>) -> Self {
+        let message = message.into();
         let normalized = message.to_ascii_lowercase();
         let kind = if normalized.contains("timeout") || normalized.contains("timed out") {
             ArenaPortFailureKind::OutcomeUnknown
@@ -54,6 +58,13 @@ impl ArenaPortError {
     pub(crate) fn permanent_failure(message: impl Into<String>) -> Self {
         Self {
             kind: ArenaPortFailureKind::PermanentFailure,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn outcome_unknown(message: impl Into<String>) -> Self {
+        Self {
+            kind: ArenaPortFailureKind::OutcomeUnknown,
             message: message.into(),
         }
     }

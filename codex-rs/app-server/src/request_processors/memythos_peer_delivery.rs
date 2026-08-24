@@ -19,6 +19,8 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_rollout::state_db::StateDbHandle;
+use sha2::Digest;
+use sha2::Sha256;
 
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
@@ -100,14 +102,41 @@ pub(crate) type PeerParentDeliveryFuture<'a> =
     Pin<Box<dyn Future<Output = PeerParentDeliveryAttempt> + Send + 'a>>;
 pub(crate) type NativeMailboxReenqueueFuture<'a> =
     Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>>;
+pub(crate) type PeerParentStageFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<PeerParentStagedEffect>, String>> + Send + 'a>>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct PeerParentStagedEffect {
+    pub(super) communication_id: String,
+    pub(super) source_call_id: String,
+    pub(super) receiver_thread_id: String,
+    pub(super) payload_hash: String,
+}
 
 pub(crate) trait PeerParentDeliveryAdapter: Send + Sync {
+    fn stage_peer_parent_message<'a>(
+        &'a self,
+        _message: &'a MemythosArenaMessage,
+    ) -> PeerParentStageFuture<'a> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn deliver_peer_parent_message<'a>(
         &'a self,
         message: &'a MemythosArenaMessage,
         reasoning_effort: Option<ReasoningEffort>,
         connection_id: ConnectionId,
     ) -> PeerParentDeliveryFuture<'a>;
+
+    fn activate_staged_peer_parent_message<'a>(
+        &'a self,
+        message: &'a MemythosArenaMessage,
+        _effect: &'a PeerParentStagedEffect,
+        reasoning_effort: Option<ReasoningEffort>,
+        connection_id: ConnectionId,
+    ) -> PeerParentDeliveryFuture<'a> {
+        self.deliver_peer_parent_message(message, reasoning_effort, connection_id)
+    }
 
     fn reenqueue_native_mailbox_communication<'a>(
         &'a self,
@@ -184,6 +213,37 @@ impl NativeMailboxPeerParentDeliveryAdapter {
 }
 
 impl PeerParentDeliveryAdapter for NativeMailboxPeerParentDeliveryAdapter {
+    fn stage_peer_parent_message<'a>(
+        &'a self,
+        message: &'a MemythosArenaMessage,
+    ) -> PeerParentStageFuture<'a> {
+        Box::pin(async move {
+            if message.from_parent_role == "human" {
+                return Ok(None);
+            }
+            let (sender_thread_id, target_thread_id, communication) =
+                prepare_native_parent_mailbox_message(&self.thread_manager, message).await?;
+            let communication_json =
+                serde_json::to_string(&communication).map_err(|error| error.to_string())?;
+            self.thread_manager
+                .stage_inter_agent_communication(target_thread_id, &communication)
+                .await
+                .map_err(|error| error.to_string())?;
+            let communication_id = communication
+                .id
+                .as_ref()
+                .expect("native Arena communication has a stable id")
+                .to_string();
+            let _ = sender_thread_id;
+            Ok(Some(PeerParentStagedEffect {
+                source_call_id: communication_id.clone(),
+                communication_id,
+                receiver_thread_id: target_thread_id.to_string(),
+                payload_hash: format!("sha256:{:x}", Sha256::digest(communication_json.as_bytes())),
+            }))
+        })
+    }
+
     fn deliver_peer_parent_message<'a>(
         &'a self,
         message: &'a MemythosArenaMessage,
@@ -330,35 +390,88 @@ impl PeerParentDeliveryAdapter for NativeMailboxPeerParentDeliveryAdapter {
                 .map_err(|error| error.to_string())
         })
     }
+
+    fn activate_staged_peer_parent_message<'a>(
+        &'a self,
+        message: &'a MemythosArenaMessage,
+        effect: &'a PeerParentStagedEffect,
+        _reasoning_effort: Option<ReasoningEffort>,
+        _connection_id: ConnectionId,
+    ) -> PeerParentDeliveryFuture<'a> {
+        Box::pin(async move {
+            let sender_thread_id = match ThreadId::from_string(&message.from_parent_thread_id) {
+                Ok(thread_id) => thread_id,
+                Err(error) => {
+                    return failed_native_mailbox_delivery_attempt(
+                        message,
+                        &format!("invalid source parent thread id: {error}"),
+                    );
+                }
+            };
+            let target_thread_id = match ThreadId::from_string(&effect.receiver_thread_id) {
+                Ok(thread_id) => thread_id,
+                Err(error) => {
+                    return failed_native_mailbox_delivery_attempt(
+                        message,
+                        &format!("invalid target parent thread id: {error}"),
+                    );
+                }
+            };
+            match self
+                .thread_manager
+                .activate_staged_inter_agent_communication_by_id(
+                    sender_thread_id,
+                    target_thread_id,
+                    &effect.communication_id,
+                )
+                .await
+            {
+                Ok((submission_id, communication)) => successful_native_mailbox_delivery_attempt(
+                    message,
+                    submission_id,
+                    communication.trigger_turn,
+                ),
+                Err(error) => failed_native_mailbox_delivery_attempt(message, &error.to_string()),
+            }
+        })
+    }
 }
 
 async fn deliver_native_parent_mailbox_message(
     thread_manager: &ThreadManager,
     message: &MemythosArenaMessage,
 ) -> PeerParentDeliveryAttempt {
-    let event_ref = format!(
-        "memythos://arenas/{}/rounds/{}/messages/{}",
-        message.arena_id, message.round_id, message.message_id
-    );
-    let target_thread_id = match ThreadId::from_string(&message.to_parent_thread_id) {
-        Ok(thread_id) => thread_id,
-        Err(error) => {
-            return failed_native_mailbox_delivery_attempt(
-                message,
-                &format!("invalid target parent thread id: {error}"),
-            );
+    let (sender_thread_id, target_thread_id, communication) =
+        match prepare_native_parent_mailbox_message(thread_manager, message).await {
+            Ok(prepared) => prepared,
+            Err(error) => return failed_native_mailbox_delivery_attempt(message, &error),
+        };
+    let trigger_turn = communication.trigger_turn;
+    match thread_manager
+        .send_inter_agent_communication(sender_thread_id, target_thread_id, communication)
+        .await
+    {
+        Ok(submission_id) => {
+            successful_native_mailbox_delivery_attempt(message, submission_id, trigger_turn)
         }
-    };
-    let target_thread = match thread_manager.get_thread(target_thread_id).await {
-        Ok(thread) => thread,
-        Err(error) => {
-            return failed_native_mailbox_delivery_attempt(message, &error.to_string());
-        }
-    };
+        Err(error) => failed_native_mailbox_delivery_attempt(message, &error.to_string()),
+    }
+}
+
+async fn prepare_native_parent_mailbox_message(
+    thread_manager: &ThreadManager,
+    message: &MemythosArenaMessage,
+) -> Result<(ThreadId, ThreadId, InterAgentCommunication), String> {
+    let target_thread_id = ThreadId::from_string(&message.to_parent_thread_id)
+        .map_err(|error| format!("invalid target parent thread id: {error}"))?;
+    let target_thread = thread_manager
+        .get_thread(target_thread_id)
+        .await
+        .map_err(|error| error.to_string())?;
     let target_status = target_thread.agent_status().await;
     let trigger_turn = match native_mailbox_wake_policy(&target_status, message.requires_response) {
         Ok(trigger_turn) => trigger_turn,
-        Err(reason) => return failed_native_mailbox_delivery_attempt(message, &reason),
+        Err(reason) => return Err(reason),
     };
     let mut communication = InterAgentCommunication::new(
         AgentPath::root(),
@@ -368,52 +481,48 @@ async fn deliver_native_parent_mailbox_message(
         trigger_turn,
     );
     communication.id = Some(ResponseItemId::from_server(message.message_id.clone()));
-    let sender_thread_id = match ThreadId::from_string(&message.from_parent_thread_id) {
-        Ok(thread_id) => thread_id,
-        Err(error) => {
-            return failed_native_mailbox_delivery_attempt(
-                message,
-                &format!("invalid source parent thread id: {error}"),
-            );
-        }
+    let sender_thread_id = ThreadId::from_string(&message.from_parent_thread_id)
+        .map_err(|error| format!("invalid source parent thread id: {error}"))?;
+    Ok((sender_thread_id, target_thread_id, communication))
+}
+
+fn successful_native_mailbox_delivery_attempt(
+    message: &MemythosArenaMessage,
+    submission_id: String,
+    trigger_turn: bool,
+) -> PeerParentDeliveryAttempt {
+    let mechanism = if trigger_turn {
+        "native_mailbox_trigger_turn"
+    } else {
+        "native_mailbox_queue_only"
     };
-    match thread_manager
-        .send_inter_agent_communication(sender_thread_id, target_thread_id, communication)
-        .await
-    {
-        Ok(submission_id) => {
-            let mechanism = if trigger_turn {
-                "native_mailbox_trigger_turn"
-            } else {
-                "native_mailbox_queue_only"
-            };
-            PeerParentDeliveryAttempt {
-                status: if trigger_turn {
-                    "delivered_to_native_mailbox_turn".to_string()
-                } else {
-                    "queued_in_native_mailbox".to_string()
-                },
-                delivery_mechanism: mechanism.to_string(),
-                receiver_turn_id: trigger_turn.then_some(submission_id.clone()),
-                receiver_response_event_ref: None,
-                delivered_as_human_instruction: false,
-                memory_replay_required: false,
-                event_refs: vec![
-                    event_ref,
-                    format!(
-                        "app-server://threads/{}/mailbox/{}",
-                        message.to_parent_thread_id, submission_id
-                    ),
-                ],
-                rejection_reason: None,
-                telemetry_channel: MemythosEventChannel::StateTransition,
-                telemetry_summary: format!(
-                    "Arena message {} delivered through the native app-server mailbox to parent thread {} (trigger_turn={trigger_turn}).",
-                    message.message_id, message.to_parent_thread_id
-                ),
-            }
-        }
-        Err(error) => failed_native_mailbox_delivery_attempt(message, &error.to_string()),
+    PeerParentDeliveryAttempt {
+        status: if trigger_turn {
+            "delivered_to_native_mailbox_turn".to_string()
+        } else {
+            "queued_in_native_mailbox".to_string()
+        },
+        delivery_mechanism: mechanism.to_string(),
+        receiver_turn_id: trigger_turn.then_some(submission_id.clone()),
+        receiver_response_event_ref: None,
+        delivered_as_human_instruction: false,
+        memory_replay_required: false,
+        event_refs: vec![
+            format!(
+                "memythos://arenas/{}/rounds/{}/messages/{}",
+                message.arena_id, message.round_id, message.message_id
+            ),
+            format!(
+                "app-server://threads/{}/mailbox/{}",
+                message.to_parent_thread_id, submission_id
+            ),
+        ],
+        rejection_reason: None,
+        telemetry_channel: MemythosEventChannel::StateTransition,
+        telemetry_summary: format!(
+            "Arena message {} delivered through the native app-server mailbox to parent thread {} (trigger_turn={trigger_turn}).",
+            message.message_id, message.to_parent_thread_id
+        ),
     }
 }
 

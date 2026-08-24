@@ -914,11 +914,48 @@ impl MemythosRequestProcessor {
             None
         };
 
-        let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
-        let delivery_attempt = self
+        let staged_effect = self
             .peer_parent_delivery_adapter
-            .deliver_peer_parent_message(&message, target_reasoning_effort.clone(), ConnectionId(0))
-            .await;
+            .stage_peer_parent_message(&message)
+            .await
+            .map_err(ArenaPortError::classify_effect_message)
+            .map_err(|error| error.into_jsonrpc("peer_delivery"))?;
+        if let Some(effect) = staged_effect.as_ref() {
+            let pending_effect = PersistedArenaPendingEffect {
+                arena_id: message.arena_id.clone(),
+                message_id: message.message_id.clone(),
+                communication_id: effect.communication_id.clone(),
+                source_call_id: effect.source_call_id.clone(),
+                receiver_thread_id: effect.receiver_thread_id.clone(),
+                payload_hash: effect.payload_hash.clone(),
+            };
+            self.state.lock().await.arena_pending_effects.insert(
+                arena_pending_effect_key(&message.arena_id, &message.message_id),
+                pending_effect,
+            );
+            self.persist_arena_coordination_snapshot(&message.arena_id)
+                .await?;
+        }
+
+        let delivery_id = self.next_id("mem_delivery", &self.next_delivery_id);
+        let delivery_attempt = if let Some(effect) = staged_effect.as_ref() {
+            self.peer_parent_delivery_adapter
+                .activate_staged_peer_parent_message(
+                    &message,
+                    effect,
+                    target_reasoning_effort.clone(),
+                    ConnectionId(0),
+                )
+                .await
+        } else {
+            self.peer_parent_delivery_adapter
+                .deliver_peer_parent_message(
+                    &message,
+                    target_reasoning_effort.clone(),
+                    ConnectionId(0),
+                )
+                .await
+        };
         validate_peer_parent_delivery_attempt(&message, &delivery_attempt)
             .map_err(|error| ArenaPortError::contract_rejected(error.to_string()))
             .map_err(|error| error.into_jsonrpc("peer_delivery"))?;
@@ -931,6 +968,15 @@ impl MemythosRequestProcessor {
             if let Some(detail) = rollback_detail {
                 return Err(invalid_params(detail));
             }
+        }
+        if staged_effect.is_some() && delivery_attempt.rejection_reason.is_some() {
+            return Err(ArenaPortError::outcome_unknown(
+                delivery_attempt
+                    .rejection_reason
+                    .clone()
+                    .unwrap_or_else(|| "staged mailbox activation failed".to_string()),
+            )
+            .into_jsonrpc("peer_delivery"));
         }
         let mut state = self.state.lock().await;
         let aggregate_state = finalize_native_aggregate_delivery(
@@ -980,6 +1026,12 @@ impl MemythosRequestProcessor {
             rejection_reason: delivery_attempt.rejection_reason,
             failure_reason: None,
         };
+        state
+            .arena_pending_effects
+            .remove(&arena_pending_effect_key(
+                &delivery.arena_id,
+                &delivery.message_id,
+            ));
         state.arena_message_deliveries.push(delivery.clone());
         if let Some(prepared_goal) = prepared_goal.as_ref()
             && let Some(composition) = state.arena_compositions.get_mut(&delivery.arena_id)
