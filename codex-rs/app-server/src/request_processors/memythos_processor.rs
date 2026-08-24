@@ -155,7 +155,6 @@ use codex_app_server_protocol::MemythosTurnUsageAttribution;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadGoal;
-use codex_app_server_protocol::ThreadGoalGetParams;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
@@ -189,7 +188,6 @@ use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
-use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
 use crate::request_processors::memythos_arena_state::ArenaCommand;
@@ -203,6 +201,7 @@ use crate::request_processors::memythos_delivery::*;
 use crate::request_processors::memythos_judge::*;
 use crate::request_processors::memythos_observability::*;
 use crate::request_processors::memythos_parent_configuration::*;
+use crate::request_processors::memythos_parent_goal::*;
 use crate::request_processors::memythos_parent_provisioning::*;
 use crate::request_processors::memythos_parent_response::*;
 use crate::request_processors::memythos_resume::*;
@@ -711,25 +710,6 @@ struct MemythosArenaPhaseUpdate {
     event_refs: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ParentGoalSnapshot {
-    goal_snapshot_ref: Option<String>,
-    budget_state_ref: Option<String>,
-    goal_status: Option<ThreadGoalStatus>,
-    token_budget: Option<i64>,
-    tokens_used: Option<i64>,
-    time_used_seconds: Option<i64>,
-    evidence_refs: Vec<String>,
-    degraded_reason: Option<String>,
-}
-
-pub(crate) type ParentGoalSnapshotFuture<'a> =
-    Pin<Box<dyn Future<Output = ParentGoalSnapshot> + Send + 'a>>;
-
-pub(crate) trait ParentGoalSnapshotAdapter: Send + Sync {
-    fn current_goal_snapshot<'a>(&'a self, thread_id: &'a str) -> ParentGoalSnapshotFuture<'a>;
-}
-
 #[derive(Debug)]
 #[cfg(test)]
 struct RecordOnlyParentGoalSnapshotAdapter;
@@ -747,57 +727,6 @@ impl ParentGoalSnapshotAdapter for RecordOnlyParentGoalSnapshotAdapter {
                 time_used_seconds: None,
                 evidence_refs: Vec::new(),
                 degraded_reason: Some("goal snapshot adapter not available".to_string()),
-            }
-        })
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ThreadGoalParentSnapshotAdapter {
-    thread_goal_processor: ThreadGoalRequestProcessor,
-}
-
-impl ThreadGoalParentSnapshotAdapter {
-    pub(crate) fn new(thread_goal_processor: ThreadGoalRequestProcessor) -> Self {
-        Self {
-            thread_goal_processor,
-        }
-    }
-}
-
-impl ParentGoalSnapshotAdapter for ThreadGoalParentSnapshotAdapter {
-    fn current_goal_snapshot<'a>(&'a self, thread_id: &'a str) -> ParentGoalSnapshotFuture<'a> {
-        Box::pin(async move {
-            match self
-                .thread_goal_processor
-                .thread_goal_get(ThreadGoalGetParams {
-                    thread_id: thread_id.to_string(),
-                })
-                .await
-            {
-                Ok(Some(ClientResponsePayload::ThreadGoalGet(response))) => {
-                    parent_goal_snapshot_from_goal(thread_id, response.goal)
-                }
-                Ok(_) => ParentGoalSnapshot {
-                    goal_snapshot_ref: None,
-                    budget_state_ref: None,
-                    goal_status: None,
-                    token_budget: None,
-                    tokens_used: None,
-                    time_used_seconds: None,
-                    evidence_refs: Vec::new(),
-                    degraded_reason: Some("thread/goal/get returned no goal payload".to_string()),
-                },
-                Err(error) => ParentGoalSnapshot {
-                    goal_snapshot_ref: None,
-                    budget_state_ref: None,
-                    goal_status: None,
-                    token_budget: None,
-                    tokens_used: None,
-                    time_used_seconds: None,
-                    evidence_refs: Vec::new(),
-                    degraded_reason: Some(format!("thread/goal/get failed: {}", error.message)),
-                },
             }
         })
     }
@@ -8640,34 +8569,6 @@ fn build_parent_thread_continuity(
         token_usage_ref,
         evidence_refs,
         degraded_reasons,
-    }
-}
-
-fn parent_goal_snapshot_from_goal(thread_id: &str, goal: Option<ThreadGoal>) -> ParentGoalSnapshot {
-    let Some(goal) = goal else {
-        return ParentGoalSnapshot {
-            goal_snapshot_ref: None,
-            budget_state_ref: None,
-            goal_status: None,
-            token_budget: None,
-            tokens_used: None,
-            time_used_seconds: None,
-            evidence_refs: Vec::new(),
-            degraded_reason: Some("thread/goal/get returned no active goal".to_string()),
-        };
-    };
-
-    let goal_snapshot_ref = format!("app-server://threads/{thread_id}/goals/current");
-    let budget_state_ref = format!("app-server://threads/{thread_id}/budget/current");
-    ParentGoalSnapshot {
-        goal_snapshot_ref: Some(goal_snapshot_ref.clone()),
-        budget_state_ref: Some(budget_state_ref.clone()),
-        goal_status: Some(goal.status),
-        token_budget: goal.token_budget,
-        tokens_used: Some(goal.tokens_used),
-        time_used_seconds: Some(goal.time_used_seconds),
-        evidence_refs: vec![goal_snapshot_ref, budget_state_ref],
-        degraded_reason: None,
     }
 }
 

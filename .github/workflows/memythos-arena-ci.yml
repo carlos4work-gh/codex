@@ -181,6 +181,14 @@ jobs:
           cargo test -p codex-app-server room_activity_list_blocks_completed_turn_
           cargo test -p codex-app-server room_activity_list_uses_native_agent_message_
 
+      - name: Memythos parent goal boundary
+        run: |
+          cargo test -p codex-app-server memythos_parent_goal::tests
+          cargo test -p codex-app-server parent_continuity_tracks_
+          cargo test -p codex-app-server parent_continuity_is_verified_
+          cargo test -p codex-app-server judge_completion_atomically_
+          cargo test -p codex-app-server successful_bounded_delivery_
+
       - name: Independent root role rollout contract
         run: cargo test -p codex-rollout explicit_root_agent_role_overrides_source_derived_role
 
