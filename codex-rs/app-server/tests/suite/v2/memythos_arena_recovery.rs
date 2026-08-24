@@ -188,6 +188,137 @@ async fn arena_provision_checkpoint_survives_sigkill_without_duplicate_parents()
 }
 
 #[tokio::test]
+async fn arena_pending_effect_resumes_after_sigkill_without_caller_retry() -> Result<()> {
+    const MESSAGE_ID: &str = "pending-effect-before-sigkill";
+    const PAYLOAD: &str = "PENDING_EFFECT_PAYLOAD_BEFORE_SIGKILL";
+    let model_server = create_mock_responses_server_repeating_assistant("unused").await;
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml(
+        codex_home.path(),
+        &model_server.uri(),
+        &BTreeMap::new(),
+        1024,
+        None,
+        "mock_provider",
+        "compact",
+    )?;
+    write_arena_role_catalog(&codex_home)?;
+
+    let mut first_process = start_app_server(&codex_home).await?;
+    timeout(RESPONSE_TIMEOUT, first_process.initialize()).await??;
+    let provisioned = provision_arena(&mut first_process).await?;
+    start_proposal_phase(&mut first_process).await?;
+    let concierge = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "room_concierge")
+        .expect("fixture must provision a Concierge");
+    let bettor = provisioned
+        .leases
+        .iter()
+        .find(|lease| lease.role == "bettor")
+        .expect("fixture must provision a bettor");
+
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root(),
+        Vec::new(),
+        PAYLOAD.to_string(),
+        false,
+    );
+    communication.id = Some(ResponseItemId::from_server(MESSAGE_ID.to_string()));
+    let communication_json = serde_json::to_string(&communication)?;
+    let payload_hash = format!("sha256:{:x}", Sha256::digest(communication_json.as_bytes()));
+    let state_db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    state_db
+        .insert_staged_native_mailbox_communication(
+            &codex_state::NativeMailboxCommunicationRecord {
+                receiver_thread_id: bettor.thread_id.clone(),
+                communication_id: MESSAGE_ID.to_string(),
+                source_call_id: Some(MESSAGE_ID.to_string()),
+                submission_id: None,
+                communication_json,
+                payload_hash: payload_hash.clone(),
+                status: "staged".to_string(),
+                attempt_count: 0,
+                failure_fingerprint: None,
+                last_progress_ref: None,
+                quarantine_reason: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+            },
+        )
+        .await?;
+    let mut snapshot = state_db
+        .get_arena_snapshot("arena-sigkill")
+        .await?
+        .expect("provisioned Arena snapshot");
+    let mut snapshot_json: serde_json::Value = serde_json::from_str(&snapshot.snapshot_json)?;
+    snapshot_json["pending_effects"] = serde_json::json!([{
+        "arena_id": "arena-sigkill",
+        "delivery_id": "mem_delivery_9001",
+        "message_id": MESSAGE_ID,
+        "communication_id": MESSAGE_ID,
+        "source_call_id": MESSAGE_ID,
+        "receiver_thread_id": bettor.thread_id,
+        "payload_hash": payload_hash,
+        "sender_thread_id": concierge.thread_id,
+        "round_id": "round-1",
+        "message_kind": "peer_proposal",
+        "to_parent_role": "bettor",
+        "requires_response": false,
+        "delivery_policy": "queue_only",
+        "aggregate_contract": null,
+        "prepared_aggregate_state": null
+    }]);
+    snapshot.snapshot_json = serde_json::to_string(&snapshot_json)?;
+    snapshot.last_event_hash = format!("{:x}", Sha256::digest(snapshot.snapshot_json.as_bytes()));
+    state_db.upsert_arena_snapshot(&snapshot).await?;
+
+    assert_eq!(first_process.sigkill().await?.signal(), Some(9));
+    drop(first_process);
+
+    let mut restarted_process = start_app_server(&codex_home).await?;
+    timeout(RESPONSE_TIMEOUT, restarted_process.initialize()).await??;
+    let restored = read_arena_state(&mut restarted_process).await?;
+    let delivery = restored
+        .deliveries
+        .iter()
+        .find(|delivery| delivery.message_id == MESSAGE_ID)
+        .expect("pending effect must become an Arena delivery without caller retry");
+    assert_eq!(delivery.status, "queued_in_native_mailbox");
+    assert_eq!(delivery.delivery_id, "mem_delivery_9001");
+    assert_eq!(
+        restored
+            .deliveries
+            .iter()
+            .filter(|delivery| delivery.message_id == MESSAGE_ID)
+            .count(),
+        1
+    );
+    let active = state_db
+        .get_native_mailbox_communication(&bettor.thread_id, MESSAGE_ID)
+        .await?
+        .expect("restore must promote the staged mailbox record");
+    assert_eq!(active.status, "pending");
+    assert!(active.submission_id.is_some());
+    let reconciled_snapshot = state_db
+        .get_arena_snapshot("arena-sigkill")
+        .await?
+        .expect("reconciled Arena snapshot");
+    let reconciled_json: serde_json::Value =
+        serde_json::from_str(&reconciled_snapshot.snapshot_json)?;
+    assert_eq!(reconciled_json["pending_effects"], serde_json::json!([]));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn arena_mailbox_payload_rehydrates_after_sigkill_and_is_consumed_once() -> Result<()> {
     const DURABLE_PAYLOAD_MARKER: &str = "DURABLE_MAILBOX_PAYLOAD_BEFORE_SIGKILL";
     let model_server = create_mock_responses_server_repeating_assistant("unused").await;

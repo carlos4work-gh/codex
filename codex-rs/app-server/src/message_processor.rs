@@ -529,6 +529,7 @@ impl MessageProcessor {
             MemythosRequestProcessor::new_for_transport_with_native_adapters_and_state_db(
                 rpc_transport,
                 Arc::new(NativeMailboxPeerParentDeliveryAdapter::new(
+                    thread_processor.clone(),
                     turn_processor.clone(),
                     Arc::clone(&thread_manager),
                     state_db.clone(),

@@ -9,6 +9,7 @@ use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::MemythosArenaMessage;
 use codex_app_server_protocol::MemythosEventChannel;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput;
 use codex_core::ThreadManager;
@@ -24,6 +25,7 @@ use sha2::Sha256;
 
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::ConnectionRequestId;
+use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
 
 #[derive(Debug, Clone)]
@@ -193,6 +195,7 @@ impl PeerParentDeliveryAdapter for RecordOnlyPeerParentDeliveryAdapter {
 
 #[derive(Clone)]
 pub(crate) struct NativeMailboxPeerParentDeliveryAdapter {
+    thread_processor: ThreadRequestProcessor,
     turn_processor: TurnRequestProcessor,
     thread_manager: Arc<ThreadManager>,
     state_db: Option<StateDbHandle>,
@@ -200,11 +203,13 @@ pub(crate) struct NativeMailboxPeerParentDeliveryAdapter {
 
 impl NativeMailboxPeerParentDeliveryAdapter {
     pub(crate) fn new(
+        thread_processor: ThreadRequestProcessor,
         turn_processor: TurnRequestProcessor,
         thread_manager: Arc<ThreadManager>,
         state_db: Option<StateDbHandle>,
     ) -> Self {
         Self {
+            thread_processor,
             turn_processor,
             thread_manager,
             state_db,
@@ -396,7 +401,7 @@ impl PeerParentDeliveryAdapter for NativeMailboxPeerParentDeliveryAdapter {
         message: &'a MemythosArenaMessage,
         effect: &'a PeerParentStagedEffect,
         _reasoning_effort: Option<ReasoningEffort>,
-        _connection_id: ConnectionId,
+        connection_id: ConnectionId,
     ) -> PeerParentDeliveryFuture<'a> {
         Box::pin(async move {
             let sender_thread_id = match ThreadId::from_string(&message.from_parent_thread_id) {
@@ -417,6 +422,55 @@ impl PeerParentDeliveryAdapter for NativeMailboxPeerParentDeliveryAdapter {
                     );
                 }
             };
+            if self
+                .thread_manager
+                .get_thread(target_thread_id)
+                .await
+                .is_err()
+            {
+                let request_id = ConnectionRequestId {
+                    connection_id,
+                    request_id: RequestId::String(format!(
+                        "memythos-mailbox-recovery:{}",
+                        effect.communication_id
+                    )),
+                };
+                if let Err(error) = self
+                    .thread_processor
+                    .thread_resume(
+                        request_id,
+                        ThreadResumeParams {
+                            thread_id: effect.receiver_thread_id.clone(),
+                            history: None,
+                            path: None,
+                            model: None,
+                            model_provider: None,
+                            service_tier: None,
+                            cwd: None,
+                            runtime_workspace_roots: None,
+                            approval_policy: None,
+                            approvals_reviewer: None,
+                            sandbox: None,
+                            permissions: None,
+                            config: None,
+                            base_instructions: None,
+                            developer_instructions: None,
+                            personality: None,
+                            exclude_turns: true,
+                            initial_turns_page: None,
+                        },
+                        Some("memythos-recovery".to_string()),
+                        None,
+                        Default::default(),
+                    )
+                    .await
+                {
+                    return failed_native_mailbox_delivery_attempt(
+                        message,
+                        &format!("failed to resume native receiver thread: {}", error.message),
+                    );
+                }
+            }
             match self
                 .thread_manager
                 .activate_staged_inter_agent_communication_by_id(

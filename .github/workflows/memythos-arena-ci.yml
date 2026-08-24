@@ -305,7 +305,9 @@ jobs:
           cargo test -p codex-app-server arena_restore_rejects_a_corrupt_batch_without_partial_state
 
       - name: Arena SIGKILL recovery boundary
-        run: cargo test -p codex-app-server --test all arena_provision_checkpoint_survives_sigkill_without_duplicate_parents
+        run: |
+          cargo test -p codex-app-server --test all arena_provision_checkpoint_survives_sigkill_without_duplicate_parents
+          cargo test -p codex-app-server --test all arena_pending_effect_resumes_after_sigkill_without_caller_retry
 
       - name: Native mailbox payload rehydration after SIGKILL
         run: |
