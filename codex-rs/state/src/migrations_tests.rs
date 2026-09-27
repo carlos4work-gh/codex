@@ -196,3 +196,23 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         .collect::<Vec<_>>();
     assert_eq!(applied, expected);
 }
+
+#[test]
+fn memythos_migrations_keep_their_reserved_versions() {
+    let versions = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .filter(|migration| migration.version >= 10_000)
+        .map(|migration| (migration.version, migration.description.as_ref()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        versions,
+        vec![
+            (10_000, "arena snapshots"),
+            (10_001, "native mailbox communications"),
+            (10_002, "native mailbox resolution commands"),
+            (10_003, "native mailbox resolution audit"),
+        ]
+    );
+}
