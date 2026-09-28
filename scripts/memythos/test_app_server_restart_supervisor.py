@@ -10,7 +10,9 @@ import unittest
 
 
 MODULE_PATH = Path(__file__).with_name("app_server_restart_supervisor.py")
-SPEC = importlib.util.spec_from_file_location("app_server_restart_supervisor", MODULE_PATH)
+SPEC = importlib.util.spec_from_file_location(
+    "app_server_restart_supervisor", MODULE_PATH
+)
 assert SPEC is not None and SPEC.loader is not None
 supervisor = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(supervisor)
@@ -94,7 +96,9 @@ class RestartBudgetTest(unittest.TestCase):
 
             reloaded = store.load()
             self.assertTrue(reloaded["instances"]["node-a"]["breaker_open"])
-            next_generation = supervisor.select_instance(reloaded, "node-a", "release-b")
+            next_generation = supervisor.select_instance(
+                reloaded, "node-a", "release-b"
+            )
             self.assertFalse(next_generation["breaker_open"])
             self.assertEqual(len(next_generation["previous_generations"]), 1)
 
@@ -230,7 +234,9 @@ class RestartSupervisorProcessTest(unittest.TestCase):
             state = json.loads((Path(directory) / "state.json").read_text())
             instance = state["instances"]["app-server-a"]
             self.assertFalse(instance["breaker_open"])
-            self.assertEqual(instance["attempts"][0]["classification"], "normal_shutdown")
+            self.assertEqual(
+                instance["attempts"][0]["classification"], "normal_shutdown"
+            )
 
     def test_real_requested_shutdown_is_forwarded_and_not_budgeted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
