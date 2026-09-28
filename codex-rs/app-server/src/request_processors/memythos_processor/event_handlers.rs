@@ -414,10 +414,15 @@ impl MemythosRequestProcessor {
                 state.arena_message_deliveries[delivery_index].receiver_turn_id =
                     Some(turn_id.to_string());
                 if let Some(submission_id) = submission_id {
-                    for event in state.room_activity_events.values_mut().flatten().filter(|event| {
-                        event.thread_id == thread_id
-                            && event.turn_id.as_deref() == Some(submission_id.as_str())
-                    }) {
+                    for event in state
+                        .room_activity_events
+                        .values_mut()
+                        .flatten()
+                        .filter(|event| {
+                            event.thread_id == thread_id
+                                && event.turn_id.as_deref() == Some(submission_id.as_str())
+                        })
+                    {
                         event.turn_id = Some(turn_id.to_string());
                     }
                 }

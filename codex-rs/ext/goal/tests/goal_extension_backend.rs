@@ -344,8 +344,7 @@ async fn armed_one_shot_goal_completes_during_turn_stop() -> anyhow::Result<()> 
 }
 
 #[tokio::test]
-async fn one_shot_arm_requires_runtime_registration_and_can_be_retried() -> anyhow::Result<()>
-{
+async fn one_shot_arm_requires_runtime_registration_and_can_be_retried() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
     seed_thread_metadata(runtime.as_ref(), thread_id).await?;
@@ -368,9 +367,12 @@ async fn one_shot_arm_requires_runtime_registration_and_can_be_retried() -> anyh
         .expect_err("arming without a registered runtime must fail explicitly");
     assert!(error.to_string().contains("goal runtime is unavailable"));
 
-    let harness =
-        GoalExtensionHarness::new_with_goal_service(runtime.clone(), thread_id, goal_service.clone())
-            .await?;
+    let harness = GoalExtensionHarness::new_with_goal_service(
+        runtime.clone(),
+        thread_id,
+        goal_service.clone(),
+    )
+    .await?;
     goal_service
         .arm_current_goal_completion_after_next_turn(runtime.as_ref(), thread_id)
         .await?;

@@ -133,8 +133,8 @@ async fn native_agent_message_correlates_one_pending_mailbox_delivery_to_actual_
 #[tokio::test]
 async fn native_agent_message_correlates_the_oldest_pending_mailbox_delivery() {
     let processor = MemythosRequestProcessor::new();
-    let pending_delivery = |delivery_id: &str, message_id: &str, submission_id: &str| {
-        MemythosArenaMessageDelivery {
+    let pending_delivery =
+        |delivery_id: &str, message_id: &str, submission_id: &str| MemythosArenaMessageDelivery {
             delivery_id: delivery_id.to_string(),
             message_id: message_id.to_string(),
             human_summary: "Review the settled contract.".to_string(),
@@ -157,8 +157,7 @@ async fn native_agent_message_correlates_the_oldest_pending_mailbox_delivery() {
             event_refs: Vec::new(),
             rejection_reason: None,
             failure_reason: None,
-        }
-    };
+        };
     processor
         .state
         .lock()
@@ -205,19 +204,27 @@ async fn native_agent_message_correlates_the_oldest_pending_mailbox_delivery() {
 
     let state = processor.state.lock().await;
     assert_eq!(
-        state.arena_message_deliveries[0].receiver_turn_id.as_deref(),
+        state.arena_message_deliveries[0]
+            .receiver_turn_id
+            .as_deref(),
         Some("turn-native-1")
     );
-    assert!(state.arena_message_deliveries[0]
-        .receiver_response_event_ref
-        .is_some());
+    assert!(
+        state.arena_message_deliveries[0]
+            .receiver_response_event_ref
+            .is_some()
+    );
     assert_eq!(
-        state.arena_message_deliveries[1].receiver_turn_id.as_deref(),
+        state.arena_message_deliveries[1]
+            .receiver_turn_id
+            .as_deref(),
         Some("submission-2")
     );
-    assert!(state.arena_message_deliveries[1]
-        .receiver_response_event_ref
-        .is_none());
+    assert!(
+        state.arena_message_deliveries[1]
+            .receiver_response_event_ref
+            .is_none()
+    );
     assert!(
         state
             .native_parent_turn_responses
@@ -227,11 +234,16 @@ async fn native_agent_message_correlates_the_oldest_pending_mailbox_delivery() {
         .native_parent_turn_responses
         .get(&native_token_usage_key("receiver", "turn-native-1"))
         .expect("expected recovered native response");
-    assert!(response
-        .request_item_ref
-        .as_deref()
-        .is_some_and(|item_ref| item_ref.ends_with("/items/message-1")));
-    assert_eq!(response.request_text.as_deref(), Some("Review the settled contract."));
+    assert!(
+        response
+            .request_item_ref
+            .as_deref()
+            .is_some_and(|item_ref| item_ref.ends_with("/items/message-1"))
+    );
+    assert_eq!(
+        response.request_text.as_deref(),
+        Some("Review the settled contract.")
+    );
     assert_eq!(
         state.room_activity_events["room-1"][0].turn_id.as_deref(),
         Some("turn-native-1")
@@ -8001,9 +8013,7 @@ async fn room_activity_list_summarizes_delivery_without_closing_arena() {
         duplicate_turn_delivery.delivery_id = "mem_delivery_duplicate_projection".to_string();
         duplicate_turn_delivery.message_id = "message-duplicate-projection".to_string();
         duplicate_turn_delivery.receiver_turn_id = Some("internal-turn".to_string());
-        state
-            .arena_message_deliveries
-            .push(duplicate_turn_delivery);
+        state.arena_message_deliveries.push(duplicate_turn_delivery);
     }
     let dialogue = processor
         .room_dialogue_list(MemythosRoomDialogueListParams {

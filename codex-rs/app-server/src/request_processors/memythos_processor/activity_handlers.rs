@@ -284,8 +284,10 @@ impl MemythosRequestProcessor {
                 continue;
             };
             let key = (delivery.receiver_thread_id.clone(), turn_id.clone());
-            let recorded_response = recorded_native_turn_responses
-                .get(&native_token_usage_key(&delivery.receiver_thread_id, turn_id));
+            let recorded_response = recorded_native_turn_responses.get(&native_token_usage_key(
+                &delivery.receiver_thread_id,
+                turn_id,
+            ));
             if let Some(recorded_response) = recorded_response {
                 native_turn_responses
                     .entry(key.clone())

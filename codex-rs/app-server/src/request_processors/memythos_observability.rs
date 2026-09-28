@@ -8,9 +8,7 @@ pub(super) fn native_token_usage_key(thread_id: &str, turn_id: &str) -> String {
     format!("{thread_id}::{turn_id}")
 }
 
-pub(super) fn memythos_usage_breakdown(
-    usage: &TokenUsageBreakdown,
-) -> MemythosTokenUsageBreakdown {
+pub(super) fn memythos_usage_breakdown(usage: &TokenUsageBreakdown) -> MemythosTokenUsageBreakdown {
     MemythosTokenUsageBreakdown {
         total_tokens: usage.total_tokens,
         input_tokens: usage.input_tokens,
