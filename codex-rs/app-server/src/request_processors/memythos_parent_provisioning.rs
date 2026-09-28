@@ -5,9 +5,11 @@ use std::sync::Arc;
 
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::MemythosArenaCompositionProvisionParams;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadGoal;
 use codex_app_server_protocol::ThreadGoalSetParams;
 use codex_app_server_protocol::ThreadGoalStatus;
+use codex_app_server_protocol::ThreadResumeParams;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
@@ -19,6 +21,7 @@ use sha2::Sha256;
 
 use crate::error_code::invalid_params;
 use crate::outgoing_message::ConnectionId;
+use crate::outgoing_message::ConnectionRequestId;
 use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::thread_processor::with_memythos_room_tools;
@@ -117,6 +120,8 @@ pub(crate) type ArenaParentGoalTransitionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ThreadGoal, JSONRPCErrorError>> + Send + 'a>>;
 pub(crate) type ArenaParentGoalReadFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Option<ThreadGoal>, JSONRPCErrorError>> + Send + 'a>>;
+pub(crate) type ArenaParentRuntimeRestoreFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), JSONRPCErrorError>> + Send + 'a>>;
 
 pub(crate) trait ArenaParentProvisioningAdapter: Send + Sync {
     fn validate_role_stance(
@@ -144,6 +149,14 @@ pub(crate) trait ArenaParentProvisioningAdapter: Send + Sync {
     ) -> ArenaParentGoalTransitionFuture<'a>;
 
     fn read_parent_goal<'a>(&'a self, thread_id: &'a str) -> ArenaParentGoalReadFuture<'a>;
+
+    fn restore_parent_runtime<'a>(
+        &'a self,
+        _thread_id: &'a str,
+        _connection_id: ConnectionId,
+    ) -> ArenaParentRuntimeRestoreFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
 
     fn rollback_parent<'a>(&'a self, thread_id: &'a str) -> ArenaParentProvisionFuture<'a>;
 }
@@ -346,6 +359,55 @@ impl ArenaParentProvisioningAdapter for NativeArenaParentProvisioningAdapter {
             self.thread_goal_processor
                 .thread_goal_get_internal(thread_id.to_string())
                 .await
+        })
+    }
+
+    fn restore_parent_runtime<'a>(
+        &'a self,
+        thread_id: &'a str,
+        connection_id: ConnectionId,
+    ) -> ArenaParentRuntimeRestoreFuture<'a> {
+        Box::pin(async move {
+            let parsed = ThreadId::from_string(thread_id).map_err(|_| {
+                invalid_params(format!("invalid restored parent thread id: {thread_id}"))
+            })?;
+            if self.thread_manager.get_thread(parsed).await.is_ok() {
+                return Ok(());
+            }
+            self.thread_processor
+                .thread_resume(
+                    ConnectionRequestId {
+                        connection_id,
+                        request_id: RequestId::String(format!(
+                            "memythos-arena-restore:{thread_id}"
+                        )),
+                    },
+                    ThreadResumeParams {
+                        thread_id: thread_id.to_string(),
+                        history: None,
+                        path: None,
+                        model: None,
+                        model_provider: None,
+                        service_tier: None,
+                        cwd: None,
+                        runtime_workspace_roots: None,
+                        approval_policy: None,
+                        approvals_reviewer: None,
+                        sandbox: None,
+                        permissions: None,
+                        config: None,
+                        base_instructions: None,
+                        developer_instructions: None,
+                        personality: None,
+                        exclude_turns: true,
+                        initial_turns_page: None,
+                    },
+                    Some("memythos-arena-recovery".to_string()),
+                    None,
+                    Default::default(),
+                )
+                .await?;
+            Ok(())
         })
     }
 

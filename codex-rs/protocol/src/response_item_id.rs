@@ -17,6 +17,8 @@ use ts_rs::TS;
 pub struct ResponseItemId(String);
 
 impl ResponseItemId {
+    pub const MAX_REQUEST_LENGTH: usize = 64;
+
     pub fn new(prefix: &str) -> Self {
         Self::with_suffix(prefix, uuid::Uuid::now_v7())
     }
@@ -36,6 +38,10 @@ impl ResponseItemId {
     pub fn is_prefixed(&self) -> bool {
         self.split_once('_')
             .is_some_and(|(prefix, suffix)| !prefix.is_empty() && !suffix.is_empty())
+    }
+
+    pub fn is_valid_for_request(&self) -> bool {
+        self.is_prefixed() && self.chars().count() <= Self::MAX_REQUEST_LENGTH
     }
 }
 

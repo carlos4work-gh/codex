@@ -85,6 +85,34 @@ pub(crate) fn validate_parent_turn_responses(
     Ok(())
 }
 
+pub(crate) fn merge_parent_turn_responses(
+    recorded: &ParentTurnResponse,
+    native: &ParentTurnResponse,
+) -> ParentTurnResponse {
+    let (request_item_ref, request_text) = match (
+        native.request_item_ref.as_ref(),
+        native.request_text.as_ref(),
+    ) {
+        (Some(item_ref), Some(text)) => (Some(item_ref.clone()), Some(text.clone())),
+        _ => (
+            recorded.request_item_ref.clone(),
+            recorded.request_text.clone(),
+        ),
+    };
+    let (item_ref, text) = match (native.item_ref.as_ref(), native.text.as_ref()) {
+        (Some(item_ref), Some(text)) => (Some(item_ref.clone()), Some(text.clone())),
+        _ => (recorded.item_ref.clone(), recorded.text.clone()),
+    };
+
+    ParentTurnResponse {
+        status: recorded.status.clone().or_else(|| native.status.clone()),
+        request_item_ref,
+        request_text,
+        item_ref,
+        text,
+    }
+}
+
 fn parent_turn_response(
     thread_id: &str,
     turn: &codex_app_server_protocol::Turn,
@@ -330,5 +358,35 @@ mod tests {
             validate_parent_turn_response("thread-a", "turn-1", &foreign),
             Err(ParentTurnResponseContractError::ForeignItemRef(_))
         ));
+    }
+
+    #[test]
+    fn recorded_response_preserves_native_request_evidence() {
+        let native = ParentTurnResponse {
+            status: Some(TurnStatus::InProgress),
+            request_item_ref: Some(
+                "app-server://threads/thread-a/turns/turn-1/items/request".to_string(),
+            ),
+            request_text: Some("request".to_string()),
+            item_ref: None,
+            text: None,
+        };
+        let recorded = ParentTurnResponse {
+            status: Some(TurnStatus::Completed),
+            request_item_ref: None,
+            request_text: None,
+            item_ref: Some("app-server://threads/thread-a/turns/turn-1/items/response".to_string()),
+            text: Some("response".to_string()),
+        };
+
+        let merged = merge_parent_turn_responses(&recorded, &native);
+
+        assert_eq!(merged.status, Some(TurnStatus::Completed));
+        assert_eq!(merged.request_text.as_deref(), Some("request"));
+        assert_eq!(merged.text.as_deref(), Some("response"));
+        assert_eq!(
+            validate_parent_turn_response("thread-a", "turn-1", &merged),
+            Ok(())
+        );
     }
 }

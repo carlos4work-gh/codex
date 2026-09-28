@@ -164,6 +164,19 @@ pub(crate) async fn apply_bespoke_event_handling(
             thread_watch_manager
                 .note_turn_started(&conversation_id.to_string())
                 .await;
+            if let Some(processor) = memythos_processor
+                .lock()
+                .ok()
+                .and_then(|processor| processor.clone())
+            {
+                processor
+                    .record_native_turn_started(
+                        &conversation_id.to_string(),
+                        &event_turn_id,
+                        &payload.turn_id,
+                    )
+                    .await;
+            }
             let turn = {
                 let state = thread_state.lock().await;
                 let mut turn = state.active_turn_snapshot().unwrap_or_else(|| Turn {
@@ -1010,6 +1023,21 @@ pub(crate) async fn apply_bespoke_event_handling(
         }
         EventMsg::ViewImageToolCall(_) => {}
         EventMsg::ItemStarted(event) => {
+            if let CoreTurnItem::UserMessage(message) = &event.item
+                && let Some(processor) = memythos_processor
+                    .lock()
+                    .ok()
+                    .and_then(|processor| processor.clone())
+            {
+                processor
+                    .record_native_parent_user_message(
+                        &conversation_id.to_string(),
+                        &event.turn_id,
+                        &message.id,
+                        message.client_id.as_deref(),
+                    )
+                    .await;
+            }
             let should_emit = match &event.item {
                 // Approval and guardian flows can emit the command start notification before core
                 // emits the canonical item. Reuse the same set to suppress that duplicate.

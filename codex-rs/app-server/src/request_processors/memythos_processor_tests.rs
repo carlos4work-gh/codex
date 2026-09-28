@@ -2,6 +2,254 @@ use super::*;
 use codex_app_server_protocol::MemythosArenaCompositionContract;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
+#[tokio::test]
+async fn native_user_message_correlates_mailbox_delivery_to_actual_turn() {
+    let processor = MemythosRequestProcessor::new();
+    processor
+        .state
+        .lock()
+        .await
+        .arena_message_deliveries
+        .push(MemythosArenaMessageDelivery {
+            delivery_id: "delivery-1".to_string(),
+            message_id: "message-1".to_string(),
+            human_summary: "Review the settled contract.".to_string(),
+            status: "delivered".to_string(),
+            sender_thread_id: "sender".to_string(),
+            receiver_thread_id: "receiver".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-1".to_string(),
+            phase: Some("review".to_string()),
+            delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+            delivery_policy: None,
+            aggregate_id: None,
+            aggregate_state: None,
+            checkpoint_state: None,
+            checkpoint_event_refs: Vec::new(),
+            receiver_turn_id: Some("submission-1".to_string()),
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: Vec::new(),
+            rejection_reason: None,
+            failure_reason: None,
+        });
+
+    assert!(
+        processor
+            .record_native_parent_user_message("receiver", "turn-native-1", "message-1", None,)
+            .await
+    );
+
+    let state = processor.state.lock().await;
+    assert_eq!(
+        state.arena_message_deliveries[0]
+            .receiver_turn_id
+            .as_deref(),
+        Some("turn-native-1")
+    );
+    let response = state
+        .native_parent_turn_responses
+        .get(&native_token_usage_key("receiver", "turn-native-1"))
+        .expect("actual turn response slot");
+    assert_eq!(
+        response.request_text.as_deref(),
+        Some("Review the settled contract.")
+    );
+    assert!(
+        response
+            .request_item_ref
+            .as_deref()
+            .is_some_and(|item_ref| item_ref.ends_with("/turns/turn-native-1/items/message-1"))
+    );
+}
+
+#[tokio::test]
+async fn native_agent_message_correlates_one_pending_mailbox_delivery_to_actual_turn() {
+    let processor = MemythosRequestProcessor::new();
+    processor
+        .state
+        .lock()
+        .await
+        .arena_message_deliveries
+        .push(MemythosArenaMessageDelivery {
+            delivery_id: "delivery-1".to_string(),
+            message_id: "message-1".to_string(),
+            human_summary: "Review the settled contract.".to_string(),
+            status: "delivered_to_native_mailbox_turn".to_string(),
+            sender_thread_id: "sender".to_string(),
+            receiver_thread_id: "receiver".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-1".to_string(),
+            phase: Some("review".to_string()),
+            delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+            delivery_policy: None,
+            aggregate_id: None,
+            aggregate_state: None,
+            checkpoint_state: None,
+            checkpoint_event_refs: Vec::new(),
+            receiver_turn_id: Some("submission-1".to_string()),
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: Vec::new(),
+            rejection_reason: None,
+            failure_reason: None,
+        });
+
+    assert!(
+        processor
+            .record_native_parent_agent_message(
+                "receiver",
+                "turn-native-1",
+                "agent-message-1",
+                "The contract can advance.".to_string(),
+            )
+            .await
+    );
+
+    let state = processor.state.lock().await;
+    assert_eq!(
+        state.arena_message_deliveries[0]
+            .receiver_turn_id
+            .as_deref(),
+        Some("turn-native-1")
+    );
+    assert!(
+        state.arena_message_deliveries[0]
+            .receiver_response_event_ref
+            .as_deref()
+            .is_some_and(|item_ref| item_ref.ends_with("/items/agent-message-1"))
+    );
+    assert_eq!(
+        state
+            .native_parent_turn_responses
+            .get(&native_token_usage_key("receiver", "turn-native-1"))
+            .and_then(|response| response.text.as_deref()),
+        Some("The contract can advance.")
+    );
+}
+
+#[tokio::test]
+async fn native_agent_message_correlates_the_oldest_pending_mailbox_delivery() {
+    let processor = MemythosRequestProcessor::new();
+    let pending_delivery =
+        |delivery_id: &str, message_id: &str, submission_id: &str| MemythosArenaMessageDelivery {
+            delivery_id: delivery_id.to_string(),
+            message_id: message_id.to_string(),
+            human_summary: "Review the settled contract.".to_string(),
+            status: "delivered_to_native_mailbox_turn".to_string(),
+            sender_thread_id: "sender".to_string(),
+            receiver_thread_id: "receiver".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-1".to_string(),
+            phase: Some("review".to_string()),
+            delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+            delivery_policy: None,
+            aggregate_id: None,
+            aggregate_state: None,
+            checkpoint_state: None,
+            checkpoint_event_refs: Vec::new(),
+            receiver_turn_id: Some(submission_id.to_string()),
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: Vec::new(),
+            rejection_reason: None,
+            failure_reason: None,
+        };
+    processor
+        .state
+        .lock()
+        .await
+        .arena_message_deliveries
+        .extend([
+            pending_delivery("delivery-1", "message-1", "submission-1"),
+            pending_delivery("delivery-2", "message-2", "submission-2"),
+        ]);
+    {
+        let mut state = processor.state.lock().await;
+        processor.push_room_activity_event(
+            &mut state,
+            "room-1".to_string(),
+            "arena-1".to_string(),
+            "receiver".to_string(),
+            Some("submission-1".to_string()),
+            Some("round-1".to_string()),
+            Some("review".to_string()),
+            "room_concierge".to_string(),
+            app_server_actor_ref(),
+            app_server_actor_ref(),
+            "coordinator_instruction".to_string(),
+            MemythosPromptOrigin::AgentToAgentPrompt,
+            Vec::new(),
+            "parent_mailbox",
+            "input_delivered",
+            "running",
+            "Mailbox input delivered.".to_string(),
+            None,
+        );
+    }
+
+    assert!(
+        processor
+            .record_native_parent_agent_message(
+                "receiver",
+                "turn-native-1",
+                "agent-message-1",
+                "The contract can advance.".to_string(),
+            )
+            .await
+    );
+
+    let state = processor.state.lock().await;
+    assert_eq!(
+        state.arena_message_deliveries[0]
+            .receiver_turn_id
+            .as_deref(),
+        Some("turn-native-1")
+    );
+    assert!(
+        state.arena_message_deliveries[0]
+            .receiver_response_event_ref
+            .is_some()
+    );
+    assert_eq!(
+        state.arena_message_deliveries[1]
+            .receiver_turn_id
+            .as_deref(),
+        Some("submission-2")
+    );
+    assert!(
+        state.arena_message_deliveries[1]
+            .receiver_response_event_ref
+            .is_none()
+    );
+    assert!(
+        state
+            .native_parent_turn_responses
+            .contains_key(&native_token_usage_key("receiver", "turn-native-1"))
+    );
+    let response = state
+        .native_parent_turn_responses
+        .get(&native_token_usage_key("receiver", "turn-native-1"))
+        .expect("expected recovered native response");
+    assert!(
+        response
+            .request_item_ref
+            .as_deref()
+            .is_some_and(|item_ref| item_ref.ends_with("/items/message-1"))
+    );
+    assert_eq!(
+        response.request_text.as_deref(),
+        Some("Review the settled contract.")
+    );
+    assert_eq!(
+        state.room_activity_events["room-1"][0].turn_id.as_deref(),
+        Some("turn-native-1")
+    );
+}
+
 #[test]
 fn native_peer_bet_is_an_incremental_commitment_contract() {
     let prompt = native_bettor_checkpoint_prompt("peer_bet", "The sealed peer checkpoint follows.");
@@ -595,6 +843,15 @@ fn arena_composition_schema_uses_only_responses_compatible_reasoning_effort() {
     );
 }
 
+#[test]
+fn arena_resume_schema_is_available_from_the_complete_protocol_bundle() {
+    let schema = arena_resume_output_schema().expect("resume assessment schema");
+
+    assert_eq!(schema["type"], serde_json::json!("object"));
+    assert!(schema["properties"]["resumeExecutionPlan"].is_object());
+    assert!(schema["definitions"]["MemythosArenaResumeExecutionPlan"].is_object());
+}
+
 #[derive(Debug)]
 struct FakeLivePeerParentDeliveryAdapter;
 
@@ -716,6 +973,7 @@ struct FakeArenaParentProvisioningAdapter {
     rolled_back: Arc<Mutex<Vec<String>>>,
     goal_transitions: Arc<Mutex<Vec<(String, Option<String>, ThreadGoalStatus, bool)>>>,
     goals: Arc<Mutex<HashMap<String, ThreadGoal>>>,
+    restored_runtimes: Arc<Mutex<Vec<String>>>,
 }
 
 struct FakeArenaCompositionPlanningAdapter {
@@ -1005,6 +1263,20 @@ impl ArenaParentProvisioningAdapter for FakeArenaParentProvisioningAdapter {
 
     fn read_parent_goal<'a>(&'a self, thread_id: &'a str) -> ArenaParentGoalReadFuture<'a> {
         Box::pin(async move { Ok(self.goals.lock().await.get(thread_id).cloned()) })
+    }
+
+    fn restore_parent_runtime<'a>(
+        &'a self,
+        thread_id: &'a str,
+        _connection_id: ConnectionId,
+    ) -> ArenaParentRuntimeRestoreFuture<'a> {
+        Box::pin(async move {
+            self.restored_runtimes
+                .lock()
+                .await
+                .push(thread_id.to_string());
+            Ok(())
+        })
     }
 
     fn rollback_parent<'a>(&'a self, thread_id: &'a str) -> ArenaParentProvisionFuture<'a> {
@@ -3146,6 +3418,7 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
             .cloned()
             .collect::<HashSet<_>>()
     );
+    assert!(provisioning.restored_runtimes.lock().await.is_empty());
 
     let replanning_error = second_process
         .arena_request(semantic_arena_request_params(), ConnectionId(0))
@@ -4144,6 +4417,10 @@ async fn automatic_mailbox_delivery_rearms_a_completed_parent_for_the_current_ph
     assert!(prepared.active_goal.objective.contains("assignment bet-1"));
     assert!(prepared.active_goal.objective.contains("phase peer_bet"));
     assert!(!prepared.active_goal.objective.contains("proposal-1"));
+    assert_eq!(
+        provisioning.restored_runtimes.lock().await.as_slice(),
+        &["bettor-a".to_string()]
+    );
     let transitions = provisioning.goal_transitions.lock().await;
     assert_eq!(transitions.len(), 1);
     assert_eq!(transitions[0].0, "bettor-a");
@@ -7726,6 +8003,18 @@ async fn room_activity_list_summarizes_delivery_without_closing_arena() {
             .all(|event_ref| { !event_ref.contains("/events/") })
     );
 
+    {
+        let mut state = processor.state.lock().await;
+        let mut duplicate_turn_delivery = state
+            .arena_message_deliveries
+            .last()
+            .cloned()
+            .expect("native delivery should exist");
+        duplicate_turn_delivery.delivery_id = "mem_delivery_duplicate_projection".to_string();
+        duplicate_turn_delivery.message_id = "message-duplicate-projection".to_string();
+        duplicate_turn_delivery.receiver_turn_id = Some("internal-turn".to_string());
+        state.arena_message_deliveries.push(duplicate_turn_delivery);
+    }
     let dialogue = processor
         .room_dialogue_list(MemythosRoomDialogueListParams {
             room_id: "room-001".to_string(),
@@ -7768,6 +8057,12 @@ async fn room_activity_list_summarizes_delivery_without_closing_arena() {
             .iter()
             .all(|entry| !entry.text.contains("Participant "))
     );
+    processor
+        .state
+        .lock()
+        .await
+        .arena_message_deliveries
+        .retain(|delivery| delivery.delivery_id != "mem_delivery_duplicate_projection");
 
     let bet_response = processor
         .room_activity_list(MemythosRoomActivityListParams {

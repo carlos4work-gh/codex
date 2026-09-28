@@ -341,7 +341,10 @@ async fn arena_sealed_aggregate_activation_resumes_after_sigkill_once() -> Resul
         .iter()
         .find(|delivery| delivery.message_id == MESSAGE_ID)
         .expect("pending effect must become an Arena delivery without caller retry");
-    assert_eq!(delivery.status, "delivered_to_native_mailbox_turn");
+    assert!(matches!(
+        delivery.status.as_str(),
+        "delivered_to_native_mailbox_turn" | "receiver_turn_interrupted"
+    ));
     assert_eq!(delivery.delivery_id, "mem_delivery_9001");
     assert_eq!(
         delivery.aggregate_state,
@@ -361,6 +364,16 @@ async fn arena_sealed_aggregate_activation_resumes_after_sigkill_once() -> Resul
     );
     let completed = wait_for_turn_completed(&mut restarted_process).await?;
     assert_eq!(completed.turn.id, planned_submission_id);
+    let reconciled = read_arena_state(&mut restarted_process).await?;
+    assert_eq!(
+        reconciled
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.message_id == MESSAGE_ID)
+            .expect("recovered delivery remains canonical")
+            .status,
+        "receiver_turn_completed"
+    );
     assert_eq!(
         read_native_turn_ids(&mut restarted_process, &bettor.thread_id).await?,
         vec![planned_submission_id.clone()]

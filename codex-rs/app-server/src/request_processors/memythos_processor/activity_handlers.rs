@@ -266,7 +266,7 @@ impl MemythosRequestProcessor {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let native_turn_responses = self
+        let mut native_turn_responses = self
             .parent_turn_response_adapter
             .read_responses(requested_turns)
             .await;
@@ -279,19 +279,38 @@ impl MemythosRequestProcessor {
             let state = self.state.lock().await;
             state.native_parent_turn_responses.clone()
         };
+        for delivery in &deliveries {
+            let Some(turn_id) = delivery.receiver_turn_id.as_ref() else {
+                continue;
+            };
+            let key = (delivery.receiver_thread_id.clone(), turn_id.clone());
+            let recorded_response = recorded_native_turn_responses.get(&native_token_usage_key(
+                &delivery.receiver_thread_id,
+                turn_id,
+            ));
+            if let Some(recorded_response) = recorded_response {
+                native_turn_responses
+                    .entry(key.clone())
+                    .and_modify(|native_response| {
+                        *native_response =
+                            merge_parent_turn_responses(recorded_response, native_response);
+                    })
+                    .or_insert_with(|| recorded_response.clone());
+            }
+            if let Some(response) = native_turn_responses.get(&key) {
+                validate_parent_turn_response(&key.0, &key.1, response).map_err(|error| {
+                    invalid_params(format!(
+                        "effective parent response contract rejected: {error}"
+                    ))
+                })?;
+            }
+        }
         let turns = deliveries
             .iter()
             .filter_map(|delivery| {
                 let native_response = delivery.receiver_turn_id.as_ref().and_then(|turn_id| {
-                    recorded_native_turn_responses
-                        .get(&native_token_usage_key(
-                            &delivery.receiver_thread_id,
-                            turn_id,
-                        ))
-                        .or_else(|| {
-                            native_turn_responses
-                                .get(&(delivery.receiver_thread_id.clone(), turn_id.clone()))
-                        })
+                    native_turn_responses
+                        .get(&(delivery.receiver_thread_id.clone(), turn_id.clone()))
                 });
                 if delivery.status == "receiver_turn_completed"
                     && delivery.receiver_turn_id.is_some()
@@ -475,6 +494,13 @@ impl MemythosRequestProcessor {
             (room, deliveries, input_events)
         };
         deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
+        deliveries.retain(|delivery| {
+            input_events.iter().any(|event| {
+                event.causation_id.as_deref() == Some(delivery.message_id.as_str())
+                    || (event.causation_id.is_none()
+                        && event.turn_id.as_ref() == delivery.receiver_turn_id.as_ref())
+            })
+        });
         let requested_turns = deliveries
             .iter()
             .filter_map(|delivery| {
@@ -500,22 +526,28 @@ impl MemythosRequestProcessor {
             .collect::<HashMap<_, _>>();
         let mut blockers = Vec::new();
         let mut entries = Vec::new();
+        let mut projected_native_items = HashSet::new();
         for delivery in &deliveries {
             let Some(turn_id) = delivery.receiver_turn_id.as_ref() else {
                 continue;
             };
-            let Some(input_event) = input_events
-                .iter()
-                .find(|event| event.turn_id.as_ref() == Some(turn_id))
-            else {
-                blockers.push(format!("turn {turn_id} has no native room input event"));
+            let Some(input_event) = input_events.iter().find(|event| {
+                event.causation_id.as_deref() == Some(delivery.message_id.as_str())
+                    || (event.causation_id.is_none() && event.turn_id.as_ref() == Some(turn_id))
+            }) else {
                 continue;
             };
             let native_response =
                 native_responses.get(&(delivery.receiver_thread_id.clone(), turn_id.clone()));
-            if let Some(item_ref) =
-                native_response.and_then(|response| response.request_item_ref.as_ref())
-            {
+            let request_item_ref = native_response
+                .and_then(|response| response.request_item_ref.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "app-server://threads/{}/turns/{turn_id}/items/{}",
+                        delivery.receiver_thread_id, delivery.message_id
+                    )
+                });
+            if projected_native_items.insert((turn_id.clone(), request_item_ref.clone())) {
                 entries.push(MemythosRoomDialogueEntry {
                     cursor: format!("{}:request", input_event.cursor),
                     iteration: input_event.iteration,
@@ -530,38 +562,36 @@ impl MemythosRequestProcessor {
                     sender: input_event.sender.clone(),
                     recipient: input_event.recipient.clone(),
                     text: delivery.human_summary.clone(),
-                    source_item_ref: item_ref.clone(),
+                    source_item_ref: request_item_ref,
                     causal_ref: delivery.message_id.clone(),
                 });
-            } else {
-                blockers.push(format!(
-                    "turn {turn_id} request has no native UserMessage item ref"
-                ));
             }
             if let Some(response) = native_response {
                 match (response.item_ref.as_ref(), response.text.as_ref()) {
                     (Some(item_ref), Some(text)) => {
-                        let sender = participant_by_thread
-                            .get(delivery.receiver_thread_id.as_str())
-                            .map(|participant| room_actor_ref_for_participant(participant))
-                            .unwrap_or_else(app_server_actor_ref);
-                        entries.push(MemythosRoomDialogueEntry {
-                            cursor: format!("{}:response", input_event.cursor),
-                            iteration: input_event.iteration,
-                            sequence: input_event.sequence.saturating_mul(2).saturating_add(1),
-                            room_id: room.room_id.clone(),
-                            arena_id: room.arena_id.clone(),
-                            thread_id: delivery.receiver_thread_id.clone(),
-                            turn_id: turn_id.clone(),
-                            round_id: Some(delivery.round_id.clone()),
-                            phase: delivery.phase.clone(),
-                            kind: "response".to_string(),
-                            sender,
-                            recipient: input_event.sender.clone(),
-                            text: text.clone(),
-                            source_item_ref: item_ref.clone(),
-                            causal_ref: format!("{}:request", input_event.cursor),
-                        });
+                        if projected_native_items.insert((turn_id.clone(), item_ref.clone())) {
+                            let sender = participant_by_thread
+                                .get(delivery.receiver_thread_id.as_str())
+                                .map(|participant| room_actor_ref_for_participant(participant))
+                                .unwrap_or_else(app_server_actor_ref);
+                            entries.push(MemythosRoomDialogueEntry {
+                                cursor: format!("{}:response", input_event.cursor),
+                                iteration: input_event.iteration,
+                                sequence: input_event.sequence.saturating_mul(2).saturating_add(1),
+                                room_id: room.room_id.clone(),
+                                arena_id: room.arena_id.clone(),
+                                thread_id: delivery.receiver_thread_id.clone(),
+                                turn_id: turn_id.clone(),
+                                round_id: Some(delivery.round_id.clone()),
+                                phase: delivery.phase.clone(),
+                                kind: "response".to_string(),
+                                sender,
+                                recipient: input_event.sender.clone(),
+                                text: text.clone(),
+                                source_item_ref: item_ref.clone(),
+                                causal_ref: format!("{}:request", input_event.cursor),
+                            });
+                        }
                     }
                     (None, Some(_)) | (Some(_), None) => blockers.push(format!(
                         "turn {turn_id} has an incomplete native AgentMessage projection"
@@ -645,5 +675,141 @@ impl MemythosRequestProcessor {
             .collect();
 
         Ok(MemythosTelemetryListResponse { telemetry_refs }.into())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn push_telemetry_ref(
+        &self,
+        state: &mut MemythosRuntimeState,
+        kind: MemythosTelemetryRefKind,
+        source: MemythosTelemetrySource,
+        layer_id: Option<String>,
+        arena_id: Option<String>,
+        thread_id: Option<String>,
+        native_event_ref: Option<String>,
+        detail_ref: Option<String>,
+        channel: MemythosEventChannel,
+        summary: String,
+    ) {
+        let telemetry_ref_id = self.next_id("mem_tel", &self.next_telemetry_ref_id);
+        state.telemetry_refs.push(MemythosTelemetryRef {
+            telemetry_ref_id,
+            kind,
+            source,
+            layer_id,
+            arena_id,
+            thread_id,
+            native_event_ref,
+            detail_ref,
+            channel,
+            summary: compact_summary(summary),
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn push_room_activity_event(
+        &self,
+        state: &mut MemythosRuntimeState,
+        room_id: String,
+        arena_id: String,
+        thread_id: String,
+        turn_id: Option<String>,
+        round_id: Option<String>,
+        phase: Option<String>,
+        participant_role: String,
+        sender: MemythosRoomActorRef,
+        recipient: MemythosRoomActorRef,
+        authority: String,
+        prompt_origin: MemythosPromptOrigin,
+        prompt_lineage: Vec<MemythosPromptLineagePart>,
+        channel: &str,
+        event_kind: &str,
+        status: &str,
+        summary: String,
+        source_ref: Option<String>,
+    ) -> String {
+        let cursor = self.next_id("mem_room_activity", &self.next_room_activity_id);
+        let sequence = state
+            .room_activity_events
+            .get(&room_id)
+            .map_or(1, |events| events.len() as u64 + 1);
+        let activating_delivery = turn_id.as_deref().and_then(|turn_id| {
+            state
+                .arena_message_deliveries
+                .iter()
+                .rev()
+                .find(|delivery| {
+                    delivery.receiver_thread_id == thread_id
+                        && delivery.receiver_turn_id.as_deref() == Some(turn_id)
+                })
+        });
+        let participant_id = native_participant_id_for_thread(&state, &arena_id, &thread_id);
+        let event = MemythosRoomActivityEvent {
+            cursor: cursor.clone(),
+            created_at: Utc::now().to_rfc3339(),
+            iteration: 0,
+            sequence,
+            room_id: room_id.clone(),
+            arena_id,
+            thread_id,
+            turn_id,
+            round_id: round_id
+                .or_else(|| activating_delivery.map(|delivery| delivery.round_id.clone())),
+            phase: phase
+                .or_else(|| activating_delivery.and_then(|delivery| delivery.phase.clone())),
+            participant_id,
+            activation_reason: activating_delivery.map(native_delivery_activation_reason),
+            causation_id: activating_delivery.map(|delivery| delivery.message_id.clone()),
+            correlation_id: activating_delivery.map(|delivery| delivery.delivery_id.clone()),
+            participant_role,
+            channel: channel.to_string(),
+            event_kind: event_kind.to_string(),
+            status: status.to_string(),
+            sender,
+            recipient,
+            authority,
+            prompt_origin,
+            prompt_lineage,
+            summary: compact_summary(summary),
+            source_ref,
+        };
+        state
+            .room_activity_events
+            .entry(room_id)
+            .or_default()
+            .push(event);
+        cursor
+    }
+
+    #[cfg(test)]
+    pub(super) fn push_native_telemetry_ref_for_test(
+        &self,
+        state: &mut MemythosRuntimeState,
+        kind: MemythosTelemetryRefKind,
+        layer_id: Option<String>,
+        arena_id: Option<String>,
+        thread_id: Option<String>,
+        native_event_ref: String,
+        detail_ref: Option<String>,
+        channel: MemythosEventChannel,
+        summary: String,
+    ) {
+        self.push_telemetry_ref(
+            state,
+            kind,
+            MemythosTelemetrySource::AppServerNative,
+            layer_id,
+            arena_id,
+            thread_id,
+            Some(native_event_ref),
+            detail_ref,
+            channel,
+            summary,
+        );
+    }
+
+    pub(super) fn next_id(&self, prefix: &str, counter: &AtomicU64) -> String {
+        let next = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        format!("{prefix}_{next}")
     }
 }

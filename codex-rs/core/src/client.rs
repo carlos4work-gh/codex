@@ -943,7 +943,7 @@ impl ModelClient {
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
         for item in input {
-            if item.id().is_some_and(|id| !id.is_prefixed()) {
+            if item.id().is_some_and(|id| !id.is_valid_for_request()) {
                 item.set_id(/*new_id*/ None);
             }
         }

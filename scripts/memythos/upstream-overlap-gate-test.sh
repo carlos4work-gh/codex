@@ -20,7 +20,11 @@ blob="$(git rev-parse "HEAD:$overlap_path")"
 GIT_INDEX_FILE="$tmp_dir/index" git update-index \
   --add --cacheinfo "$mode,$blob,$overlap_path"
 tree="$(GIT_INDEX_FILE="$tmp_dir/index" git write-tree)"
-synthetic_upstream="$(printf '%s\n' 'synthetic upstream overlap' | git commit-tree "$tree" -p "$base")"
+synthetic_upstream="$(
+  printf '%s\n' 'synthetic upstream overlap' |
+    git -c user.name='Memythos CI' -c user.email='ci@memythos.invalid' \
+      commit-tree "$tree" -p "$base"
+)"
 
 if MEMYTHOS_OVERLAP_BASELINE="$tmp_dir/unclassified-overlap.json" \
   scripts/memythos/upstream-overlap-gate.sh "$synthetic_upstream" >/dev/null 2>&1; then
