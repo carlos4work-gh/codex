@@ -391,7 +391,7 @@ impl MemythosRequestProcessor {
                 && delivery.receiver_turn_id.as_deref() == Some(turn_id)
         });
         if !matched_delivery {
-            let pending_mailbox_deliveries = state
+            let pending_mailbox_delivery = state
                 .arena_message_deliveries
                 .iter()
                 .enumerate()
@@ -401,9 +401,9 @@ impl MemythosRequestProcessor {
                         && delivery.receiver_response_event_ref.is_none()
                 })
                 .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            if let [delivery_index] = pending_mailbox_deliveries.as_slice() {
-                state.arena_message_deliveries[*delivery_index].receiver_turn_id =
+                .next();
+            if let Some(delivery_index) = pending_mailbox_delivery {
+                state.arena_message_deliveries[delivery_index].receiver_turn_id =
                     Some(turn_id.to_string());
                 matched_delivery = true;
             }

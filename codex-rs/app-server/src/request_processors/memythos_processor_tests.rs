@@ -131,7 +131,7 @@ async fn native_agent_message_correlates_one_pending_mailbox_delivery_to_actual_
 }
 
 #[tokio::test]
-async fn native_agent_message_does_not_guess_between_pending_mailbox_deliveries() {
+async fn native_agent_message_correlates_the_oldest_pending_mailbox_delivery() {
     let processor = MemythosRequestProcessor::new();
     let pending_delivery = |delivery_id: &str, message_id: &str, submission_id: &str| {
         MemythosArenaMessageDelivery {
@@ -170,7 +170,7 @@ async fn native_agent_message_does_not_guess_between_pending_mailbox_deliveries(
         ]);
 
     assert!(
-        !processor
+        processor
             .record_native_parent_agent_message(
                 "receiver",
                 "turn-native-1",
@@ -181,14 +181,22 @@ async fn native_agent_message_does_not_guess_between_pending_mailbox_deliveries(
     );
 
     let state = processor.state.lock().await;
+    assert_eq!(
+        state.arena_message_deliveries[0].receiver_turn_id.as_deref(),
+        Some("turn-native-1")
+    );
+    assert!(state.arena_message_deliveries[0]
+        .receiver_response_event_ref
+        .is_some());
+    assert_eq!(
+        state.arena_message_deliveries[1].receiver_turn_id.as_deref(),
+        Some("submission-2")
+    );
+    assert!(state.arena_message_deliveries[1]
+        .receiver_response_event_ref
+        .is_none());
     assert!(
         state
-            .arena_message_deliveries
-            .iter()
-            .all(|delivery| delivery.receiver_response_event_ref.is_none())
-    );
-    assert!(
-        !state
             .native_parent_turn_responses
             .contains_key(&native_token_usage_key("receiver", "turn-native-1"))
     );
