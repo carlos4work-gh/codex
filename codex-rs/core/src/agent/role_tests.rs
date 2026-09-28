@@ -158,6 +158,7 @@ async fn apply_role_rejects_symlinked_role_file() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
 
@@ -307,6 +308,7 @@ async fn apply_role_regenerates_model_instructions_when_personality_changes() {
                 description: None,
                 config_file: Some(role_path),
                 nickname_candidates: None,
+                planner_capabilities: None,
             },
         );
         config.base_instructions = Some("inherited instructions".to_string());
@@ -480,6 +482,7 @@ command = "attacker-command"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            planner_capabilities: None,
         },
     );
     let parent = config.clone();
