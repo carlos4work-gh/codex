@@ -216,7 +216,7 @@ ON CONFLICT(receiver_thread_id, communication_id) DO NOTHING
     ) -> anyhow::Result<NativeMailboxInsertOutcome> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(existing) = sqlx::query(
-            r#"SELECT source_call_id, communication_json, payload_hash
+            r#"SELECT source_call_id, communication_json, payload_hash, status
                FROM native_mailbox_communications
                WHERE receiver_thread_id = ? AND communication_id = ?"#,
         )
@@ -225,13 +225,17 @@ ON CONFLICT(receiver_thread_id, communication_id) DO NOTHING
         .fetch_optional(&mut *tx)
         .await?
         {
-            anyhow::ensure!(
-                existing.try_get::<Option<String>, _>("source_call_id")? == record.source_call_id
-                    && existing.try_get::<String, _>("communication_json")?
-                        == record.communication_json
-                    && existing.try_get::<String, _>("payload_hash")? == record.payload_hash,
-                "staged native mailbox communication identity conflicts with a different active payload"
-            );
+            let status: String = existing.try_get("status")?;
+            if status != "consumed" {
+                anyhow::ensure!(
+                    existing.try_get::<Option<String>, _>("source_call_id")?
+                        == record.source_call_id
+                        && existing.try_get::<String, _>("communication_json")?
+                            == record.communication_json
+                        && existing.try_get::<String, _>("payload_hash")? == record.payload_hash,
+                    "staged native mailbox communication identity conflicts with a different active payload"
+                );
+            }
             return Ok(NativeMailboxInsertOutcome::Existing);
         }
         let result = sqlx::query(
@@ -1280,6 +1284,46 @@ mod tests {
         .fetch_one(runtime.pool.as_ref())
         .await
         .expect("count staged records after activation retry");
+        assert_eq!(staged_count, 0);
+
+        let mut conflicting_active = record.clone();
+        conflicting_active.communication_json =
+            r#"{"content":"different active payload"}"#.to_string();
+        conflicting_active.payload_hash = "sha256:different-active".to_string();
+        assert!(
+            runtime
+                .insert_staged_native_mailbox_communication(&conflicting_active)
+                .await
+                .expect_err("reject a changed payload while the communication is pending")
+                .to_string()
+                .contains("different active payload")
+        );
+        assert!(
+            runtime
+                .mark_native_mailbox_communication_consumed(
+                    &thread_id.to_string(),
+                    &record.communication_id,
+                    now + 3,
+                )
+                .await
+                .expect("mark communication consumed")
+        );
+        assert_eq!(
+            runtime
+                .insert_staged_native_mailbox_communication(&conflicting_active)
+                .await
+                .expect("reuse the canonical result after completion"),
+            NativeMailboxInsertOutcome::Existing
+        );
+        let staged_count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM native_mailbox_staged_communications
+               WHERE receiver_thread_id = ? AND communication_id = ?"#,
+        )
+        .bind(thread_id.to_string())
+        .bind(&record.communication_id)
+        .fetch_one(runtime.pool.as_ref())
+        .await
+        .expect("count staged records after consumed retry");
         assert_eq!(staged_count, 0);
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;
