@@ -51,3 +51,15 @@ fn recognizes_non_empty_prefix_and_suffix() {
         assert_eq!(id.is_prefixed(), expected, "{value}");
     }
 }
+
+#[test]
+fn request_validation_enforces_api_length_limit() {
+    let valid = ResponseItemId::from_server(format!("amsg_{}", "a".repeat(59)));
+    let too_long = ResponseItemId::from_server(format!("amsg_{}", "a".repeat(60)));
+    let legacy = ResponseItemId::from_server("legacy-id".to_string());
+
+    assert_eq!(valid.as_str().chars().count(), 64);
+    assert!(valid.is_valid_for_request());
+    assert!(!too_long.is_valid_for_request());
+    assert!(!legacy.is_valid_for_request());
+}
