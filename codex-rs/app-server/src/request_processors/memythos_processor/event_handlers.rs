@@ -1,6 +1,51 @@
 use super::*;
 
 impl MemythosRequestProcessor {
+    pub(crate) async fn record_native_turn_started(
+        &self,
+        thread_id: &str,
+        submission_id: &str,
+        turn_id: &str,
+    ) {
+        let mut state = self.state.lock().await;
+        state.native_submission_turn_ids.insert(
+            native_token_usage_key(thread_id, submission_id),
+            turn_id.to_string(),
+        );
+        for delivery in state
+            .arena_message_deliveries
+            .iter_mut()
+            .filter(|delivery| {
+                delivery.receiver_thread_id == thread_id
+                    && delivery.receiver_turn_id.as_deref() == Some(submission_id)
+            })
+        {
+            delivery.receiver_turn_id = Some(turn_id.to_string());
+        }
+    }
+
+    pub(super) async fn resolve_native_submission_turn_id(
+        &self,
+        thread_id: &str,
+        submission_id: &str,
+    ) -> String {
+        let key = native_token_usage_key(thread_id, submission_id);
+        for _ in 0..200 {
+            if let Some(turn_id) = self
+                .state
+                .lock()
+                .await
+                .native_submission_turn_ids
+                .get(&key)
+                .cloned()
+            {
+                return turn_id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        submission_id.to_string()
+    }
+
     #[cfg(test)]
     pub(crate) async fn record_native_thread_event(
         &self,

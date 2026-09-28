@@ -60,6 +60,7 @@ pub(super) struct MemythosRuntimeState {
     pub(super) arena_resume_execution_plans: HashMap<String, MemythosArenaResumeExecutionPlan>,
     pub(super) room_activity_events: HashMap<String, Vec<MemythosRoomActivityEvent>>,
     pub(super) native_parent_turn_responses: HashMap<String, ParentTurnResponse>,
+    pub(super) native_submission_turn_ids: HashMap<String, String>,
     pub(super) structured_contracts: HashMap<String, MemythosStructuredContract>,
     pub(super) native_token_usage_refs: HashMap<String, String>,
     pub(super) native_thread_usage_totals: HashMap<String, MemythosTokenUsageBreakdown>,

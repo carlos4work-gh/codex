@@ -164,6 +164,19 @@ pub(crate) async fn apply_bespoke_event_handling(
             thread_watch_manager
                 .note_turn_started(&conversation_id.to_string())
                 .await;
+            if let Some(processor) = memythos_processor
+                .lock()
+                .ok()
+                .and_then(|processor| processor.clone())
+            {
+                processor
+                    .record_native_turn_started(
+                        &conversation_id.to_string(),
+                        &event_turn_id,
+                        &payload.turn_id,
+                    )
+                    .await;
+            }
             let turn = {
                 let state = thread_state.lock().await;
                 let mut turn = state.active_turn_snapshot().unwrap_or_else(|| Turn {

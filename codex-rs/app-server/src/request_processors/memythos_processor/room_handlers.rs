@@ -993,10 +993,23 @@ impl MemythosRequestProcessor {
         };
         let delivery_id = self.next_id("mem_room_delivery", &self.next_delivery_id);
         let prepared_goal = self.prepare_parent_goal_for_delivery(&message).await?;
-        let delivery_attempt = self
+        let mut delivery_attempt = self
             .peer_parent_delivery_adapter
             .deliver_peer_parent_message(&message, target_reasoning_effort.clone(), connection_id)
             .await;
+        if delivery_attempt
+            .delivery_mechanism
+            .starts_with("native_mailbox")
+            && let Some(submission_id) = delivery_attempt.receiver_turn_id.clone()
+        {
+            delivery_attempt.receiver_turn_id = Some(
+                self.resolve_native_submission_turn_id(
+                    &message.to_parent_thread_id,
+                    &submission_id,
+                )
+                .await,
+            );
+        }
         validate_peer_parent_delivery_attempt(&message, &delivery_attempt)
             .map_err(|error| ArenaPortError::contract_rejected(error.to_string()))
             .map_err(|error| error.into_jsonrpc("peer_delivery"))?;

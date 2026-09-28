@@ -598,6 +598,7 @@ impl MemythosRequestProcessor {
                 arena_resume_execution_plans: HashMap::new(),
                 room_activity_events: HashMap::new(),
                 native_parent_turn_responses: HashMap::new(),
+                native_submission_turn_ids: HashMap::new(),
                 structured_contracts: HashMap::new(),
                 native_token_usage_refs: HashMap::new(),
                 native_thread_usage_totals: HashMap::new(),
@@ -968,7 +969,7 @@ impl MemythosRequestProcessor {
                 .await?;
         }
 
-        let delivery_attempt = if let Some(effect) = staged_effect.as_ref() {
+        let mut delivery_attempt = if let Some(effect) = staged_effect.as_ref() {
             self.peer_parent_delivery_adapter
                 .activate_staged_peer_parent_message(
                     &message,
@@ -986,6 +987,19 @@ impl MemythosRequestProcessor {
                 )
                 .await
         };
+        if delivery_attempt
+            .delivery_mechanism
+            .starts_with("native_mailbox")
+            && let Some(submission_id) = delivery_attempt.receiver_turn_id.clone()
+        {
+            delivery_attempt.receiver_turn_id = Some(
+                self.resolve_native_submission_turn_id(
+                    &message.to_parent_thread_id,
+                    &submission_id,
+                )
+                .await,
+            );
+        }
         validate_peer_parent_delivery_attempt(&message, &delivery_attempt)
             .map_err(|error| ArenaPortError::contract_rejected(error.to_string()))
             .map_err(|error| error.into_jsonrpc("peer_delivery"))?;
