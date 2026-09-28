@@ -517,6 +517,7 @@ impl MemythosRequestProcessor {
             .collect::<HashMap<_, _>>();
         let mut blockers = Vec::new();
         let mut entries = Vec::new();
+        let mut projected_native_items = HashSet::new();
         for delivery in &deliveries {
             let Some(turn_id) = delivery.receiver_turn_id.as_ref() else {
                 continue;
@@ -533,23 +534,25 @@ impl MemythosRequestProcessor {
             if let Some(item_ref) =
                 native_response.and_then(|response| response.request_item_ref.as_ref())
             {
-                entries.push(MemythosRoomDialogueEntry {
-                    cursor: format!("{}:request", input_event.cursor),
-                    iteration: input_event.iteration,
-                    sequence: input_event.sequence.saturating_mul(2),
-                    room_id: room.room_id.clone(),
-                    arena_id: room.arena_id.clone(),
-                    thread_id: delivery.receiver_thread_id.clone(),
-                    turn_id: turn_id.clone(),
-                    round_id: Some(delivery.round_id.clone()),
-                    phase: delivery.phase.clone(),
-                    kind: "request".to_string(),
-                    sender: input_event.sender.clone(),
-                    recipient: input_event.recipient.clone(),
-                    text: delivery.human_summary.clone(),
-                    source_item_ref: item_ref.clone(),
-                    causal_ref: delivery.message_id.clone(),
-                });
+                if projected_native_items.insert((turn_id.clone(), item_ref.clone())) {
+                    entries.push(MemythosRoomDialogueEntry {
+                        cursor: format!("{}:request", input_event.cursor),
+                        iteration: input_event.iteration,
+                        sequence: input_event.sequence.saturating_mul(2),
+                        room_id: room.room_id.clone(),
+                        arena_id: room.arena_id.clone(),
+                        thread_id: delivery.receiver_thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        round_id: Some(delivery.round_id.clone()),
+                        phase: delivery.phase.clone(),
+                        kind: "request".to_string(),
+                        sender: input_event.sender.clone(),
+                        recipient: input_event.recipient.clone(),
+                        text: delivery.human_summary.clone(),
+                        source_item_ref: item_ref.clone(),
+                        causal_ref: delivery.message_id.clone(),
+                    });
+                }
             } else {
                 blockers.push(format!(
                     "turn {turn_id} request has no native UserMessage item ref"
@@ -558,27 +561,29 @@ impl MemythosRequestProcessor {
             if let Some(response) = native_response {
                 match (response.item_ref.as_ref(), response.text.as_ref()) {
                     (Some(item_ref), Some(text)) => {
-                        let sender = participant_by_thread
-                            .get(delivery.receiver_thread_id.as_str())
-                            .map(|participant| room_actor_ref_for_participant(participant))
-                            .unwrap_or_else(app_server_actor_ref);
-                        entries.push(MemythosRoomDialogueEntry {
-                            cursor: format!("{}:response", input_event.cursor),
-                            iteration: input_event.iteration,
-                            sequence: input_event.sequence.saturating_mul(2).saturating_add(1),
-                            room_id: room.room_id.clone(),
-                            arena_id: room.arena_id.clone(),
-                            thread_id: delivery.receiver_thread_id.clone(),
-                            turn_id: turn_id.clone(),
-                            round_id: Some(delivery.round_id.clone()),
-                            phase: delivery.phase.clone(),
-                            kind: "response".to_string(),
-                            sender,
-                            recipient: input_event.sender.clone(),
-                            text: text.clone(),
-                            source_item_ref: item_ref.clone(),
-                            causal_ref: format!("{}:request", input_event.cursor),
-                        });
+                        if projected_native_items.insert((turn_id.clone(), item_ref.clone())) {
+                            let sender = participant_by_thread
+                                .get(delivery.receiver_thread_id.as_str())
+                                .map(|participant| room_actor_ref_for_participant(participant))
+                                .unwrap_or_else(app_server_actor_ref);
+                            entries.push(MemythosRoomDialogueEntry {
+                                cursor: format!("{}:response", input_event.cursor),
+                                iteration: input_event.iteration,
+                                sequence: input_event.sequence.saturating_mul(2).saturating_add(1),
+                                room_id: room.room_id.clone(),
+                                arena_id: room.arena_id.clone(),
+                                thread_id: delivery.receiver_thread_id.clone(),
+                                turn_id: turn_id.clone(),
+                                round_id: Some(delivery.round_id.clone()),
+                                phase: delivery.phase.clone(),
+                                kind: "response".to_string(),
+                                sender,
+                                recipient: input_event.sender.clone(),
+                                text: text.clone(),
+                                source_item_ref: item_ref.clone(),
+                                causal_ref: format!("{}:request", input_event.cursor),
+                            });
+                        }
                     }
                     (None, Some(_)) | (Some(_), None) => blockers.push(format!(
                         "turn {turn_id} has an incomplete native AgentMessage projection"

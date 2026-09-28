@@ -7755,6 +7755,19 @@ async fn room_activity_list_summarizes_delivery_without_closing_arena() {
             .all(|event_ref| { !event_ref.contains("/events/") })
     );
 
+    {
+        let mut state = processor.state.lock().await;
+        let mut duplicate_turn_delivery = state
+            .arena_message_deliveries
+            .last()
+            .cloned()
+            .expect("native delivery should exist");
+        duplicate_turn_delivery.delivery_id = "mem_delivery_duplicate_projection".to_string();
+        duplicate_turn_delivery.message_id = "message-duplicate-projection".to_string();
+        state
+            .arena_message_deliveries
+            .push(duplicate_turn_delivery);
+    }
     let dialogue = processor
         .room_dialogue_list(MemythosRoomDialogueListParams {
             room_id: "room-001".to_string(),
@@ -7797,6 +7810,12 @@ async fn room_activity_list_summarizes_delivery_without_closing_arena() {
             .iter()
             .all(|entry| !entry.text.contains("Participant "))
     );
+    processor
+        .state
+        .lock()
+        .await
+        .arena_message_deliveries
+        .retain(|delivery| delivery.delivery_id != "mem_delivery_duplicate_projection");
 
     let bet_response = processor
         .room_activity_list(MemythosRoomActivityListParams {
