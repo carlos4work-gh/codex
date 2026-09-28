@@ -296,7 +296,6 @@ impl MemythosRequestProcessor {
                 reconciled_effects.push((pending.clone(), message, attempt));
             }
         }
-
         let mut state = self.state.lock().await;
         for (record, snapshot, lifecycle, arena) in validated_snapshots {
             let lifecycle_state = lifecycle.protocol_state();
@@ -680,6 +679,14 @@ impl MemythosRequestProcessor {
         &self,
         message: &MemythosArenaMessage,
     ) -> Result<PreparedParentDeliveryGoal, JSONRPCErrorError> {
+        // Arena state outlives app-server's in-memory thread extensions. Resume only the target
+        // parent at the delivery boundary, before goal activation, without making state reads
+        // wake unrelated parents or replay mailbox work.
+        self.arena_parent_provisioning_adapter
+            .restore_parent_runtime(&message.to_parent_thread_id, ConnectionId(0))
+            .await
+            .map_err(ArenaPortError::classify_effect_failure)
+            .map_err(|error| error.into_jsonrpc("parent_runtime"))?;
         let current_goal = self
             .arena_parent_provisioning_adapter
             .read_parent_goal(&message.to_parent_thread_id)

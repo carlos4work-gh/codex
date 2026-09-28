@@ -725,6 +725,7 @@ struct FakeArenaParentProvisioningAdapter {
     rolled_back: Arc<Mutex<Vec<String>>>,
     goal_transitions: Arc<Mutex<Vec<(String, Option<String>, ThreadGoalStatus, bool)>>>,
     goals: Arc<Mutex<HashMap<String, ThreadGoal>>>,
+    restored_runtimes: Arc<Mutex<Vec<String>>>,
 }
 
 struct FakeArenaCompositionPlanningAdapter {
@@ -1014,6 +1015,20 @@ impl ArenaParentProvisioningAdapter for FakeArenaParentProvisioningAdapter {
 
     fn read_parent_goal<'a>(&'a self, thread_id: &'a str) -> ArenaParentGoalReadFuture<'a> {
         Box::pin(async move { Ok(self.goals.lock().await.get(thread_id).cloned()) })
+    }
+
+    fn restore_parent_runtime<'a>(
+        &'a self,
+        thread_id: &'a str,
+        _connection_id: ConnectionId,
+    ) -> ArenaParentRuntimeRestoreFuture<'a> {
+        Box::pin(async move {
+            self.restored_runtimes
+                .lock()
+                .await
+                .push(thread_id.to_string());
+            Ok(())
+        })
     }
 
     fn rollback_parent<'a>(&'a self, thread_id: &'a str) -> ArenaParentProvisionFuture<'a> {
@@ -3155,6 +3170,7 @@ async fn canonical_arena_restores_from_ootb_state_without_replanning() {
             .cloned()
             .collect::<HashSet<_>>()
     );
+    assert!(provisioning.restored_runtimes.lock().await.is_empty());
 
     let replanning_error = second_process
         .arena_request(semantic_arena_request_params(), ConnectionId(0))
@@ -4153,6 +4169,10 @@ async fn automatic_mailbox_delivery_rearms_a_completed_parent_for_the_current_ph
     assert!(prepared.active_goal.objective.contains("assignment bet-1"));
     assert!(prepared.active_goal.objective.contains("phase peer_bet"));
     assert!(!prepared.active_goal.objective.contains("proposal-1"));
+    assert_eq!(
+        provisioning.restored_runtimes.lock().await.as_slice(),
+        &["bettor-a".to_string()]
+    );
     let transitions = provisioning.goal_transitions.lock().await;
     assert_eq!(transitions.len(), 1);
     assert_eq!(transitions[0].0, "bettor-a");
