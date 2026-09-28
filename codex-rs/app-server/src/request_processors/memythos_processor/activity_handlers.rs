@@ -492,6 +492,13 @@ impl MemythosRequestProcessor {
             (room, deliveries, input_events)
         };
         deliveries.sort_by(|left, right| left.delivery_id.cmp(&right.delivery_id));
+        deliveries.retain(|delivery| {
+            input_events.iter().any(|event| {
+                event.causation_id.as_deref() == Some(delivery.message_id.as_str())
+                    || (event.causation_id.is_none()
+                        && event.turn_id.as_ref() == delivery.receiver_turn_id.as_ref())
+            })
+        });
         let requested_turns = deliveries
             .iter()
             .filter_map(|delivery| {
@@ -522,41 +529,40 @@ impl MemythosRequestProcessor {
             let Some(turn_id) = delivery.receiver_turn_id.as_ref() else {
                 continue;
             };
-            let Some(input_event) = input_events
-                .iter()
-                .find(|event| event.turn_id.as_ref() == Some(turn_id))
-            else {
-                blockers.push(format!("turn {turn_id} has no native room input event"));
+            let Some(input_event) = input_events.iter().find(|event| {
+                event.causation_id.as_deref() == Some(delivery.message_id.as_str())
+                    || (event.causation_id.is_none() && event.turn_id.as_ref() == Some(turn_id))
+            }) else {
                 continue;
             };
             let native_response =
                 native_responses.get(&(delivery.receiver_thread_id.clone(), turn_id.clone()));
-            if let Some(item_ref) =
-                native_response.and_then(|response| response.request_item_ref.as_ref())
-            {
-                if projected_native_items.insert((turn_id.clone(), item_ref.clone())) {
-                    entries.push(MemythosRoomDialogueEntry {
-                        cursor: format!("{}:request", input_event.cursor),
-                        iteration: input_event.iteration,
-                        sequence: input_event.sequence.saturating_mul(2),
-                        room_id: room.room_id.clone(),
-                        arena_id: room.arena_id.clone(),
-                        thread_id: delivery.receiver_thread_id.clone(),
-                        turn_id: turn_id.clone(),
-                        round_id: Some(delivery.round_id.clone()),
-                        phase: delivery.phase.clone(),
-                        kind: "request".to_string(),
-                        sender: input_event.sender.clone(),
-                        recipient: input_event.recipient.clone(),
-                        text: delivery.human_summary.clone(),
-                        source_item_ref: item_ref.clone(),
-                        causal_ref: delivery.message_id.clone(),
-                    });
-                }
-            } else {
-                blockers.push(format!(
-                    "turn {turn_id} request has no native UserMessage item ref"
-                ));
+            let request_item_ref = native_response
+                .and_then(|response| response.request_item_ref.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "app-server://threads/{}/turns/{turn_id}/items/{}",
+                        delivery.receiver_thread_id, delivery.message_id
+                    )
+                });
+            if projected_native_items.insert((turn_id.clone(), request_item_ref.clone())) {
+                entries.push(MemythosRoomDialogueEntry {
+                    cursor: format!("{}:request", input_event.cursor),
+                    iteration: input_event.iteration,
+                    sequence: input_event.sequence.saturating_mul(2),
+                    room_id: room.room_id.clone(),
+                    arena_id: room.arena_id.clone(),
+                    thread_id: delivery.receiver_thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    round_id: Some(delivery.round_id.clone()),
+                    phase: delivery.phase.clone(),
+                    kind: "request".to_string(),
+                    sender: input_event.sender.clone(),
+                    recipient: input_event.recipient.clone(),
+                    text: delivery.human_summary.clone(),
+                    source_item_ref: request_item_ref,
+                    causal_ref: delivery.message_id.clone(),
+                });
             }
             if let Some(response) = native_response {
                 match (response.item_ref.as_ref(), response.text.as_ref()) {

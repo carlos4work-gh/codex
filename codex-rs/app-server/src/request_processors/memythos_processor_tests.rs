@@ -8000,6 +8000,7 @@ async fn room_activity_list_summarizes_delivery_without_closing_arena() {
             .expect("native delivery should exist");
         duplicate_turn_delivery.delivery_id = "mem_delivery_duplicate_projection".to_string();
         duplicate_turn_delivery.message_id = "message-duplicate-projection".to_string();
+        duplicate_turn_delivery.receiver_turn_id = Some("internal-turn".to_string());
         state
             .arena_message_deliveries
             .push(duplicate_turn_delivery);
