@@ -386,10 +386,28 @@ impl MemythosRequestProcessor {
         text: String,
     ) -> bool {
         let mut state = self.state.lock().await;
-        let matched_delivery = state.arena_message_deliveries.iter().any(|delivery| {
+        let mut matched_delivery = state.arena_message_deliveries.iter().any(|delivery| {
             delivery.receiver_thread_id == thread_id
                 && delivery.receiver_turn_id.as_deref() == Some(turn_id)
         });
+        if !matched_delivery {
+            let pending_mailbox_deliveries = state
+                .arena_message_deliveries
+                .iter()
+                .enumerate()
+                .filter(|(_, delivery)| {
+                    delivery.receiver_thread_id == thread_id
+                        && delivery.delivery_mechanism.starts_with("native_mailbox")
+                        && delivery.receiver_response_event_ref.is_none()
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if let [delivery_index] = pending_mailbox_deliveries.as_slice() {
+                state.arena_message_deliveries[*delivery_index].receiver_turn_id =
+                    Some(turn_id.to_string());
+                matched_delivery = true;
+            }
+        }
         if !matched_delivery {
             return false;
         }
