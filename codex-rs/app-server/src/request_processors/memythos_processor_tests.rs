@@ -168,6 +168,29 @@ async fn native_agent_message_correlates_the_oldest_pending_mailbox_delivery() {
             pending_delivery("delivery-1", "message-1", "submission-1"),
             pending_delivery("delivery-2", "message-2", "submission-2"),
         ]);
+    {
+        let mut state = processor.state.lock().await;
+        processor.push_room_activity_event(
+            &mut state,
+            "room-1".to_string(),
+            "arena-1".to_string(),
+            "receiver".to_string(),
+            Some("submission-1".to_string()),
+            Some("round-1".to_string()),
+            Some("review".to_string()),
+            "room_concierge".to_string(),
+            app_server_actor_ref(),
+            app_server_actor_ref(),
+            "coordinator_instruction".to_string(),
+            MemythosPromptOrigin::AgentToAgentPrompt,
+            Vec::new(),
+            "parent_mailbox",
+            "input_delivered",
+            "running",
+            "Mailbox input delivered.".to_string(),
+            None,
+        );
+    }
 
     assert!(
         processor
@@ -199,6 +222,19 @@ async fn native_agent_message_correlates_the_oldest_pending_mailbox_delivery() {
         state
             .native_parent_turn_responses
             .contains_key(&native_token_usage_key("receiver", "turn-native-1"))
+    );
+    let response = state
+        .native_parent_turn_responses
+        .get(&native_token_usage_key("receiver", "turn-native-1"))
+        .expect("expected recovered native response");
+    assert!(response
+        .request_item_ref
+        .as_deref()
+        .is_some_and(|item_ref| item_ref.ends_with("/items/message-1")));
+    assert_eq!(response.request_text.as_deref(), Some("Review the settled contract."));
+    assert_eq!(
+        state.room_activity_events["room-1"][0].turn_id.as_deref(),
+        Some("turn-native-1")
     );
 }
 

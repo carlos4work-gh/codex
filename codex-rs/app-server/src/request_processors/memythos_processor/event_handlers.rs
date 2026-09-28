@@ -390,6 +390,7 @@ impl MemythosRequestProcessor {
             delivery.receiver_thread_id == thread_id
                 && delivery.receiver_turn_id.as_deref() == Some(turn_id)
         });
+        let mut recovered_request = None;
         if !matched_delivery {
             let pending_mailbox_delivery = state
                 .arena_message_deliveries
@@ -403,8 +404,23 @@ impl MemythosRequestProcessor {
                 .map(|(index, _)| index)
                 .next();
             if let Some(delivery_index) = pending_mailbox_delivery {
+                let delivery = &state.arena_message_deliveries[delivery_index];
+                let submission_id = delivery.receiver_turn_id.clone();
+                recovered_request = Some((
+                    delivery.message_id.clone(),
+                    delivery.human_summary.clone(),
+                    submission_id.clone(),
+                ));
                 state.arena_message_deliveries[delivery_index].receiver_turn_id =
                     Some(turn_id.to_string());
+                if let Some(submission_id) = submission_id {
+                    for event in state.room_activity_events.values_mut().flatten().filter(|event| {
+                        event.thread_id == thread_id
+                            && event.turn_id.as_deref() == Some(submission_id.as_str())
+                    }) {
+                        event.turn_id = Some(turn_id.to_string());
+                    }
+                }
                 matched_delivery = true;
             }
         }
@@ -413,16 +429,25 @@ impl MemythosRequestProcessor {
         }
 
         let item_ref = format!("app-server://threads/{thread_id}/turns/{turn_id}/items/{item_id}");
-        state.native_parent_turn_responses.insert(
-            native_token_usage_key(thread_id, turn_id),
-            ParentTurnResponse {
-                status: Some(TurnStatus::Completed),
+        let response = state
+            .native_parent_turn_responses
+            .entry(native_token_usage_key(thread_id, turn_id))
+            .or_insert_with(|| ParentTurnResponse {
+                status: None,
                 request_item_ref: None,
                 request_text: None,
-                item_ref: Some(item_ref.clone()),
-                text: Some(text),
-            },
-        );
+                item_ref: None,
+                text: None,
+            });
+        if let Some((message_id, request_text, _)) = recovered_request {
+            response.request_item_ref = Some(format!(
+                "app-server://threads/{thread_id}/turns/{turn_id}/items/{message_id}"
+            ));
+            response.request_text = Some(request_text);
+        }
+        response.status = Some(TurnStatus::Completed);
+        response.item_ref = Some(item_ref.clone());
+        response.text = Some(text);
         for delivery in state
             .arena_message_deliveries
             .iter_mut()
