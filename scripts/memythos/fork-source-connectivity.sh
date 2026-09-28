@@ -4,10 +4,30 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+contains_fixed() {
+  local file="$1"
+  local pattern="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg --quiet --fixed-strings "$pattern" "$file"
+  else
+    grep --quiet --fixed-strings -- "$pattern" "$file"
+  fi
+}
+
+contains_regex() {
+  local file="$1"
+  local pattern="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg --quiet "$pattern" "$file"
+  else
+    grep --quiet --extended-regexp -- "$pattern" "$file"
+  fi
+}
+
 require_pattern() {
   local file="$1"
   local pattern="$2"
-  if ! rg --quiet --fixed-strings "$pattern" "$file"; then
+  if ! contains_fixed "$file" "$pattern"; then
     echo "Disconnected Memythos source: expected '$pattern' in $file" >&2
     exit 1
   fi
@@ -27,7 +47,7 @@ require_pattern codex-rs/core/src/session/mod.rs ".mark_consumed(&self.thread_id
 require_pattern codex-rs/cli/src/main.rs "mod memythos_sniff;"
 
 durable_mailbox_service="codex-rs/core/src/durable_inter_agent_mailbox.rs"
-if rg --quiet 'Memythos' "$durable_mailbox_service"; then
+if contains_regex "$durable_mailbox_service" 'Memythos'; then
   echo "Durable inter-agent mailbox must remain domain-neutral" >&2
   exit 1
 fi
@@ -35,9 +55,8 @@ fi
 for integration_file in \
   codex-rs/core/src/thread_manager.rs \
   codex-rs/core/src/session/mod.rs; do
-  if rg --quiet \
-    'insert_pending_native_mailbox_communication|claim_native_mailbox_communication_for_recovery|mark_native_mailbox_communication_consumed' \
-    "$integration_file"; then
+  if contains_regex "$integration_file" \
+    'insert_pending_native_mailbox_communication|claim_native_mailbox_communication_for_recovery|mark_native_mailbox_communication_consumed'; then
     echo "Durable mailbox repository access escaped into $integration_file" >&2
     exit 1
   fi
@@ -49,7 +68,7 @@ for root_role_file in \
   codex-rs/rollout/src/recorder.rs \
   codex-rs/thread-store/src/local/create_thread.rs \
   codex-rs/thread-store/src/local/revert_thread.rs; do
-  if rg --quiet 'Memythos' "$root_role_file"; then
+  if contains_regex "$root_role_file" 'Memythos'; then
     echo "Root role patch must remain domain-neutral: $root_role_file" >&2
     exit 1
   fi
