@@ -266,7 +266,7 @@ impl MemythosRequestProcessor {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let native_turn_responses = self
+        let mut native_turn_responses = self
             .parent_turn_response_adapter
             .read_responses(requested_turns)
             .await;
@@ -279,19 +279,36 @@ impl MemythosRequestProcessor {
             let state = self.state.lock().await;
             state.native_parent_turn_responses.clone()
         };
+        for delivery in &deliveries {
+            let Some(turn_id) = delivery.receiver_turn_id.as_ref() else {
+                continue;
+            };
+            let key = (delivery.receiver_thread_id.clone(), turn_id.clone());
+            let recorded_response = recorded_native_turn_responses
+                .get(&native_token_usage_key(&delivery.receiver_thread_id, turn_id));
+            if let Some(recorded_response) = recorded_response {
+                native_turn_responses
+                    .entry(key.clone())
+                    .and_modify(|native_response| {
+                        *native_response =
+                            merge_parent_turn_responses(recorded_response, native_response);
+                    })
+                    .or_insert_with(|| recorded_response.clone());
+            }
+            if let Some(response) = native_turn_responses.get(&key) {
+                validate_parent_turn_response(&key.0, &key.1, response).map_err(|error| {
+                    invalid_params(format!(
+                        "effective parent response contract rejected: {error}"
+                    ))
+                })?;
+            }
+        }
         let turns = deliveries
             .iter()
             .filter_map(|delivery| {
                 let native_response = delivery.receiver_turn_id.as_ref().and_then(|turn_id| {
-                    recorded_native_turn_responses
-                        .get(&native_token_usage_key(
-                            &delivery.receiver_thread_id,
-                            turn_id,
-                        ))
-                        .or_else(|| {
-                            native_turn_responses
-                                .get(&(delivery.receiver_thread_id.clone(), turn_id.clone()))
-                        })
+                    native_turn_responses
+                        .get(&(delivery.receiver_thread_id.clone(), turn_id.clone()))
                 });
                 if delivery.status == "receiver_turn_completed"
                     && delivery.receiver_turn_id.is_some()
