@@ -37,8 +37,8 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-git diff --name-only "$base_commit"..HEAD | sort -u >"$tmp_dir/fork-files"
-git diff --name-only "$base_commit".."$upstream_ref" | sort -u >"$tmp_dir/upstream-files"
+git diff --no-renames --name-only "$base_commit"..HEAD | sort -u >"$tmp_dir/fork-files"
+git diff --no-renames --name-only "$base_commit".."$upstream_ref" | sort -u >"$tmp_dir/upstream-files"
 comm -12 "$tmp_dir/fork-files" "$tmp_dir/upstream-files" >"$tmp_dir/overlaps"
 
 : >"$tmp_dir/mechanical"

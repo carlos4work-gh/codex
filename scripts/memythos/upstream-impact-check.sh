@@ -53,7 +53,7 @@ watch_paths=(
 )
 
 echo "Changed files in Memythos-sensitive surfaces"
-git diff --name-status HEAD...upstream/main -- "${watch_paths[@]}" || true
+git diff --no-renames --name-status HEAD...upstream/main -- "${watch_paths[@]}" || true
 echo
 
 echo "Recent upstream commits touching Memythos-sensitive surfaces"
