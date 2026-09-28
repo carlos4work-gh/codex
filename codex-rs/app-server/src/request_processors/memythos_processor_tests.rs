@@ -595,6 +595,15 @@ fn arena_composition_schema_uses_only_responses_compatible_reasoning_effort() {
     );
 }
 
+#[test]
+fn arena_resume_schema_is_available_from_the_complete_protocol_bundle() {
+    let schema = arena_resume_output_schema().expect("resume assessment schema");
+
+    assert_eq!(schema["type"], serde_json::json!("object"));
+    assert!(schema["properties"]["resumeExecutionPlan"].is_object());
+    assert!(schema["definitions"]["MemythosArenaResumeExecutionPlan"].is_object());
+}
+
 #[derive(Debug)]
 struct FakeLivePeerParentDeliveryAdapter;
 

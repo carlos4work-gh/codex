@@ -151,7 +151,7 @@ pub(super) fn arena_composition_output_schema() -> Result<serde_json::Value, JSO
     Ok(schema)
 }
 
-fn arena_resume_output_schema() -> Result<serde_json::Value, JSONRPCErrorError> {
+pub(super) fn arena_resume_output_schema() -> Result<serde_json::Value, JSONRPCErrorError> {
     let mut schema = protocol_definition_output_schema("MemythosArenaResumeAssessment")?;
     close_json_schema_objects(&mut schema);
     validate_responses_output_schema(&schema)?;
@@ -163,7 +163,7 @@ fn protocol_definition_output_schema(
 ) -> Result<serde_json::Value, JSONRPCErrorError> {
     let bundle: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../app-server-protocol/schema/json/ClientRequest.json"
+        "/../app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json"
     )))
     .map_err(|err| invalid_params(format!("failed to load protocol schema bundle: {err}")))?;
     let definitions = bundle
