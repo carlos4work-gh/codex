@@ -310,17 +310,14 @@ async fn armed_one_shot_goal_completes_during_turn_stop() -> anyhow::Result<()> 
                 objective: GoalObjectiveUpdate::Set("complete one bounded assignment"),
                 status: Some(ThreadGoalStatus::Active),
                 token_budget: GoalTokenBudgetUpdate::Set(Some(10_000)),
+                max_goal_token_budget: None,
             },
         )
         .await?;
-    let armed_goal = runtime
-        .thread_goals()
-        .get_thread_goal(thread_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("goal should exist before arming"))?;
     harness
         .goal_service
-        .arm_completion_after_next_turn(thread_id, armed_goal.goal_id);
+        .arm_current_goal_completion_after_next_turn(runtime.as_ref(), thread_id)
+        .await?;
 
     harness
         .start_turn("turn-one-shot", &TokenUsage::default())
@@ -347,7 +344,7 @@ async fn armed_one_shot_goal_completes_during_turn_stop() -> anyhow::Result<()> 
 }
 
 #[tokio::test]
-async fn one_shot_arm_before_runtime_registration_is_applied_on_thread_start() -> anyhow::Result<()>
+async fn one_shot_arm_requires_runtime_registration_and_can_be_retried() -> anyhow::Result<()>
 {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
@@ -361,19 +358,22 @@ async fn one_shot_arm_before_runtime_registration_is_applied_on_thread_start() -
                 objective: GoalObjectiveUpdate::Set("complete provisioned parent intake"),
                 status: Some(ThreadGoalStatus::Active),
                 token_budget: GoalTokenBudgetUpdate::Set(Some(10_000)),
+                max_goal_token_budget: None,
             },
         )
         .await?;
-    let armed_goal = runtime
-        .thread_goals()
-        .get_thread_goal(thread_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("goal should exist before arming"))?;
-    goal_service.arm_completion_after_next_turn(thread_id, armed_goal.goal_id);
+    let error = goal_service
+        .arm_current_goal_completion_after_next_turn(runtime.as_ref(), thread_id)
+        .await
+        .expect_err("arming without a registered runtime must fail explicitly");
+    assert!(error.to_string().contains("goal runtime is unavailable"));
 
     let harness =
-        GoalExtensionHarness::new_with_goal_service(runtime.clone(), thread_id, goal_service)
+        GoalExtensionHarness::new_with_goal_service(runtime.clone(), thread_id, goal_service.clone())
             .await?;
+    goal_service
+        .arm_current_goal_completion_after_next_turn(runtime.as_ref(), thread_id)
+        .await?;
     harness
         .start_turn("turn-provisioned-parent", &TokenUsage::default())
         .await;
@@ -402,15 +402,19 @@ async fn one_shot_external_goal_mutation_cancels_pending_completion() -> anyhow:
                 objective: GoalObjectiveUpdate::Set("first bounded assignment"),
                 status: Some(ThreadGoalStatus::Active),
                 token_budget: GoalTokenBudgetUpdate::Set(Some(10_000)),
+                max_goal_token_budget: None,
             },
         )
         .await?;
-    let armed_goal = runtime
-        .thread_goals()
-        .get_thread_goal(thread_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("goal should exist before arming"))?;
-    goal_service.arm_completion_after_next_turn(thread_id, armed_goal.goal_id);
+    let harness = GoalExtensionHarness::new_with_goal_service(
+        runtime.clone(),
+        thread_id,
+        goal_service.clone(),
+    )
+    .await?;
+    goal_service
+        .arm_current_goal_completion_after_next_turn(runtime.as_ref(), thread_id)
+        .await?;
 
     goal_service
         .set_thread_goal(
@@ -420,13 +424,10 @@ async fn one_shot_external_goal_mutation_cancels_pending_completion() -> anyhow:
                 objective: GoalObjectiveUpdate::Set("replacement assignment after rollback"),
                 status: Some(ThreadGoalStatus::Active),
                 token_budget: GoalTokenBudgetUpdate::Keep,
+                max_goal_token_budget: None,
             },
         )
         .await?;
-
-    let harness =
-        GoalExtensionHarness::new_with_goal_service(runtime.clone(), thread_id, goal_service)
-            .await?;
     harness
         .start_turn("turn-after-cancel", &TokenUsage::default())
         .await;
