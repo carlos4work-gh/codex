@@ -2,6 +2,68 @@ use super::*;
 use codex_app_server_protocol::MemythosArenaCompositionContract;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
+#[tokio::test]
+async fn native_user_message_correlates_mailbox_delivery_to_actual_turn() {
+    let processor = MemythosRequestProcessor::new();
+    processor
+        .state
+        .lock()
+        .await
+        .arena_message_deliveries
+        .push(MemythosArenaMessageDelivery {
+            delivery_id: "delivery-1".to_string(),
+            message_id: "message-1".to_string(),
+            human_summary: "Review the settled contract.".to_string(),
+            status: "delivered".to_string(),
+            sender_thread_id: "sender".to_string(),
+            receiver_thread_id: "receiver".to_string(),
+            arena_id: "arena-1".to_string(),
+            round_id: "round-1".to_string(),
+            phase: Some("review".to_string()),
+            delivery_mechanism: "native_mailbox_trigger_turn".to_string(),
+            delivery_policy: None,
+            aggregate_id: None,
+            aggregate_state: None,
+            checkpoint_state: None,
+            checkpoint_event_refs: Vec::new(),
+            receiver_turn_id: Some("submission-1".to_string()),
+            receiver_response_event_ref: None,
+            delivered_as_human_instruction: false,
+            memory_replay_required: false,
+            event_refs: Vec::new(),
+            rejection_reason: None,
+            failure_reason: None,
+        });
+
+    assert!(
+        processor
+            .record_native_parent_user_message("receiver", "turn-native-1", "message-1", None,)
+            .await
+    );
+
+    let state = processor.state.lock().await;
+    assert_eq!(
+        state.arena_message_deliveries[0]
+            .receiver_turn_id
+            .as_deref(),
+        Some("turn-native-1")
+    );
+    let response = state
+        .native_parent_turn_responses
+        .get(&native_token_usage_key("receiver", "turn-native-1"))
+        .expect("actual turn response slot");
+    assert_eq!(
+        response.request_text.as_deref(),
+        Some("Review the settled contract.")
+    );
+    assert!(
+        response
+            .request_item_ref
+            .as_deref()
+            .is_some_and(|item_ref| item_ref.ends_with("/turns/turn-native-1/items/message-1"))
+    );
+}
+
 #[test]
 fn native_peer_bet_is_an_incremental_commitment_contract() {
     let prompt = native_bettor_checkpoint_prompt("peer_bet", "The sealed peer checkpoint follows.");

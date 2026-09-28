@@ -1,6 +1,47 @@
 use super::*;
 
 impl MemythosRequestProcessor {
+    pub(crate) async fn record_native_parent_user_message(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        client_id: Option<&str>,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        let mut matched_summaries = Vec::new();
+        for delivery in state
+            .arena_message_deliveries
+            .iter_mut()
+            .filter(|delivery| {
+                delivery.receiver_thread_id == thread_id
+                    && (delivery.message_id == item_id
+                        || client_id.is_some_and(|client_id| delivery.message_id == client_id))
+            })
+        {
+            delivery.receiver_turn_id = Some(turn_id.to_string());
+            matched_summaries.push(delivery.human_summary.clone());
+        }
+        let Some(request_text) = matched_summaries.into_iter().next() else {
+            return false;
+        };
+
+        let item_ref = format!("app-server://threads/{thread_id}/turns/{turn_id}/items/{item_id}");
+        let response = state
+            .native_parent_turn_responses
+            .entry(native_token_usage_key(thread_id, turn_id))
+            .or_insert_with(|| ParentTurnResponse {
+                status: None,
+                request_item_ref: None,
+                request_text: None,
+                item_ref: None,
+                text: None,
+            });
+        response.request_item_ref = Some(item_ref);
+        response.request_text = Some(request_text);
+        true
+    }
+
     pub(crate) async fn record_native_turn_started(
         &self,
         thread_id: &str,
