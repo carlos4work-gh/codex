@@ -20,6 +20,8 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_rollout::state_db::StateDbHandle;
+use codex_state::NativeMailboxCommunicationRecord;
+use codex_state::NativeMailboxInsertOutcome;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -226,19 +228,67 @@ impl PeerParentDeliveryAdapter for NativeMailboxPeerParentDeliveryAdapter {
             if message.from_parent_role == "human" {
                 return Ok(None);
             }
-            let (sender_thread_id, target_thread_id, communication) =
-                prepare_native_parent_mailbox_message(&self.thread_manager, message).await?;
+            let sender_thread_id = ThreadId::from_string(&message.from_parent_thread_id)
+                .map_err(|error| format!("invalid source parent thread id: {error}"))?;
+            let target_thread_id = ThreadId::from_string(&message.to_parent_thread_id)
+                .map_err(|error| format!("invalid target parent thread id: {error}"))?;
+            let communication =
+                if let Ok(target_thread) = self.thread_manager.get_thread(target_thread_id).await {
+                    let target_status = target_thread.agent_status().await;
+                    let trigger_turn =
+                        native_mailbox_wake_policy(&target_status, message.requires_response)?;
+                    build_native_parent_mailbox_communication(message, trigger_turn)
+                } else {
+                    build_native_parent_mailbox_communication(message, message.requires_response)
+                };
             let communication_json =
                 serde_json::to_string(&communication).map_err(|error| error.to_string())?;
-            self.thread_manager
-                .stage_inter_agent_communication(target_thread_id, &communication)
-                .await
-                .map_err(|error| error.to_string())?;
             let communication_id = communication
                 .id
                 .as_ref()
                 .expect("native Arena communication has a stable id")
                 .to_string();
+            if self
+                .thread_manager
+                .get_thread(target_thread_id)
+                .await
+                .is_ok()
+            {
+                self.thread_manager
+                    .stage_inter_agent_communication(target_thread_id, &communication)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            } else {
+                let state_db = self.state_db.as_ref().ok_or_else(|| {
+                    "cold native mailbox staging requires sqlite state".to_string()
+                })?;
+                let now = chrono::Utc::now().timestamp_millis();
+                let payload_hash =
+                    format!("sha256:{:x}", Sha256::digest(communication_json.as_bytes()));
+                let outcome = state_db
+                    .insert_pending_native_mailbox_communication(
+                        &NativeMailboxCommunicationRecord {
+                            receiver_thread_id: target_thread_id.to_string(),
+                            communication_id: communication_id.clone(),
+                            source_call_id: Some(communication_id.clone()),
+                            submission_id: None,
+                            communication_json: communication_json.clone(),
+                            payload_hash,
+                            status: "pending".to_string(),
+                            attempt_count: 0,
+                            failure_fingerprint: None,
+                            last_progress_ref: None,
+                            quarantine_reason: None,
+                            created_at_ms: now,
+                            updated_at_ms: now,
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if outcome == NativeMailboxInsertOutcome::Existing {
+                    // The durable mailbox owns idempotency for a resumed parent.
+                }
+            }
             let _ = sender_thread_id;
             Ok(Some(PeerParentStagedEffect {
                 source_call_id: communication_id.clone(),
@@ -527,6 +577,16 @@ async fn prepare_native_parent_mailbox_message(
         Ok(trigger_turn) => trigger_turn,
         Err(reason) => return Err(reason),
     };
+    let communication = build_native_parent_mailbox_communication(message, trigger_turn);
+    let sender_thread_id = ThreadId::from_string(&message.from_parent_thread_id)
+        .map_err(|error| format!("invalid source parent thread id: {error}"))?;
+    Ok((sender_thread_id, target_thread_id, communication))
+}
+
+fn build_native_parent_mailbox_communication(
+    message: &MemythosArenaMessage,
+    trigger_turn: bool,
+) -> InterAgentCommunication {
     let mut communication = InterAgentCommunication::new(
         AgentPath::root(),
         AgentPath::root(),
@@ -535,9 +595,7 @@ async fn prepare_native_parent_mailbox_message(
         trigger_turn,
     );
     communication.id = Some(ResponseItemId::from_server(message.message_id.clone()));
-    let sender_thread_id = ThreadId::from_string(&message.from_parent_thread_id)
-        .map_err(|error| format!("invalid source parent thread id: {error}"))?;
-    Ok((sender_thread_id, target_thread_id, communication))
+    communication
 }
 
 fn successful_native_mailbox_delivery_attempt(
